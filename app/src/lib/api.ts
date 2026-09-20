@@ -52,3 +52,26 @@ export async function fetchDatasetStatus(): Promise<DatasetStatus | null> {
     return null;
   }
 }
+
+export interface PixelSpectrum {
+  tissue: string; x: number; y: number;
+  mz: number[]; intensity: number[];
+}
+
+export async function fetchPixelSpectrum(tissue: string, x: number, y: number): Promise<PixelSpectrum> {
+  const r = await fetch(`${BASE}/pixel_spectrum?tissue=${tissue}&x=${x}&y=${y}`);
+  if (!r.ok) throw new Error(`API error ${r.status}`);
+  return r.json();
+}
+
+export interface TissuePixelMap {
+  tissue: string; xs: number[]; ys: number[]; values: number[];
+}
+
+export async function fetchTissuePixelMap(tissue: string, mz?: number, tol?: number): Promise<TissuePixelMap> {
+  const params = new URLSearchParams({ tissue });
+  if (mz !== undefined) { params.set("mz", mz.toString()); params.set("tol", (tol ?? 0.3).toString()); }
+  const r = await fetch(`${BASE}/tissue_pixel_map?${params}`);
+  if (!r.ok) throw new Error(`API error ${r.status}`);
+  return r.json();
+}

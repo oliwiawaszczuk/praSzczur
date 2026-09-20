@@ -484,7 +484,10 @@ def ion_image(mz: float, tol: float = 0.3) -> dict:
         spectra   = d["spectra"]
         coords    = d["coords"]
 
-        mask = np.abs(mz_bins - mz) <= tol
+        # Gwarantuj, że zapytanie trafi w co najmniej jeden bin
+        bin_size = float(mz_bins[1] - mz_bins[0]) if len(mz_bins) > 1 else 0.0
+        effective_tol = max(tol, bin_size / 2.0)
+        mask = np.abs(mz_bins - mz) <= effective_tol
         intensities = spectra[:, mask].sum(axis=1).astype(np.float64) if mask.any() \
                       else np.zeros(len(coords), dtype=np.float64)
 
@@ -632,6 +635,51 @@ async def process(body: dict) -> StreamingResponse:
 def _sse(event: str, data: dict) -> str:
     import json as _json
     return f"event: {event}\ndata: {_json.dumps(data)}\n\n"
+
+
+# ── Pixel spectrum ─────────────────────────────────────────────────────────
+@app.get("/pixel_spectrum")
+def pixel_spectrum(tissue: str, x: int, y: int) -> dict:
+    """Zwraca pełne widmo binned dla piksela (x, y) w tkance."""
+    if tissue not in _cache:
+        raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
+    d = _cache[tissue]
+    coords = d["coords"]
+    mask = (coords[:, 0] == x) & (coords[:, 1] == y)
+    idx = np.where(mask)[0]
+    if len(idx) == 0:
+        raise HTTPException(404, f"Brak piksela ({x},{y}) w tkance '{tissue}'")
+    spectrum = d["spectra"][idx[0]].tolist()
+    mz_bins  = d["mz_bins"].tolist()
+    return {"tissue": tissue, "x": x, "y": y, "mz": mz_bins, "intensity": spectrum}
+
+
+# ── Tissue pixel map for Widma tab ────────────────────────────────────────
+@app.get("/tissue_pixel_map")
+def tissue_pixel_map(tissue: str, mz: float = -1.0, tol: float = 0.3) -> dict:
+    """Zwraca listę pikseli tkanki z opcjonalną intensywnością jonu (mz±tol)."""
+    if tissue not in _cache:
+        raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
+    d = _cache[tissue]
+    coords  = d["coords"]
+    mz_bins = d["mz_bins"]
+    xs = coords[:, 0].tolist()
+    ys = coords[:, 1].tolist()
+    if mz > 0:
+        bin_size = float(mz_bins[1] - mz_bins[0]) if len(mz_bins) > 1 else 0.0
+        effective_tol = max(tol, bin_size / 2.0)
+        mask = np.abs(mz_bins - mz) <= effective_tol
+        if mask.any():
+            intensities = d["spectra"][:, mask].sum(axis=1)
+        else:
+            intensities = np.zeros(len(coords), dtype=np.float32)
+        vmax = float(intensities.max()) if intensities.max() > 0 else 1.0
+        values = (intensities / vmax).tolist()
+    else:
+        tic = d["spectra"].sum(axis=1).astype(np.float32)
+        vmax = float(tic.max()) if tic.max() > 0 else 1.0
+        values = (tic / vmax).tolist()
+    return {"tissue": tissue, "xs": xs, "ys": ys, "values": values}
 
 
 if __name__ == "__main__":

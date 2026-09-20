@@ -14,6 +14,7 @@
     ondisprange?: (min: number, max: number) => void;
     mzMin?: number;
     mzMax?: number;
+    tolDefault?: number;
   }
 
   let {
@@ -25,6 +26,7 @@
     ondisprange,
     mzMin = 0,
     mzMax = Infinity,
+    tolDefault = 0.3,
   }: Props = $props();
 
   interface MzEntry { name: string; mz: number; }
@@ -43,10 +45,11 @@
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch {}
   }
 
-  const DEFAULT_TOL = 0.3;
   let mzInput    = $state("");
-  let tol        = $state(DEFAULT_TOL);
+  let tol        = $state(tolDefault);
   let mzError    = $state("");
+
+  $effect(() => { tol = tolDefault; });
   let mzList     = $state<MzEntry[]>(loadList());
   let selectedIdx = $state<number | null>(null);
   let newName    = $state("");

@@ -5,6 +5,7 @@
   import IonGrid from "$lib/IonGrid.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import DaneTab from "$lib/DaneTab.svelte";
+  import Widma from "$lib/Widma.svelte";
   import "@fontsource/jetbrains-mono/400.css";
   import "@fontsource/jetbrains-mono/600.css";
 
@@ -30,6 +31,10 @@
   let activeTab: Tab = $state("dane");
   let mzMin        = $state(0);
   let mzMax        = $state(Infinity);
+  let tissueIds    = $state<string[]>([]);
+  let lastMz       = $state<number | null>(null);
+  let lastTol      = $state(0.3);
+  let defaultTol   = $state(0.3);
 
   onMount(async () => {
     const tick = setInterval(() => {
@@ -44,6 +49,12 @@
       if (ds && ds.mz_min > 0 && ds.mz_max > 0) {
         mzMin = ds.mz_min;
         mzMax = ds.mz_max;
+        tissueIds = (ds as any).npz_files?.map((f: any) => f.id) ?? [];
+        if (ds.n_bins > 1) {
+          const binSize = (ds.mz_max - ds.mz_min) / (ds.n_bins - 1);
+          defaultTol = Math.round(binSize * 100) / 100;
+          lastTol = defaultTol;
+        }
       }
     } catch (e) {
       errorMsg = (e as Error).message;
@@ -56,6 +67,8 @@
   async function handleQuery({ mz, tol }: { mz: number; tol: number }) {
     queryLoading = true;
     queryError = "";
+    lastMz = mz;
+    lastTol = tol;
     try {
       const res = await fetchIonImage(mz, tol);
       tissues = res.tissues;
@@ -131,12 +144,8 @@
           <div class="tp-sub">Normalizacja, korekcja bazowej linii, redukcja szumu — parametry przetwarzania wstępnego widm.</div>
         </div>
       </main>
-      <main class="content full-tab" class:hidden={activeTab !== "widma"}>
-        <div class="tab-placeholder">
-          <div class="tp-icon">〜</div>
-          <div class="tp-title">Widma</div>
-          <div class="tp-sub">Przeglądarka widm masowych — porównanie profili między tkankami i pikselami.</div>
-        </div>
+      <main class="content" class:hidden={activeTab !== "widma"}>
+        <Widma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "segmentacja"}>
         <div class="tab-placeholder">
@@ -159,6 +168,7 @@
         ondisprange={(mn, mx) => { dispMin = mn; dispMax = mx; }}
         {mzMin}
         {mzMax}
+        tolDefault={defaultTol}
       />
     </div>
 
