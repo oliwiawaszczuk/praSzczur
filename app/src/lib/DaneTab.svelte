@@ -10,6 +10,7 @@
     x_min: number; x_max: number;
     y_min?: number; y_max?: number;
     n_spectra?: number; is_ref: boolean;
+    enabled?: boolean;
   }
   interface DetectionResult {
     detected: TissueMeta[];
@@ -27,6 +28,11 @@
     mz_min: number; mz_max: number; n_bins: number;
   }
 
+  interface Props {
+    onlabelschange?: (labels: Record<string, string>) => void;
+  }
+  let { onlabelschange }: Props = $props();
+
   // ── State ────────────────────────────────────────────────────────────────
   let imzmlPath    = $state("source/FMP10_Rat_brain_breg_084.imzML");
   let fileInfo     = $state<{width:number;height:number}|null>(null);
@@ -39,9 +45,21 @@
 
   let spectrumData    = $state<{mz:number[];intensity:number[];mz_min:number;mz_max:number}|null>(null);
   let loadingSpectrum = $state(false);
+  // ── Persistence helpers ───────────────────────────────────────────────────
+  function lsGet<T>(key: string, fallback: T): T {
+    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+  }
+  function lsSet(key: string, val: unknown) {
+    try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+  }
+
   let mzMin   = $state(300);
   let mzMax   = $state(1500);
   let binSize = $state(0.3);
+
+  $effect(() => { lsSet("dane_mzMin", mzMin); });
+  $effect(() => { lsSet("dane_mzMax", mzMax); });
+  $effect(() => { lsSet("dane_binSize", binSize); });
   const nBins = $derived(Math.floor((mzMax - mzMin) / binSize));
 
   // Widok widma — null = pełny zakres danych
@@ -82,15 +100,47 @@
 
   // ── On mount ─────────────────────────────────────────────────────────────
   onMount(async () => {
+    // Restore persisted settings (must be in onMount — localStorage unavailable during SSR)
+    mzMin   = lsGet("dane_mzMin", 300);
+    mzMax   = lsGet("dane_mzMax", 1500);
+    binSize = lsGet("dane_binSize", 0.3);
+
     await refreshStatus();
-    try {
-      const r = await fetch(`${BASE}/default_tissues`);
-      if (r.ok) {
-        const d = await r.json();
-        if (tissues.length === 0 && d.tissues?.length > 0) tissues = d.tissues;
-      }
-    } catch {}
+    // Auto-reload detection data so UI shows previous state
+    if (imzmlPath) {
+      try { await loadFile(); } catch {}
+    } else {
+      // Fallback: load from default_tissues if no file path
+      try {
+        const r = await fetch(`${BASE}/default_tissues`);
+        if (r.ok) {
+          const d = await r.json();
+          if (tissues.length === 0 && d.tissues?.length > 0) {
+            const savedLabels: Record<string,string> = lsGet("dane_tissueLabels", {});
+            const savedEnabled: Record<string,boolean> = lsGet("dane_tissueEnabled", {});
+            tissues = d.tissues.map((t: TissueMeta) => ({
+              ...t,
+              label:   savedLabels[t.id] ?? t.label,
+              enabled: savedEnabled[t.id] ?? true,
+            }));
+            // Notify parent of restored labels
+            const labels: Record<string,string> = {};
+            tissues.forEach(t => { labels[t.id] = t.label; });
+            onlabelschange?.(labels);
+          }
+        }
+      } catch {}
+    }
   });
+
+  function saveTissueLabels() {
+    const labels: Record<string,string> = {};
+    const enabled: Record<string,boolean> = {};
+    tissues.forEach(t => { labels[t.id] = t.label; enabled[t.id] = t.enabled ?? true; });
+    lsSet("dane_tissueLabels", labels);
+    lsSet("dane_tissueEnabled", enabled);
+    onlabelschange?.(labels);
+  }
 
   async function refreshStatus() {
     try {
@@ -119,8 +169,18 @@
       }
       const d: DetectionResult = await r.json();
       detectionData = d;
-      tissues = d.detected.map((t,i) => ({ ...t, is_ref: i===0 }));
+      const savedLabels: Record<string,string> = lsGet("dane_tissueLabels", {});
+      const savedEnabled: Record<string,boolean> = lsGet("dane_tissueEnabled", {});
+      tissues = d.detected.map((t,i) => ({
+        ...t, is_ref: i===0,
+        label:   savedLabels[t.id] ?? t.label,
+        enabled: savedEnabled[t.id] ?? true,
+      }));
       fileInfo = { width: d.width, height: d.height };
+      // Notify parent with restored/current labels
+      const labels: Record<string,string> = {};
+      tissues.forEach(t => { labels[t.id] = t.label; });
+      onlabelschange?.(labels);
       const t1 = d.detected[0];
       loadSpectrum(t1?.x_min, t1?.x_max);
     } catch (e) {
@@ -160,7 +220,7 @@
       const resp = await fetch(`${BASE}/process`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bin_size: binSize, mz_min: mzMin, mz_max: mzMax, tissues, imzml_path: imzmlPath }),
+        body: JSON.stringify({ bin_size: binSize, mz_min: mzMin, mz_max: mzMax, tissues: tissues.filter(t => t.enabled !== false), imzml_path: imzmlPath }),
       });
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
@@ -211,14 +271,38 @@
     const yOff = detectionData.y_offset;
     tissues.forEach((t,i) => {
       const color = TISSUE_COLORS[i%TISSUE_COLORS.length];
+      const disabled = t.enabled === false;
       const px0=t.x_min-xOff, px1=t.x_max-xOff;
       const py0=(t.y_min != null ? t.y_min-yOff : 0);
       const py1=(t.y_max != null ? t.y_max-yOff : H-1);
-      ctx.fillStyle=color+"50"; ctx.fillRect(px0,py0,px1-px0+1,py1-py0+1);
-      ctx.strokeStyle=color; ctx.lineWidth=1.5;
-      ctx.strokeRect(px0+0.5,py0+0.5,px1-px0,py1-py0);
+      if (disabled) {
+        ctx.fillStyle="rgba(0,0,0,0.55)"; ctx.fillRect(px0,py0,px1-px0+1,py1-py0+1);
+        ctx.strokeStyle="rgba(120,120,120,0.4)"; ctx.lineWidth=1;
+        ctx.strokeRect(px0+0.5,py0+0.5,px1-px0,py1-py0);
+      } else {
+        ctx.fillStyle=color+"50"; ctx.fillRect(px0,py0,px1-px0+1,py1-py0+1);
+        ctx.strokeStyle=color; ctx.lineWidth=1.5;
+        ctx.strokeRect(px0+0.5,py0+0.5,px1-px0,py1-py0);
+      }
     });
   });
+
+  function onTicClick(e: MouseEvent) {
+    if (!ticCanvas || !detectionData) return;
+    const rect = ticCanvas.getBoundingClientRect();
+    const scaleX = detectionData.width  / rect.width;
+    const scaleY = detectionData.height / rect.height;
+    const cx = detectionData.x_offset + Math.floor((e.clientX - rect.left)  * scaleX);
+    const cy = detectionData.y_offset + Math.floor((e.clientY - rect.top)   * scaleY);
+    const idx = tissues.findIndex(t => {
+      const y0 = t.y_min ?? detectionData!.y_offset;
+      const y1 = t.y_max ?? (detectionData!.y_offset + detectionData!.height - 1);
+      return cx >= t.x_min && cx <= t.x_max && cy >= y0 && cy <= y1;
+    });
+    if (idx < 0) return;
+    tissues[idx] = { ...tissues[idx], enabled: tissues[idx].enabled !== false ? false : true };
+    saveTissueLabels();
+  }
 
   // ── Canvas: profil X ─────────────────────────────────────────────────────
   $effect(() => {
@@ -521,7 +605,7 @@
 
         {#if detectionData}
           <div class="tic-wrap">
-            <canvas bind:this={ticCanvas} class="tic-canvas"></canvas>
+            <canvas bind:this={ticCanvas} class="tic-canvas" onclick={onTicClick} style="cursor:pointer"></canvas>
             <div class="tic-labels-abs">
               {#each tissues as t, i}
                 {@const xPct=((t.x_min-detectionData.x_offset)/detectionData.width)*100}
@@ -546,10 +630,35 @@
         {#if tissues.length > 0}
           <div class="tissue-chips">
             {#each tissues as t, i}
-              <div class="tissue-chip" style="border-color:{TISSUE_COLORS[i%TISSUE_COLORS.length]}">
-                <span class="chip-label">{t.label}</span>
+              <div
+                class="tissue-chip"
+                class:chip-disabled={t.enabled === false}
+                style="border-color:{TISSUE_COLORS[i%TISSUE_COLORS.length]}"
+              >
+                <input
+                  class="chip-name-input"
+                  type="text"
+                  value={t.label}
+                  onclick={(e) => e.stopPropagation()}
+                  onchange={(e) => {
+                    const el = e.target as HTMLInputElement;
+                    const newVal = el.value.trim();
+                    if (!newVal) { el.value = t.label; return; }
+                    if (tissues.some((other, j) => j !== i && other.label === newVal)) {
+                      el.value = t.label;
+                      el.setCustomValidity(`Nazwa "${newVal}" jest już zajęta`);
+                      el.reportValidity();
+                      setTimeout(() => el.setCustomValidity(""), 3000);
+                      return;
+                    }
+                    tissues[i] = { ...t, label: newVal };
+                    saveTissueLabels();
+                  }}
+                  style="color:{TISSUE_COLORS[i%TISSUE_COLORS.length]}"
+                />
                 <span class="chip-range">x {t.x_min}–{t.x_max}{#if t.y_min != null}, y {t.y_min}–{t.y_max}{/if}</span>
                 {#if t.is_ref}<span class="chip-star">★</span>{/if}
+                {#if t.enabled === false}<span class="chip-off">off</span>{/if}
               </div>
             {/each}
           </div>
@@ -602,9 +711,10 @@
           {#if status && status.npz_files.length > 0}
             <div class="npz-panel">
               {#each status.npz_files as f, i}
+                {@const customName = tissues.find(t => t.id === f.id)?.label}
                 <div class="npz-row">
                   <div class="npz-dot" style="background:{TISSUE_COLORS[i%TISSUE_COLORS.length]}"></div>
-                  <span class="npz-name">{f.filename}</span>
+                  <span class="npz-name">{customName ?? f.filename}</span>
                   <span class="npz-meta">{f.size_mb} MB</span>
                 </div>
               {/each}
@@ -659,7 +769,7 @@
   <div class="card step-card step3-full">
     <div class="step-header">
       <span class="step-num">3</span>
-      <span class="step-title">Parametry preprocessingu — widmo T1</span>
+      <span class="step-title">Parametry preprocessingu — widmo {tissues[0]?.label ?? "T1"}</span>
       {#if spectrumData}
         <span class="badge">m/z {spectrumData.mz_min.toFixed(0)}–{spectrumData.mz_max.toFixed(0)} Da</span>
       {/if}
@@ -846,13 +956,24 @@
   }
   .tissue-chip {
     display: flex; align-items: center; gap: 4px;
-    padding: 2px 7px;
+    padding: 5px 9px;
     background: rgba(255,255,255,0.03);
     border: 1px solid; border-radius: 5px; font-size: 0.6rem;
+    transition: opacity 0.15s;
+    user-select: none;
   }
-  .chip-label { font-weight: 600; color: #f0f0f0; }
+  .tissue-chip.chip-disabled { opacity: 0.35; background: rgba(0,0,0,0.2); }
+
+  .chip-name-input {
+    background: transparent; border: none; outline: none;
+    font-family: inherit; font-size: inherit; font-weight: 600;
+    width: 60px; cursor: text; padding: 0;
+  }
+  .chip-name-input:focus { border-bottom: 1px solid rgba(255,255,255,0.3); }
+
   .chip-range { color: rgba(255,255,255,0.3); }
   .chip-star  { color: #ffc951; }
+  .chip-off   { color: rgba(255,100,100,0.7); font-size: 0.55rem; }
 
   /* ── Spectrum (krok 3) ──────────────────────────────────────────────────── */
   .spec-wrap {
@@ -896,9 +1017,20 @@
     direction: rtl;
     width: 18px;
     height: 100%;
-    accent-color: #ffc951;
     cursor: pointer;
     flex: 1;
+    -webkit-appearance: none; appearance: none;
+    background: #3a3a3a; border-radius: 2px; outline: none; border: none;
+  }
+  .slider-vert::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 13px; height: 13px; border-radius: 50%;
+    background: #ffc951; cursor: pointer; border: none;
+    box-shadow: 0 0 4px rgba(255,201,81,0.4);
+  }
+  .slider-vert::-moz-range-thumb {
+    width: 13px; height: 13px; border-radius: 50%;
+    background: #ffc951; cursor: pointer; border: none;
   }
 
   .bin-sliders {
@@ -910,7 +1042,35 @@
   }
 
   .slider-ctrl {
-    flex: 1; accent-color: #ffc951; height: 3px; cursor: pointer;
+    flex: 1; cursor: pointer;
+    -webkit-appearance: none; appearance: none;
+    height: 13px;
+    background: transparent;
+    outline: none; border: none;
+    padding: 0; margin: 0;
+  }
+  .slider-ctrl::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 13px; height: 13px;
+    border-radius: 50%;
+    background: #ffc951;
+    cursor: pointer;
+    border: none;
+    box-shadow: 0 0 4px rgba(255,201,81,0.4);
+    margin-top: -4.5px;
+  }
+  .slider-ctrl::-moz-range-thumb {
+    width: 13px; height: 13px;
+    border-radius: 50%;
+    background: #ffc951;
+    cursor: pointer;
+    border: none;
+  }
+  .slider-ctrl::-webkit-slider-runnable-track {
+    background: #3a3a3a; border-radius: 2px; height: 4px;
+  }
+  .slider-ctrl::-moz-range-track {
+    background: #3a3a3a; border-radius: 2px; height: 4px;
   }
 
   .slider-val {

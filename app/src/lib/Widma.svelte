@@ -4,13 +4,25 @@
   import { fetchTissuePixelMap, fetchPixelSpectrum } from "./api.js";
   import type { TissuePixelMap, PixelSpectrum } from "./api.js";
 
+  const LS_LAYERS = "widma_layers";
+  const LS_NORM   = "widma_norm";
+  const LS_TISSUE = "widma_tissue";
+
+  interface SavedLayer { tissue: string; x: number; y: number; label: string; color: string; visible: boolean; locked: boolean; }
+
+  function lsGet<T>(k: string, fb: T): T { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } }
+  function lsSet(k: string, v: unknown) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+
   interface Props {
-    tissues?: string[];       // lista dostępnych tkanek (id)
-    activeMz?: number | null; // aktualnie wybrane m/z z zakładki m/z
+    tissues?: string[];
+    activeMz?: number | null;
     activeTol?: number;
+    tissueLabels?: Record<string, string>;
   }
 
-  let { tissues = [], activeMz = null, activeTol = 0.3 }: Props = $props();
+  let { tissues = [], activeMz = null, activeTol = 0.3, tissueLabels = {} }: Props = $props();
+
+  function tLabel(id: string): string { return tissueLabels[id] || id; }
 
   // ── Stan ─────────────────────────────────────────────────────────────────
   interface Layer {
@@ -36,6 +48,39 @@
 
   // drag-to-reorder
   let dragIdx         = $state<number | null>(null);
+
+  // Persist (write-only effects — safe in browser)
+  $effect(() => { lsSet(LS_TISSUE, selectedTissue); });
+  $effect(() => { lsSet(LS_NORM, normMode); });
+  $effect(() => {
+    if (layers.length === 0) return;
+    const saved: SavedLayer[] = layers.map(l => ({
+      tissue: l.spectrum.tissue, x: l.spectrum.x, y: l.spectrum.y,
+      label: l.label, color: l.color, visible: l.visible, locked: l.locked,
+    }));
+    lsSet(LS_LAYERS, saved);
+  });
+
+  // Restore all from localStorage in onMount (browser-only)
+  onMount(async () => {
+    const savedTissue = lsGet<string>(LS_TISSUE, "");
+    if (savedTissue) selectedTissue = savedTissue;
+    normMode = lsGet<"none"|"max"|"tic">(LS_NORM, "none");
+
+    const saved = lsGet<SavedLayer[]>(LS_LAYERS, []);
+    if (saved.length === 0) return;
+    layerLoading = true;
+    try {
+      const restored: Layer[] = [];
+      for (const s of saved) {
+        try {
+          const spec = await fetchPixelSpectrum(s.tissue, s.x, s.y);
+          restored.push({ id: `${s.tissue}_${s.x}_${s.y}`, label: s.label, color: s.color, visible: s.visible, locked: s.locked, spectrum: spec });
+        } catch {}
+      }
+      layers = restored;
+    } finally { layerLoading = false; }
+  });
 
   // ── Ładowanie mapy pikseli ────────────────────────────────────────────────
   async function loadMap() {
@@ -135,7 +180,7 @@
       const color = COLORS[layers.length % COLORS.length];
       layers = [...layers, {
         id:      `${selectedTissue}_${x}_${y}`,
-        label:   `${selectedTissue} (${x},${y})`,
+        label:   `${tLabel(selectedTissue)} (${x},${y})`,
         color,
         visible: true,
         locked:  false,
@@ -284,7 +329,7 @@
         <span class="panel-title">Mapa pikseli</span>
         <select class="tissue-select" bind:value={selectedTissue}>
           {#each tissues as t}
-            <option value={t}>{t}</option>
+            <option value={t}>{tLabel(t)}</option>
           {/each}
         </select>
         {#if mapLoading}<span class="loading-dot">●</span>{/if}

@@ -8,10 +8,17 @@
     dispMin?: number;
     dispMax?: number;
     error?: string;
+    tissueLabels?: Record<string, string>;
   }
-  let { tissues = null, loading = false, dispMin = 0, dispMax = 1, error = "" }: Props = $props();
+  let { tissues = null, loading = false, dispMin = 0, dispMax = 1, error = "", tissueLabels = {} }: Props = $props();
 
   const keys = $derived(tissues ? Object.keys(tissues) : ["", "", "", ""]);
+
+  function withLabel(tid: string, t: TissueImage | null): TissueImage | null {
+    if (!t) return null;
+    const custom = tissueLabels[tid];
+    return custom ? { ...t, label: custom } : t;
+  }
 </script>
 
 <div class="grid-wrap">
@@ -28,7 +35,7 @@
   {:else}
     <div class="grid">
       {#each keys as key}
-        <IonCanvas tissue={tissues?.[key] ?? null} {loading} {dispMin} {dispMax} />
+        <IonCanvas tissue={withLabel(key, tissues?.[key] ?? null)} {loading} {dispMin} {dispMax} />
       {/each}
     </div>
   {/if}

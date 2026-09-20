@@ -28,15 +28,30 @@
   let bootProgress = $state(0);
   let dispMin      = $state(0);
   let dispMax      = $state(1);
-  let activeTab: Tab = $state("dane");
-  let mzMin        = $state(0);
-  let mzMax        = $state(Infinity);
-  let tissueIds    = $state<string[]>([]);
-  let lastMz       = $state<number | null>(null);
-  let lastTol      = $state(0.3);
-  let defaultTol   = $state(0.3);
+  function lsGet<T>(key: string, fb: T): T { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fb; } catch { return fb; } }
+  function lsSet(key: string, v: unknown) { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }
+
+  let activeTab: Tab   = $state("dane");
+  let mzMin            = $state(0);
+  let mzMax            = $state(Infinity);
+  let tissueIds        = $state<string[]>([]);
+  let tissueLabels     = $state<Record<string,string>>({});
+  let lastMz           = $state<number | null>(null);
+  let lastTol          = $state(0.3);
+  let defaultTol       = $state(0.3);
+
+  // Persist to localStorage (only write, browser-only)
+  $effect(() => { lsSet("app_activeTab", activeTab); });
+  $effect(() => { if (lastMz !== null) lsSet("app_lastMz", lastMz); });
+  $effect(() => { lsSet("app_lastTol", lastTol); });
 
   onMount(async () => {
+    // Load all persisted state — must be in onMount (localStorage unavailable during SSR/build)
+    activeTab    = lsGet<Tab>("app_activeTab", "dane");
+    tissueLabels = lsGet("dane_tissueLabels", {});
+    lastMz       = lsGet("app_lastMz", null);
+    lastTol      = lsGet("app_lastTol", 0.3);
+
     const tick = setInterval(() => {
       bootProgress = Math.min(bootProgress + 3, 85);
     }, 200);
@@ -53,8 +68,10 @@
         if (ds.n_bins > 1) {
           const binSize = (ds.mz_max - ds.mz_min) / (ds.n_bins - 1);
           defaultTol = Math.round(binSize * 100) / 100;
-          lastTol = defaultTol;
+          if (!localStorage.getItem("app_lastTol")) lastTol = defaultTol;
         }
+        // Auto-restore last m/z query
+        if (lastMz !== null) handleQuery({ mz: lastMz, tol: lastTol });
       }
     } catch (e) {
       errorMsg = (e as Error).message;
@@ -78,7 +95,6 @@
         tissues = null;
       }
     } catch (e) {
-      // Show inline error — don't crash the whole app to error screen
       queryError = (e as Error).message.includes("503")
         ? "Brak przetworzonych danych. Uruchom preprocessing w zakładce Dane."
         : (e as Error).message;
@@ -132,10 +148,10 @@
 
       <!-- Content zakładki — zawsze zamontowane, ukrywane przez CSS -->
       <main class="content" class:hidden={activeTab !== "dane"}>
-        <DaneTab />
+        <DaneTab onlabelschange={(labels) => { tissueLabels = { ...labels }; }} />
       </main>
       <main class="content" class:hidden={activeTab !== "mz"}>
-        <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} error={queryError} />
+        <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} error={queryError} {tissueLabels} />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "preprocessing"}>
         <div class="tab-placeholder">
@@ -145,7 +161,7 @@
         </div>
       </main>
       <main class="content" class:hidden={activeTab !== "widma"}>
-        <Widma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} />
+        <Widma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "segmentacja"}>
         <div class="tab-placeholder">
