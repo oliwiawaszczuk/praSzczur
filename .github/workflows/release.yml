@@ -110,13 +110,28 @@ jobs:
       - name: Install frontend dependencies
         run: cd app && pnpm install
 
-      - name: Build Tauri application
+      - name: Build Tauri application (macOS — app only, skip DMG)
+        if: runner.os == 'macOS'
+        run: cd app && pnpm tauri build --bundles app -- --features pyinstaller-sidecar
+        env:
+          PRASZCZUR_ROOT: ${{ github.workspace }}
+
+      - name: Build Tauri application (Windows / Linux)
+        if: runner.os != 'macOS'
         run: cd app && pnpm tauri build -- --features pyinstaller-sidecar
         env:
           # PRASZCZUR_ROOT is only read by build.rs for local dev (non-pyinstaller builds).
           # Set to workspace root so build.rs does not error; the runtime value is
           # app_data_dir() when pyinstaller-sidecar feature is active.
           PRASZCZUR_ROOT: ${{ github.workspace }}
+
+      # ── macOS: zip the .app for distribution ────────────────────────────────
+      - name: Zip macOS .app
+        if: runner.os == 'macOS'
+        run: |
+          cd app/src-tauri/target/release/bundle/macos
+          zip -r praSzczur-macOS-aarch64.zip praSzczur.app
+        shell: bash
 
       # ── List built artifacts for debugging ──────────────────────────────────
       - name: List bundle output
@@ -131,8 +146,7 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            app/src-tauri/target/release/bundle/macos/*.dmg
-            app/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            app/src-tauri/target/release/bundle/macos/*.zip
             app/src-tauri/target/release/bundle/nsis/*.exe
             app/src-tauri/target/release/bundle/msi/*.msi
             app/src-tauri/target/release/bundle/appimage/*.AppImage
