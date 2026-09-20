@@ -6,6 +6,9 @@ on:
     tags:
       - 'v*.*.*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -115,13 +118,18 @@ jobs:
           # app_data_dir() when pyinstaller-sidecar feature is active.
           PRASZCZUR_ROOT: ${{ github.workspace }}
 
+      # ── List built artifacts for debugging ──────────────────────────────────
+      - name: List bundle output
+        if: always()
+        run: find app/src-tauri/target/release/bundle -type f 2>/dev/null || echo "bundle dir not found"
+        shell: bash
+
       # ── Upload release artifacts ─────────────────────────────────────────────
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
         with:
           draft: false
           prerelease: false
-          generate_release_notes: true
           files: |
             app/src-tauri/target/release/bundle/macos/*.dmg
             app/src-tauri/target/release/bundle/macos/*.app.tar.gz
