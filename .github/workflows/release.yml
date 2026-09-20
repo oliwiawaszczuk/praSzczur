@@ -65,7 +65,7 @@ jobs:
 
       - name: Build PyInstaller sidecar
         run: |
-          pyinstaller app/sidecar/sidecar.spec --distpath app/sidecar/dist --workpath /tmp/pyinstaller_work
+          pyinstaller app/sidecar/sidecar.spec --distpath app/sidecar/dist --workpath _pyinstaller_work
         shell: bash
 
       - name: Copy sidecar binary to sidecar directory
