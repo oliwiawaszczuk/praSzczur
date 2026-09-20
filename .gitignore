@@ -1,0 +1,52 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.app
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+*.spec.bak
+
+# PyInstaller outputs (CI-generated, not committed)
+app/sidecar/sidecar
+app/sidecar/sidecar.exe
+app/sidecar/dist/
+app/sidecar/build/
+app/sidecar/__pycache__/
+
+# Node / pnpm
+node_modules/
+app/node_modules/
+
+# SvelteKit / Vite
+app/build/
+app/.svelte-kit/
+
+# Rust / Cargo
+app/src-tauri/target/
+app/src-tauri/gen/schemas/
+
+# Large data files — bring your own imzML
+source/
+data/processed/
+
+# IDE
+.idea/
+.vscode/
+
+# Claude Code local settings (developer-specific)
+.claude/settings.local.json
+
+# Logs
+sidecar.log
+*.log
+
+# uv lock (optional — uncomment if you want to pin deps)
+# uv.lock
