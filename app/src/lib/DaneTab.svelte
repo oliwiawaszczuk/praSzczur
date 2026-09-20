@@ -473,7 +473,7 @@
         const r = await fetch(`${BASE}/spectrum_window?path=${encodeURIComponent(imzmlPath)}&mz_lo=${lo}&mz_hi=${hi}&n_avg=10`);
         if (r.ok) binWinData = await r.json();
       } catch {} finally { binWinLoading = false; }
-    }, 120);
+    }, 400);
   });
 
   // ── Canvas: bin size zoom ─────────────────────────────────────────────────
@@ -486,8 +486,9 @@
   function drawBinPreview() {
     if (!binCanvas) return;
     const ctx = binCanvas.getContext("2d"); if (!ctx) return;
-    const rect = binCanvas.getBoundingClientRect();
-    const W = rect.width||300, H = rect.height||200;
+    const W = binCanvas.offsetWidth || binCanvas.width || 300;
+    const H = binCanvas.offsetHeight || binCanvas.height || 200;
+    if (W < 10 || H < 10) return;   // nie rysuj gdy canvas zwinięty
     binCanvas.width=W; binCanvas.height=H;
     ctx.fillStyle="#111"; ctx.fillRect(0,0,W,H);
 
@@ -512,7 +513,7 @@
     const idxs = mz.map((_,i)=>i).filter(i => mz[i] >= wMin && mz[i] <= wMax);
     if (idxs.length === 0) {
       ctx.fillStyle="rgba(255,255,255,0.15)"; ctx.font="10px sans-serif";
-      ctx.textAlign="center"; ctx.fillText("brak danych w tym zakresie", W/2, H/2);
+      ctx.textAlign="center"; ctx.fillText("Ładowanie…", W/2, H/2);
       return;
     }
 
@@ -735,11 +736,10 @@
           <span class="step-num" style="background:rgba(100,180,255,0.15);color:#7ac">⊞</span>
           <span class="step-title">Podgląd bin size</span>
         </div>
-        {#if binWinLoading}
-          <div class="empty-hint">⏳ Ładowanie…</div>
-        {:else if spectrumData}
+        {#if spectrumData}
           <div class="bin-body">
             <canvas bind:this={binCanvas} class="bin-canvas"></canvas>
+            {#if binWinLoading}<div class="bin-loading">⏳</div>{/if}
             <div class="bin-yscroll">
               <input type="range" min="0" max="600" step="5"
                      bind:value={binYShift} class="slider-vert" />
@@ -1004,7 +1004,14 @@
   @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
 
   /* ── Bin preview canvas ─────────────────────────────────────────────────── */
+  .bin-loading {
+    position: absolute; top: 4px; right: 26px;
+    font-size: 0.65rem; color: rgba(255,201,81,0.6);
+    pointer-events: none;
+  }
+
   .bin-body {
+    position: relative;
     display: flex; flex-direction: row; flex: 1; min-height: 0; gap: 4px;
   }
 
