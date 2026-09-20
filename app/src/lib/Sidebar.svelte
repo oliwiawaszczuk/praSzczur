@@ -27,16 +27,45 @@
     mzMax = Infinity,
   }: Props = $props();
 
-  const DEFAULT_TOL = 0.3;
-  let mzInput = $state("");
-  let tol      = $state(DEFAULT_TOL);
-  let mzError  = $state("");
+  interface MzEntry { name: string; mz: number; }
 
-  function submit() {
-    const mz = parseFloat(mzInput);
+  const STORAGE_KEY = "praSzczur_mzList";
+
+  function loadList(): MzEntry[] {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) return JSON.parse(raw) as MzEntry[];
+    } catch {}
+    return [];
+  }
+
+  function saveList(list: MzEntry[]) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch {}
+  }
+
+  const DEFAULT_TOL = 0.3;
+  let mzInput    = $state("");
+  let tol        = $state(DEFAULT_TOL);
+  let mzError    = $state("");
+  let mzList     = $state<MzEntry[]>(loadList());
+  let selectedIdx = $state<number | null>(null);
+  let newName    = $state("");
+  let newMz      = $state("");
+  let addError   = $state("");
+
+  function validateMz(val: string): number | null {
+    const mz = parseFloat(val);
     const lo = mzMin > 0 ? mzMin : 0;
     const hi = isFinite(mzMax) ? mzMax : Infinity;
-    if (isNaN(mz) || mz < lo || (isFinite(hi) && mz > hi)) {
+    if (isNaN(mz) || mz < lo || (isFinite(hi) && mz > hi)) return null;
+    return mz;
+  }
+
+  function submit() {
+    const mz = validateMz(mzInput);
+    if (mz === null) {
+      const lo = mzMin > 0 ? mzMin : 0;
+      const hi = isFinite(mzMax) ? mzMax : Infinity;
       mzError = isFinite(hi)
         ? `Wartość m/z: ${lo.toFixed(0)}–${hi.toFixed(0)} Da`
         : "Podaj prawidłową wartość m/z";
@@ -46,8 +75,37 @@
     onquery?.({ mz, tol });
   }
 
+  function selectEntry(i: number) {
+    selectedIdx = i;
+    mzInput = mzList[i].mz.toString();
+    mzError = "";
+    onquery?.({ mz: mzList[i].mz, tol });
+  }
+
+  function removeEntry(i: number) {
+    mzList = mzList.filter((_, idx) => idx !== i);
+    saveList(mzList);
+    if (selectedIdx === i) selectedIdx = null;
+    else if (selectedIdx !== null && selectedIdx > i) selectedIdx--;
+  }
+
+  function addEntry() {
+    const mz = validateMz(newMz);
+    if (mz === null) { addError = "Nieprawidłowa wartość m/z"; return; }
+    if (!newName.trim()) { addError = "Podaj nazwę"; return; }
+    addError = "";
+    mzList = [...mzList, { name: newName.trim(), mz }];
+    saveList(mzList);
+    newName = "";
+    newMz = "";
+  }
+
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Enter") submit();
+  }
+
+  function onInputChange() {
+    selectedIdx = null;
   }
 </script>
 
@@ -74,6 +132,7 @@
         placeholder="np. 569.25"
         bind:value={mzInput}
         onkeydown={onKeydown}
+        oninput={onInputChange}
         disabled={loading}
       />
       {#if mzError}
@@ -102,6 +161,48 @@
         Wczytaj
       {/if}
     </button>
+
+    <!-- ── Lista m/z ──────────────────────────────── -->
+    <div class="divider"></div>
+
+    <div class="section-title">Lista m/z</div>
+
+    {#if mzList.length > 0}
+      <div class="mz-list">
+        {#each mzList as entry, i}
+          <div
+            class="mz-entry"
+            class:selected={selectedIdx === i}
+            role="button"
+            tabindex="0"
+            onclick={() => selectEntry(i)}
+            onkeydown={(e) => e.key === "Enter" && selectEntry(i)}
+          >
+            <span class="mz-entry-name">{entry.name}</span>
+            <span class="mz-entry-val">{entry.mz}</span>
+            <button class="mz-remove" onclick={(e) => { e.stopPropagation(); removeEntry(i); }}>×</button>
+          </div>
+        {/each}
+      </div>
+    {/if}
+
+    <div class="add-row">
+      <input
+        class="field-input add-name"
+        type="text"
+        placeholder="nazwa"
+        bind:value={newName}
+      />
+      <input
+        class="field-input add-mz"
+        type="number"
+        step="0.01"
+        placeholder="m/z"
+        bind:value={newMz}
+      />
+    </div>
+    {#if addError}<span class="error-msg">{addError}</span>{/if}
+    <button class="btn-add" onclick={addEntry}>+ Dodaj</button>
 
     <div class="divider"></div>
 
@@ -293,6 +394,78 @@
     border-color: rgba(255,201,81,0.35);
     color: #ffc951;
   }
+
+  /* ── Lista m/z ────────────────────────────────────── */
+  .mz-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 8px;
+  }
+
+  .mz-entry {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    background: #1a1a1a;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 7px;
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+    font-family: inherit;
+    font-size: 0.78rem;
+    color: rgba(255,255,255,0.6);
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .mz-entry:hover { border-color: rgba(255,201,81,0.3); background: #222; }
+
+  .mz-entry.selected {
+    border-color: #ffc951;
+    background: rgba(255,201,81,0.08);
+    color: #ffc951;
+  }
+
+  .mz-entry-name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mz-entry-val  { font-size: 0.72rem; color: rgba(255,255,255,0.35); white-space: nowrap; }
+
+  .mz-remove {
+    background: none;
+    border: none;
+    color: rgba(255,255,255,0.2);
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 0 2px;
+    line-height: 1;
+    font-family: inherit;
+    transition: color 0.15s;
+  }
+  .mz-remove:hover { color: #ff6b6b; }
+
+  .add-row {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+  .add-name { flex: 1.2; }
+  .add-mz   { flex: 1; }
+
+  .btn-add {
+    width: 100%;
+    padding: 6px;
+    margin-bottom: 2px;
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 7px;
+    color: rgba(255,255,255,0.4);
+    font-size: 0.75rem;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.18s, color 0.18s;
+  }
+  .btn-add:hover { border-color: rgba(255,201,81,0.4); color: #ffc951; }
 
   /* ── Placeholder dla zakładek ─────────────────────── */
   .tab-content-placeholder {

@@ -9,7 +9,15 @@
   import "@fontsource/jetbrains-mono/600.css";
 
   type AppState = "booting" | "ready" | "error";
-  type Tab = "dane" | "mz" | "ustawienia";
+  type Tab = "dane" | "mz" | "preprocessing" | "widma" | "segmentacja";
+
+  const TABS: { key: Tab; label: string }[] = [
+    { key: "dane",          label: "Dane" },
+    { key: "mz",            label: "m/z" },
+    { key: "preprocessing", label: "Preprocessing" },
+    { key: "widma",         label: "Widma" },
+    { key: "segmentacja",   label: "Segmentacja" },
+  ];
 
   let state:       AppState = $state("booting");
   let errorMsg     = $state("");
@@ -98,13 +106,13 @@
 
       <!-- Zakładki nad contentem -->
       <div class="tabbar">
-        {#each (["dane", "mz", "ustawienia"] as const) as t}
+        {#each TABS as t}
           <button
             class="tab"
-            class:active={activeTab === t}
-            onclick={() => { activeTab = t; }}
+            class:active={activeTab === t.key}
+            onclick={() => { activeTab = t.key; }}
           >
-            {{ dane: "Dane", mz: "m/z", ustawienia: "Ustawienia" }[t]}
+            {t.label}
           </button>
         {/each}
       </div>
@@ -116,11 +124,25 @@
       <main class="content" class:hidden={activeTab !== "mz"}>
         <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} error={queryError} />
       </main>
-      <main class="content full-tab" class:hidden={activeTab !== "ustawienia"}>
+      <main class="content full-tab" class:hidden={activeTab !== "preprocessing"}>
         <div class="tab-placeholder">
-          <div class="tp-icon">⚙</div>
-          <div class="tp-title">Ustawienia</div>
-          <div class="tp-sub">Zakres m/z, BIN_SIZE, granice tkanek i inne parametry analizy.</div>
+          <div class="tp-icon">⚗</div>
+          <div class="tp-title">Preprocessing</div>
+          <div class="tp-sub">Normalizacja, korekcja bazowej linii, redukcja szumu — parametry przetwarzania wstępnego widm.</div>
+        </div>
+      </main>
+      <main class="content full-tab" class:hidden={activeTab !== "widma"}>
+        <div class="tab-placeholder">
+          <div class="tp-icon">〜</div>
+          <div class="tp-title">Widma</div>
+          <div class="tp-sub">Przeglądarka widm masowych — porównanie profili między tkankami i pikselami.</div>
+        </div>
+      </main>
+      <main class="content full-tab" class:hidden={activeTab !== "segmentacja"}>
+        <div class="tab-placeholder">
+          <div class="tp-icon">⬡</div>
+          <div class="tp-title">Segmentacja</div>
+          <div class="tp-sub">Klasteryzacja pikseli na podstawie widm MSI — mapy segmentów i analiza składowych.</div>
         </div>
       </main>
 
@@ -251,11 +273,10 @@
     to   { opacity: 1; }
   }
 
-  /* Sidebar — szerszy o 5% (280 → 295) */
   .sidebar-shell {
-    width: 295px;
-    min-width: 295px;
-    max-width: 295px;
+    width: 310px;
+    min-width: 310px;
+    max-width: 310px;
     flex-shrink: 0;
     height: 100vh;
   }

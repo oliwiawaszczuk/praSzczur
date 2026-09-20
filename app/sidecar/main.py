@@ -50,13 +50,16 @@ def _build_tissues_meta(tissue_ids: list[str]) -> list[dict]:
     for i, tid in enumerate(tissue_ids):
         coords = _cache[tid]["coords"]
         xs = coords[:, 0].astype(int)
+        ys = coords[:, 1].astype(int)
         meta.append({
             "id":       tid,
             "label":    tid.replace("_", " "),
             "x_min":    int(xs.min()),
             "x_max":    int(xs.max()),
+            "y_min":    int(ys.min()),
+            "y_max":    int(ys.max()),
             "n_spectra": int(len(coords)),
-            "is_ref":   i == 0,  # pierwsza tkanka = referencyjna
+            "is_ref":   i == 0,
         })
     return meta
 
@@ -280,24 +283,43 @@ def detect_from_imzml(path: str, threshold_pct: float = 5.0) -> dict:
     presence[ys - gy_min, xs - gx_min] = 1.0
     col_profile = presence.mean(axis=0)
 
-    # Detekcja po przerwach w koordynatach X (pewniejsza niż próg intensywności)
+    # Detekcja po przerwach w koordynatach X
     xs_unique = np.unique(xs)
-    # Minimalna przerwa: 2 piksele lub 1% szerokości całego zakresu
-    min_gap = max(2, int(W * 0.01))
-    diffs = np.diff(xs_unique)
-    gap_idx = np.where(diffs > min_gap)[0]
+    min_gap_x = max(2, int(W * 0.01))
+    gap_idx_x = np.where(np.diff(xs_unique) > min_gap_x)[0]
+    starts_x = np.concatenate([[0], gap_idx_x + 1])
+    ends_x   = np.concatenate([gap_idx_x, [len(xs_unique) - 1]])
 
-    starts = np.concatenate([[0], gap_idx + 1])
-    ends   = np.concatenate([gap_idx, [len(xs_unique) - 1]])
+    # Detekcja po przerwach w koordynatach Y
+    ys_unique = np.unique(ys)
+    min_gap_y = max(2, int(H * 0.01))
+    gap_idx_y = np.where(np.diff(ys_unique) > min_gap_y)[0]
+    starts_y = np.concatenate([[0], gap_idx_y + 1])
+    ends_y   = np.concatenate([gap_idx_y, [len(ys_unique) - 1]])
+
+    # Profil wierszy (symetrycznie do col_profile)
+    row_profile = presence.mean(axis=1)
+    row_max = float(row_profile.max())
+    row_norm = (row_profile / row_max).tolist() if row_max > 0 else row_profile.tolist()
+
+    # Grid segmentów X×Y — filtruj puste komórki (brak spektrów w przecięciu)
     detected = []
-    for i, (s, e) in enumerate(zip(starts, ends)):
-        detected.append({
-            "id":     f"T{i+1}",
-            "label":  f"T{i+1}",
-            "x_min":  int(xs_unique[s]),
-            "x_max":  int(xs_unique[e]),
-            "is_ref": i == 0,
-        })
+    tid = 1
+    for sx, ex in zip(starts_x, ends_x):
+        x0, x1 = int(xs_unique[sx]), int(xs_unique[ex])
+        for sy, ey in zip(starts_y, ends_y):
+            y0, y1 = int(ys_unique[sy]), int(ys_unique[ey])
+            mask = ((xs >= x0) & (xs <= x1) & (ys >= y0) & (ys <= y1))
+            if mask.sum() == 0:
+                continue
+            detected.append({
+                "id":     f"T{tid}",
+                "label":  f"T{tid}",
+                "x_min":  x0, "x_max": x1,
+                "y_min":  y0, "y_max": y1,
+                "is_ref": tid == 1,
+            })
+            tid += 1
 
     col_max = float(col_profile.max())
     col_norm = (col_profile / col_max).tolist() if col_max > 0 else col_profile.tolist()
@@ -306,7 +328,8 @@ def detect_from_imzml(path: str, threshold_pct: float = 5.0) -> dict:
         "detected":       detected,
         "n_detected":     len(detected),
         "col_profile":    col_norm,
-        "presence_image": presence.tolist(),  # H×W, 0/1
+        "row_profile":    row_norm,
+        "presence_image": presence.tolist(),
         "width":          W,
         "height":         H,
         "x_offset":       gx_min,

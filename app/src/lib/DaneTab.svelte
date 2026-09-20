@@ -8,11 +8,13 @@
   interface TissueMeta {
     id: string; label: string;
     x_min: number; x_max: number;
+    y_min?: number; y_max?: number;
     n_spectra?: number; is_ref: boolean;
   }
   interface DetectionResult {
     detected: TissueMeta[];
     col_profile: number[];
+    row_profile?: number[];
     presence_image: number[][];
     width: number; height: number; x_offset: number; y_offset: number;
     n_detected: number;
@@ -206,12 +208,15 @@
       imgData.data[i]=imgData.data[i+1]=imgData.data[i+2]=v; imgData.data[i+3]=255;
     }
     ctx.putImageData(imgData, 0, 0);
+    const yOff = detectionData.y_offset;
     tissues.forEach((t,i) => {
       const color = TISSUE_COLORS[i%TISSUE_COLORS.length];
-      const xs=t.x_min-xOff, xe=t.x_max-xOff;
-      ctx.fillStyle=color+"50"; ctx.fillRect(xs,0,xe-xs+1,H);
+      const px0=t.x_min-xOff, px1=t.x_max-xOff;
+      const py0=(t.y_min != null ? t.y_min-yOff : 0);
+      const py1=(t.y_max != null ? t.y_max-yOff : H-1);
+      ctx.fillStyle=color+"50"; ctx.fillRect(px0,py0,px1-px0+1,py1-py0+1);
       ctx.strokeStyle=color; ctx.lineWidth=1.5;
-      ctx.strokeRect(xs+0.5,0.5,xe-xs,H-1);
+      ctx.strokeRect(px0+0.5,py0+0.5,px1-px0,py1-py0);
     });
   });
 
@@ -543,7 +548,7 @@
             {#each tissues as t, i}
               <div class="tissue-chip" style="border-color:{TISSUE_COLORS[i%TISSUE_COLORS.length]}">
                 <span class="chip-label">{t.label}</span>
-                <span class="chip-range">x {t.x_min}–{t.x_max}</span>
+                <span class="chip-range">x {t.x_min}–{t.x_max}{#if t.y_min != null}, y {t.y_min}–{t.y_max}{/if}</span>
                 {#if t.is_ref}<span class="chip-star">★</span>{/if}
               </div>
             {/each}
