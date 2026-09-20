@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { waitForSidecar, fetchIonImage } from "$lib/api.js";
+  import { waitForSidecar, fetchIonImage, fetchDatasetStatus } from "$lib/api.js";
   import type { TissueImage } from "$lib/api.js";
   import IonGrid from "$lib/IonGrid.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
@@ -14,11 +14,14 @@
   let state:       AppState = $state("booting");
   let errorMsg     = $state("");
   let tissues: Record<string, TissueImage> | null = $state(null);
+  let queryError  = $state("");
   let queryLoading = $state(false);
   let bootProgress = $state(0);
   let dispMin      = $state(0);
   let dispMax      = $state(1);
   let activeTab: Tab = $state("dane");
+  let mzMin        = $state(0);
+  let mzMax        = $state(Infinity);
 
   onMount(async () => {
     const tick = setInterval(() => {
@@ -29,6 +32,11 @@
       bootProgress = 100;
       await new Promise(r => setTimeout(r, 400));
       state = "ready";
+      const ds = await fetchDatasetStatus();
+      if (ds && ds.mz_min > 0 && ds.mz_max > 0) {
+        mzMin = ds.mz_min;
+        mzMax = ds.mz_max;
+      }
     } catch (e) {
       errorMsg = (e as Error).message;
       state = "error";
@@ -39,12 +47,20 @@
 
   async function handleQuery({ mz, tol }: { mz: number; tol: number }) {
     queryLoading = true;
+    queryError = "";
     try {
       const res = await fetchIonImage(mz, tol);
       tissues = res.tissues;
+      const allZero = Object.values(res.tissues).every(t => t.vmax === 0);
+      if (allZero) {
+        queryError = `Brak sygnału przy m/z ${mz.toFixed(3)} Da — wartość poza zakresem przetworzonych danych lub brak jonów.`;
+        tissues = null;
+      }
     } catch (e) {
-      errorMsg = (e as Error).message;
-      state = "error";
+      // Show inline error — don't crash the whole app to error screen
+      queryError = (e as Error).message.includes("503")
+        ? "Brak przetworzonych danych. Uruchom preprocessing w zakładce Dane."
+        : (e as Error).message;
     } finally {
       queryLoading = false;
     }
@@ -98,7 +114,7 @@
         <DaneTab />
       </main>
       <main class="content" class:hidden={activeTab !== "mz"}>
-        <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} />
+        <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} error={queryError} />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "ustawienia"}>
         <div class="tab-placeholder">
@@ -110,19 +126,19 @@
 
     </div>
 
-    <!-- Sidebar — tylko w zakładce m/z -->
-    {#if activeTab === "mz"}
-      <div class="sidebar-shell">
-        <Sidebar
-          loading={queryLoading}
-          {activeTab}
-          onquery={handleQuery}
-          {dispMin}
-          {dispMax}
-          ondisprange={(mn, mx) => { dispMin = mn; dispMax = mx; }}
-        />
-      </div>
-    {/if}
+    <!-- Sidebar — zawsze zamontowany, widoczny tylko przy zakładce m/z -->
+    <div class="sidebar-shell" class:hidden={activeTab !== "mz"}>
+      <Sidebar
+        loading={queryLoading}
+        {activeTab}
+        onquery={handleQuery}
+        {dispMin}
+        {dispMax}
+        ondisprange={(mn, mx) => { dispMin = mn; dispMax = mx; }}
+        {mzMin}
+        {mzMax}
+      />
+    </div>
 
   </div>
 {/if}

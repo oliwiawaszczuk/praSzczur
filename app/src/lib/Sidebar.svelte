@@ -12,6 +12,8 @@
     dispMin?: number;
     dispMax?: number;
     ondisprange?: (min: number, max: number) => void;
+    mzMin?: number;
+    mzMax?: number;
   }
 
   let {
@@ -21,6 +23,8 @@
     dispMin = 0,
     dispMax = 1,
     ondisprange,
+    mzMin = 0,
+    mzMax = Infinity,
   }: Props = $props();
 
   const DEFAULT_TOL = 0.3;
@@ -30,8 +34,12 @@
 
   function submit() {
     const mz = parseFloat(mzInput);
-    if (isNaN(mz) || mz < 300 || mz > 1500) {
-      mzError = "Wartość m/z: 300–1500 Da";
+    const lo = mzMin > 0 ? mzMin : 0;
+    const hi = isFinite(mzMax) ? mzMax : Infinity;
+    if (isNaN(mz) || mz < lo || (isFinite(hi) && mz > hi)) {
+      mzError = isFinite(hi)
+        ? `Wartość m/z: ${lo.toFixed(0)}–${hi.toFixed(0)} Da`
+        : "Podaj prawidłową wartość m/z";
       return;
     }
     mzError = "";
@@ -60,8 +68,8 @@
         class="field-input"
         class:error={!!mzError}
         type="number"
-        min="300"
-        max="1500"
+        min={mzMin > 0 ? mzMin : 0}
+        max={isFinite(mzMax) ? mzMax : undefined}
         step="0.01"
         placeholder="np. 569.25"
         bind:value={mzInput}

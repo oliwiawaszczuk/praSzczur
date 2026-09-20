@@ -35,3 +35,20 @@ export async function fetchIonImage(mz: number, tol: number): Promise<IonImageRe
   if (!r.ok) throw new Error(`API error ${r.status}`);
   return r.json();
 }
+
+export interface DatasetStatus {
+  mz_min: number;
+  mz_max: number;
+  n_bins: number;
+  n_tissues: number;
+}
+
+export async function fetchDatasetStatus(): Promise<DatasetStatus | null> {
+  try {
+    const r = await fetch(`${BASE}/dataset_status`);
+    if (!r.ok) return null;
+    return r.json();
+  } catch {
+    return null;
+  }
+}

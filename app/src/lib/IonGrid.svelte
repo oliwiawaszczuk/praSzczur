@@ -7,19 +7,48 @@
     loading?: boolean;
     dispMin?: number;
     dispMax?: number;
+    error?: string;
   }
-  let { tissues = null, loading = false, dispMin = 0, dispMax = 1 }: Props = $props();
+  let { tissues = null, loading = false, dispMin = 0, dispMax = 1, error = "" }: Props = $props();
 
   const keys = $derived(tissues ? Object.keys(tissues) : ["", "", "", ""]);
 </script>
 
-<div class="grid-wrap"><div class="grid">
-  {#each keys as key}
-    <IonCanvas tissue={tissues?.[key] ?? null} {loading} {dispMin} {dispMax} />
-  {/each}
-</div></div>
+<div class="grid-wrap">
+  {#if error}
+    <div class="grid-notice">
+      <div class="notice-icon">⚠</div>
+      <div class="notice-msg">{error}</div>
+    </div>
+  {:else if !tissues && !loading}
+    <div class="grid-notice">
+      <div class="notice-icon">⬡</div>
+      <div class="notice-msg">Wpisz wartość m/z i kliknij Wczytaj</div>
+    </div>
+  {:else}
+    <div class="grid">
+      {#each keys as key}
+        <IonCanvas tissue={tissues?.[key] ?? null} {loading} {dispMin} {dispMax} />
+      {/each}
+    </div>
+  {/if}
+</div>
 
 <style>
+  .grid-notice {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: rgba(255,255,255,0.3);
+    text-align: center;
+    padding: 2rem;
+  }
+  .notice-icon { font-size: 2.2rem; opacity: 0.4; }
+  .notice-msg  { font-size: 0.82rem; line-height: 1.6; max-width: 320px; }
+
   /* Wrapper bierze całą wysokość flexa rodzica */
   .grid-wrap {
     flex: 1;
