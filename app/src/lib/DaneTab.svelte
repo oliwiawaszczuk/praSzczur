@@ -101,9 +101,10 @@
   // ── On mount ─────────────────────────────────────────────────────────────
   onMount(async () => {
     // Restore persisted settings (must be in onMount — localStorage unavailable during SSR)
-    mzMin   = lsGet("dane_mzMin", 300);
-    mzMax   = lsGet("dane_mzMax", 1500);
-    binSize = lsGet("dane_binSize", 0.3);
+    mzMin     = lsGet("dane_mzMin", 300);
+    mzMax     = lsGet("dane_mzMax", 1500);
+    binSize   = lsGet("dane_binSize", 0.3);
+    imzmlPath = lsGet("dane_imzmlPath", imzmlPath);
 
     await refreshStatus();
     // Auto-reload detection data so UI shows previous state
@@ -116,8 +117,8 @@
         if (r.ok) {
           const d = await r.json();
           if (tissues.length === 0 && d.tissues?.length > 0) {
-            const savedLabels: Record<string,string> = lsGet("dane_tissueLabels", {});
-            const savedEnabled: Record<string,boolean> = lsGet("dane_tissueEnabled", {});
+            const savedLabels: Record<string,string> = lsGet(labelsKey(), {});
+            const savedEnabled: Record<string,boolean> = lsGet(enabledKey(), {});
             tissues = d.tissues.map((t: TissueMeta) => ({
               ...t,
               label:   savedLabels[t.id] ?? t.label,
@@ -133,12 +134,16 @@
     }
   });
 
+  function labelsKey()  { return `dane_tissueLabels:${imzmlPath}`; }
+  function enabledKey() { return `dane_tissueEnabled:${imzmlPath}`; }
+
   function saveTissueLabels() {
     const labels: Record<string,string> = {};
     const enabled: Record<string,boolean> = {};
     tissues.forEach(t => { labels[t.id] = t.label; enabled[t.id] = t.enabled ?? true; });
-    lsSet("dane_tissueLabels", labels);
-    lsSet("dane_tissueEnabled", enabled);
+    lsSet(labelsKey(), labels);
+    lsSet(enabledKey(), enabled);
+    lsSet("dane_tissueLabels", labels);   // current — dla +page.svelte
     onlabelschange?.(labels);
   }
 
@@ -169,14 +174,15 @@
       }
       const d: DetectionResult = await r.json();
       detectionData = d;
-      const savedLabels: Record<string,string> = lsGet("dane_tissueLabels", {});
-      const savedEnabled: Record<string,boolean> = lsGet("dane_tissueEnabled", {});
+      const savedLabels: Record<string,string> = lsGet(labelsKey(), {});
+      const savedEnabled: Record<string,boolean> = lsGet(enabledKey(), {});
       tissues = d.detected.map((t,i) => ({
         ...t, is_ref: i===0,
         label:   savedLabels[t.id] ?? t.label,
         enabled: savedEnabled[t.id] ?? true,
       }));
       fileInfo = { width: d.width, height: d.height };
+      lsSet("dane_imzmlPath", imzmlPath);  // tylko po udanym załadowaniu
       // Notify parent with restored/current labels
       const labels: Record<string,string> = {};
       tissues.forEach(t => { labels[t.id] = t.label; });
@@ -284,6 +290,15 @@
         ctx.strokeStyle=color; ctx.lineWidth=1.5;
         ctx.strokeRect(px0+0.5,py0+0.5,px1-px0,py1-py0);
       }
+      // Label bezpośrednio na canvasie — generyczna pozycja przy ROI
+      const labelX = px0 + (px1 - px0) / 2;
+      const labelY = py0 + 12;
+      ctx.font = `bold 9px monospace`;
+      ctx.textAlign = "center";
+      ctx.fillStyle = "rgba(0,0,0,0.8)";
+      ctx.fillText(t.label, labelX + 1, labelY + 1);
+      ctx.fillStyle = disabled ? "rgba(180,180,180,0.8)" : color;
+      ctx.fillText(t.label, labelX, labelY);
     });
   });
 
@@ -606,16 +621,6 @@
         {#if detectionData}
           <div class="tic-wrap">
             <canvas bind:this={ticCanvas} class="tic-canvas" onclick={onTicClick} style="cursor:pointer"></canvas>
-            <div class="tic-labels-abs">
-              {#each tissues as t, i}
-                {@const xPct=((t.x_min-detectionData.x_offset)/detectionData.width)*100}
-                {@const wPct=((t.x_max-t.x_min+1)/detectionData.width)*100}
-                <div class="tic-label"
-                     style="left:{xPct}%;width:{wPct}%;color:{TISSUE_COLORS[i%TISSUE_COLORS.length]}">
-                  {t.label}
-                </div>
-              {/each}
-            </div>
           </div>
           <canvas bind:this={profileCanvas} class="profile-canvas"></canvas>
           <div class="profile-axis">
@@ -730,7 +735,9 @@
           <span class="step-num" style="background:rgba(100,180,255,0.15);color:#7ac">⊞</span>
           <span class="step-title">Podgląd bin size</span>
         </div>
-        {#if spectrumData}
+        {#if binWinLoading}
+          <div class="empty-hint">⏳ Ładowanie…</div>
+        {:else if spectrumData}
           <div class="bin-body">
             <canvas bind:this={binCanvas} class="bin-canvas"></canvas>
             <div class="bin-yscroll">
@@ -758,7 +765,7 @@
             </div>
           </div>
         {:else}
-          <div class="empty-hint">Wczytaj plik</div>
+          <div class="empty-hint">Wczytaj plik aby zobaczyć podgląd</div>
         {/if}
       </div>
 
@@ -928,14 +935,15 @@
   .tic-wrap { position: relative; flex-shrink: 0; }
   .tic-canvas {
     width: 100%; height: auto; display: block;
-    image-rendering: pixelated; border-radius: 5px;
+    image-rendering: pixelated;
   }
   .tic-labels-abs {
     position: absolute; top: 0; left: 0; width: 100%; height: 100%;
     pointer-events: none;
   }
   .tic-label {
-    position: absolute; top: 2px;
+    position: absolute;
+    padding-top: 2px;
     font-size: 0.55rem; font-weight: 700; text-align: center;
     text-shadow: 0 1px 3px rgba(0,0,0,0.9);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -1002,7 +1010,7 @@
 
   .bin-canvas {
     flex: 1; height: 100%; min-width: 0; display: block;
-    display: block; border-radius: 5px;
+    border-radius: 5px;
     background: #111;
     border: 1px solid rgba(255,255,255,0.06);
     flex-shrink: 0;

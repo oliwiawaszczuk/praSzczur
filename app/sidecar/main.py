@@ -560,19 +560,21 @@ async def process(body: dict) -> StreamingResponse:
             yield _sse("progress", {"step": "binning", "pct": 10,
                                      "message": f"Binning: {n_bins} binów po {bin_size} Da"})
 
-            # Mapa x → tkanka
-            x_to_tissue: dict[int, dict] = {}
-            for t in tissues:
-                for x in range(int(t["x_min"]), int(t["x_max"]) + 1):
-                    x_to_tissue[x] = t
-
             buffers = {t["id"]: {"spectra": [], "coords": []} for t in tissues}
             n_total = len(p.coordinates)
+
+            # Buduj listę tkanek z zakresami (x,y) — obsługuje siatki 2D
+            def find_tissue(x: int, y: int) -> dict | None:
+                for t in tissues:
+                    if (t["x_min"] <= x <= t["x_max"] and
+                            t.get("y_min", -10**9) <= y <= t.get("y_max", 10**9)):
+                        return t
+                return None
 
             half = bin_size / 2.0
             for i in range(n_total):
                 x, y = int(coords_arr[i, 0]), int(coords_arr[i, 1])
-                t = x_to_tissue.get(x)
+                t = find_tissue(x, y)
                 if t is None:
                     continue
                 try:
