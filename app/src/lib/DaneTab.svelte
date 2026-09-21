@@ -30,8 +30,9 @@
 
   interface Props {
     onlabelschange?: (labels: Record<string, string>) => void;
+    onfileload?: () => void;
   }
-  let { onlabelschange }: Props = $props();
+  let { onlabelschange, onfileload }: Props = $props();
 
   // ── State ────────────────────────────────────────────────────────────────
   let imzmlPath    = $state("source/FMP10_Rat_brain_breg_084.imzML");
@@ -187,6 +188,7 @@
       const labels: Record<string,string> = {};
       tissues.forEach(t => { labels[t.id] = t.label; });
       onlabelschange?.(labels);
+      onfileload?.();
       const t1 = d.detected[0];
       loadSpectrum(t1?.x_min, t1?.x_max);
     } catch (e) {
@@ -266,21 +268,42 @@
     if (!ticCanvas || !detectionData?.presence_image) return;
     const ctx = ticCanvas.getContext("2d"); if (!ctx) return;
     const { presence_image: img, width: W, height: H, x_offset: xOff } = detectionData;
-    ticCanvas.width = W; ticCanvas.height = H;
-    const imgData = ctx.createImageData(W, H);
+    const dpr = window.devicePixelRatio || 1;
+
+    // CSS width z kontenera, height z proporcji danych
+    const rect = ticCanvas.getBoundingClientRect();
+    const cssW = rect.width || W;
+    const cssH = cssW * (H / W);   // zachowaj aspect ratio danych
+    ticCanvas.style.height = cssH + "px";
+
+    ticCanvas.width  = cssW * dpr;
+    ticCanvas.height = cssH * dpr;
+    ctx.scale(dpr, dpr);
+
+    // Skala: dane → CSS px
+    const sx = cssW / W, sy = cssH / H;
+
+    // Piksele TIC przez tymczasowy canvas (putImageData ignoruje transform)
+    const tmp = document.createElement("canvas");
+    tmp.width = W; tmp.height = H;
+    const tCtx = tmp.getContext("2d")!;
+    const imgData = tCtx.createImageData(W, H);
     for (let y=0;y<H;y++) for (let x=0;x<W;x++) {
       const v = img[y][x] > 0 ? 220 : 30;
       const i = (y*W+x)*4;
       imgData.data[i]=imgData.data[i+1]=imgData.data[i+2]=v; imgData.data[i+3]=255;
     }
-    ctx.putImageData(imgData, 0, 0);
+    tCtx.putImageData(imgData, 0, 0);
+    ctx.drawImage(tmp, 0, 0, cssW, cssH);  // rozciągnij do CSS rozmiaru
+
     const yOff = detectionData.y_offset;
     tissues.forEach((t,i) => {
       const color = TISSUE_COLORS[i%TISSUE_COLORS.length];
       const disabled = t.enabled === false;
-      const px0=t.x_min-xOff, px1=t.x_max-xOff;
-      const py0=(t.y_min != null ? t.y_min-yOff : 0);
-      const py1=(t.y_max != null ? t.y_max-yOff : H-1);
+      // Przelicz współrzędne danych na CSS px
+      const px0=(t.x_min-xOff)*sx, px1=(t.x_max-xOff)*sx;
+      const py0=(t.y_min != null ? (t.y_min-yOff)*sy : 0);
+      const py1=(t.y_max != null ? (t.y_max-yOff)*sy : cssH-1);
       if (disabled) {
         ctx.fillStyle="rgba(0,0,0,0.55)"; ctx.fillRect(px0,py0,px1-px0+1,py1-py0+1);
         ctx.strokeStyle="rgba(120,120,120,0.4)"; ctx.lineWidth=1;
@@ -290,13 +313,12 @@
         ctx.strokeStyle=color; ctx.lineWidth=1.5;
         ctx.strokeRect(px0+0.5,py0+0.5,px1-px0,py1-py0);
       }
-      // Label bezpośrednio na canvasie — generyczna pozycja przy ROI
-      const labelX = px0 + (px1 - px0) / 2;
+      const labelX = px0 + (px1-px0)/2;
       const labelY = py0 + 12;
-      ctx.font = `bold 9px monospace`;
+      ctx.font = `bold 11px monospace`;
       ctx.textAlign = "center";
       ctx.fillStyle = "rgba(0,0,0,0.8)";
-      ctx.fillText(t.label, labelX + 1, labelY + 1);
+      ctx.fillText(t.label, labelX+1, labelY+1);
       ctx.fillStyle = disabled ? "rgba(180,180,180,0.8)" : color;
       ctx.fillText(t.label, labelX, labelY);
     });

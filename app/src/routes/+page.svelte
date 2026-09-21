@@ -81,6 +81,25 @@
     }
   });
 
+  async function handleFileLoad() {
+    // Nowy plik — odśwież dataset, ponów m/z query, wyczyść ion images
+    tissues = null;
+    queryError = "";
+    try {
+      const ds = await fetchDatasetStatus();
+      if (ds && ds.mz_min > 0 && ds.mz_max > 0) {
+        mzMin = ds.mz_min;
+        mzMax = ds.mz_max;
+        tissueIds = (ds as any).npz_files?.map((f: any) => f.id) ?? [];
+        if (ds.n_bins > 1) {
+          const binSize = (ds.mz_max - ds.mz_min) / (ds.n_bins - 1);
+          defaultTol = Math.round(binSize * 100) / 100;
+        }
+        if (lastMz !== null) handleQuery({ mz: lastMz, tol: lastTol });
+      }
+    } catch {}
+  }
+
   async function handleQuery({ mz, tol }: { mz: number; tol: number }) {
     queryLoading = true;
     queryError = "";
@@ -148,7 +167,10 @@
 
       <!-- Content zakładki — zawsze zamontowane, ukrywane przez CSS -->
       <main class="content" class:hidden={activeTab !== "dane"}>
-        <DaneTab onlabelschange={(labels) => { tissueLabels = { ...labels }; }} />
+        <DaneTab
+          onlabelschange={(labels) => { tissueLabels = { ...labels }; }}
+          onfileload={handleFileLoad}
+        />
       </main>
       <main class="content" class:hidden={activeTab !== "mz"}>
         <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} error={queryError} {tissueLabels} />
@@ -230,7 +252,18 @@
   .boot-logo {
     font-size: 3.5rem;
     color: #ffc951;
-    animation: glow 1.8s ease-in-out infinite;
+    animation:
+      bouncespin 1.1s cubic-bezier(0.4, 0, 0.2, 1) infinite,
+      glow       2.2s ease-in-out infinite;
+  }
+
+  @keyframes bouncespin {
+    0%   { transform: translateY(0px)   rotateY(0deg); }
+    30%  { transform: translateY(-22px) rotateY(200deg); }
+    50%  { transform: translateY(-26px) rotateY(250deg); }
+    70%  { transform: translateY(-10px) rotateY(320deg); }
+    85%  { transform: translateY(-2px)  rotateY(350deg); }
+    100% { transform: translateY(0px)   rotateY(360deg); }
   }
 
   @keyframes glow {

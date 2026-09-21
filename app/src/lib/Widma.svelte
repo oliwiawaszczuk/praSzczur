@@ -40,6 +40,15 @@
   let pixelMap        = $state<TissuePixelMap | null>(null);
   let mapLoading      = $state(false);
   let layers          = $state<Layer[]>([]);
+  let _prevTissueKey  = $state("");   // do wykrywania zmiany zestawu tkanek
+
+  $effect(() => {
+    const key = tissues.slice().sort().join(",");
+    if (_prevTissueKey && key !== _prevTissueKey) {
+      layers = [];   // nowy plik — wyczyść stare warstwy
+    }
+    _prevTissueKey = key;
+  });
   let layerLoading    = $state(false);
   let normMode        = $state<"none" | "max" | "tic">("none");
   let plotDiv         = $state<HTMLDivElement | null>(null);

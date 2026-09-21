@@ -496,15 +496,24 @@ def ion_image(mz: float, tol: float = 0.3) -> dict:
         img = np.zeros((ys.max()-y0+1, xs.max()-x0+1), dtype=np.float64)
         img[ys-y0, xs-x0] = intensities
 
-        vmax = float(img.max())
+        vmax_local = float(img.max())
         meta = next((m for m in _tissues_meta if m["id"] == tid), {})
         result[tid] = {
             "label":  meta.get("label", tid),
-            "data":   (img / vmax).tolist() if vmax > 0 else img.tolist(),
+            "_img":   img,
             "width":  int(xs.max()-x0+1),
             "height": int(ys.max()-y0+1),
-            "vmax":   vmax,
+            "vmax":   vmax_local,
         }
+
+    # Wspólny vmax przez wszystkie tkanki
+    global_vmax = max((v["vmax"] for v in result.values()), default=1.0)
+    if global_vmax <= 0:
+        global_vmax = 1.0
+    for tid, v in result.items():
+        img = v.pop("_img")
+        v["data"] = (img / global_vmax).tolist()
+        v["vmax"] = global_vmax   # ten sam dla każdej tkanki
 
     return {"mz": mz, "tol": tol, "tissues": result}
 
