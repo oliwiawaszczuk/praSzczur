@@ -9,8 +9,10 @@
     dispMax?: number;
     error?: string;
     tissueLabels?: Record<string, string>;
+    tissueColors?: Record<string, string>;
+    invertColors?: boolean;
   }
-  let { tissues = null, loading = false, dispMin = 0, dispMax = 1, error = "", tissueLabels = {} }: Props = $props();
+  let { tissues = null, loading = false, dispMin = 0, dispMax = 1, error = "", tissueLabels = {}, tissueColors = {}, invertColors = false }: Props = $props();
 
   const keys = $derived(tissues ? Object.keys(tissues) : ["", "", "", ""]);
 
@@ -48,19 +50,19 @@
     <div class="grid-normal">
       {#each keys as key}
         <div class="tile" onclick={() => handleClick(key)} role="button" tabindex="0">
-          <IonCanvas tissue={withLabel(key, tissues?.[key] ?? null)} {loading} {dispMin} {dispMax} />
+          <IonCanvas tissue={withLabel(key, tissues?.[key] ?? null)} {loading} {dispMin} {dispMax} accentColor={tissueColors[key] ?? ""} {invertColors} />
         </div>
       {/each}
     </div>
   {:else}
     <div class="grid-focused">
       <div class="col-main tile focused" onclick={() => handleClick(focusedKey!)} role="button" tabindex="0">
-        <IonCanvas tissue={withLabel(focusedKey, tissues?.[focusedKey] ?? null)} {loading} {dispMin} {dispMax} />
+        <IonCanvas tissue={withLabel(focusedKey, tissues?.[focusedKey] ?? null)} {loading} {dispMin} {dispMax} accentColor={tissueColors[focusedKey!] ?? ""} {invertColors} />
       </div>
       <div class="col-side">
         {#each unfocusedKeys as key}
           <div class="tile side-tile" onclick={() => handleClick(key)} role="button" tabindex="0">
-            <IonCanvas tissue={withLabel(key, tissues?.[key] ?? null)} {loading} {dispMin} {dispMax} />
+            <IonCanvas tissue={withLabel(key, tissues?.[key] ?? null)} {loading} {dispMin} {dispMax} accentColor={tissueColors[key] ?? ""} {invertColors} />
           </div>
         {/each}
       </div>

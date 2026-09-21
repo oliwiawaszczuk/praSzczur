@@ -5,10 +5,12 @@
   interface Props {
     tissue?: TissueImage | null;
     loading?: boolean;
-    dispMin?: number;   // 0–1, dolna granica okna wyświetlania
-    dispMax?: number;   // 0–1, górna granica okna wyświetlania
+    dispMin?: number;
+    dispMax?: number;
+    accentColor?: string;
+    invertColors?: boolean;
   }
-  let { tissue = null, loading = false, dispMin = 0, dispMax = 1 }: Props = $props();
+  let { tissue = null, loading = false, dispMin = 0, dispMax = 1, accentColor = "", invertColors = false }: Props = $props();
 
   let ionCanvas: HTMLCanvasElement | undefined = $state();
   let barCanvas:  HTMLCanvasElement | undefined = $state();
@@ -25,8 +27,9 @@
 
     const remapped = tissue.data.map(row =>
       row.map(v => {
-        if (span <= 0) return 0;
-        return Math.min(1, Math.max(0, (v - lo) / span));
+        if (span <= 0 || v <= 0) return 0;
+        let t = Math.min(1, Math.max(0, (v - lo) / span));
+        return invertColors ? 1 - t : t;
       })
     );
     renderToCanvas(ctx, remapped);
@@ -60,8 +63,8 @@
   });
 </script>
 
-<div class="card">
-  <div class="tissue-label">{tissue?.label ?? "—"}</div>
+<div class="card" style={accentColor ? `border-left:3px solid ${accentColor};box-shadow:0 4px 24px rgba(0,0,0,0.5),inset 0 0 0 1px ${accentColor}22` : ""}>
+  <div class="tissue-label" style={accentColor ? `color:${accentColor}` : ""}>{tissue?.label ?? "—"}</div>
 
   {#if loading}
     <div class="shimmer"></div>

@@ -36,6 +36,8 @@
   let mzMax            = $state(Infinity);
   let tissueIds        = $state<string[]>([]);
   let tissueLabels     = $state<Record<string,string>>({});
+  let tissueColors     = $state<Record<string,string>>({});
+  let invertColors     = $state(false);
   let lastMz           = $state<number | null>(null);
   let lastTol          = $state(0.3);
   let defaultTol       = $state(0.3);
@@ -169,11 +171,27 @@
       <main class="content" class:hidden={activeTab !== "dane"}>
         <DaneTab
           onlabelschange={(labels) => { tissueLabels = { ...labels }; }}
+          oncolorschange={(colors) => { tissueColors = { ...colors }; }}
           onfileload={handleFileLoad}
         />
       </main>
-      <main class="content" class:hidden={activeTab !== "mz"}>
-        <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} error={queryError} {tissueLabels} />
+      <main class="content content-mz" class:hidden={activeTab !== "mz"}>
+        <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} error={queryError} {tissueLabels} {tissueColors} {invertColors} />
+        <div class="sidebar-panel">
+          <Sidebar
+            loading={queryLoading}
+            onquery={handleQuery}
+            {dispMin}
+            {dispMax}
+            ondisprange={(mn, mx) => { dispMin = mn; dispMax = mx; }}
+            {mzMin}
+            {mzMax}
+            tolDefault={defaultTol}
+            oninvert={(v) => { invertColors = v; }}
+            currentMz={lastMz}
+            currentTol={lastTol}
+          />
+        </div>
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "preprocessing"}>
         <div class="tab-placeholder">
@@ -193,21 +211,6 @@
         </div>
       </main>
 
-    </div>
-
-    <!-- Sidebar — zawsze zamontowany, widoczny tylko przy zakładce m/z -->
-    <div class="sidebar-shell" class:hidden={activeTab !== "mz"}>
-      <Sidebar
-        loading={queryLoading}
-        {activeTab}
-        onquery={handleQuery}
-        {dispMin}
-        {dispMax}
-        ondisprange={(mn, mx) => { dispMin = mn; dispMax = mx; }}
-        {mzMin}
-        {mzMax}
-        tolDefault={defaultTol}
-      />
     </div>
 
   </div>
@@ -320,7 +323,7 @@
   /* ── Main layout ──────────────────────────────────── */
   .layout {
     display: flex;
-    flex-direction: row;
+    flex-direction: column;
     height: 100vh;
     width: 100vw;
     overflow: hidden;
@@ -332,12 +335,18 @@
     to   { opacity: 1; }
   }
 
-  .sidebar-shell {
-    width: 310px;
-    min-width: 310px;
-    max-width: 310px;
+  .content-mz {
+    flex-direction: row !important;
+    padding: 0;
+  }
+
+  .sidebar-panel {
+    width: 280px;
+    min-width: 280px;
+    max-width: 280px;
     flex-shrink: 0;
-    height: 100vh;
+    height: 100%;
+    overflow: hidden;
   }
 
   /* Obszar roboczy (zakładki + content) */

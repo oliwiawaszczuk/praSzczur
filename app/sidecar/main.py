@@ -518,6 +518,29 @@ def ion_image(mz: float, tol: float = 0.3) -> dict:
     return {"mz": mz, "tol": tol, "tissues": result}
 
 
+@app.get("/mz_profile")
+def mz_profile(mz: float, tol: float = 0.3, n: int = 7) -> dict:
+    """Summed intensity across all tissues for n bins around mz."""
+    if not _cache:
+        raise HTTPException(503, "Dane nie załadowane")
+    first = list(_cache.values())[0]
+    mz_bins = first["mz_bins"]
+    bin_size = float(mz_bins[1] - mz_bins[0]) if len(mz_bins) > 1 else tol
+    half = n // 2
+    sample_mzs = [mz + (k - half) * bin_size for k in range(n)]
+    points = []
+    for smz in sample_mzs:
+        total = 0.0
+        for d in _cache.values():
+            mb = d["mz_bins"]
+            sp = d["spectra"]
+            mask = np.abs(mb - smz) <= bin_size / 2.0 + 1e-9
+            if mask.any():
+                total += float(sp[:, mask].sum())
+        points.append({"mz": round(smz, 4), "intensity": total})
+    return {"points": points, "bin_size": round(bin_size, 4)}
+
+
 # ── Preprocess (SSE stream) ────────────────────────────────────────────────
 @app.post("/process")
 async def process(body: dict) -> StreamingResponse:

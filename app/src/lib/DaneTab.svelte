@@ -30,9 +30,10 @@
 
   interface Props {
     onlabelschange?: (labels: Record<string, string>) => void;
+    oncolorschange?: (colors: Record<string, string>) => void;
     onfileload?: () => void;
   }
-  let { onlabelschange, onfileload }: Props = $props();
+  let { onlabelschange, oncolorschange, onfileload }: Props = $props();
 
   // ── State ────────────────────────────────────────────────────────────────
   let imzmlPath    = $state("source/FMP10_Rat_brain_breg_084.imzML");
@@ -84,6 +85,19 @@
 
   const TISSUE_COLORS = ["#ffc951","#4ecdc4","#ff6b6b","#a8e6cf","#c3a6ff","#ffb347"];
 
+  let tissueColors = $state<Record<string, string>>({});
+  $effect(() => { if (imzmlPath) saveColors(); });
+
+  function getTissueColor(t: TissueMeta, i: number): string {
+    return tissueColors[t.id] ?? TISSUE_COLORS[i % TISSUE_COLORS.length];
+  }
+
+  $effect(() => {
+    const colors: Record<string, string> = {};
+    tissues.forEach((t, i) => { colors[t.id] = getTissueColor(t, i); });
+    oncolorschange?.(colors);
+  });
+
   // Canvas refs
   let ticCanvas: HTMLCanvasElement|undefined     = $state();
   let profileCanvas: HTMLCanvasElement|undefined = $state();
@@ -102,10 +116,10 @@
   // ── On mount ─────────────────────────────────────────────────────────────
   onMount(async () => {
     // Restore persisted settings (must be in onMount — localStorage unavailable during SSR)
-    mzMin     = lsGet("dane_mzMin", 300);
-    mzMax     = lsGet("dane_mzMax", 1500);
-    binSize   = lsGet("dane_binSize", 0.3);
-    imzmlPath = lsGet("dane_imzmlPath", imzmlPath);
+    mzMin        = lsGet("dane_mzMin", 300);
+    mzMax        = lsGet("dane_mzMax", 1500);
+    binSize      = lsGet("dane_binSize", 0.3);
+    imzmlPath    = lsGet("dane_imzmlPath", imzmlPath);
 
     await refreshStatus();
     // Auto-reload detection data so UI shows previous state
@@ -120,6 +134,7 @@
           if (tissues.length === 0 && d.tissues?.length > 0) {
             const savedLabels: Record<string,string> = lsGet(labelsKey(), {});
             const savedEnabled: Record<string,boolean> = lsGet(enabledKey(), {});
+            tissueColors = lsGet(colorsKey(), {});
             tissues = d.tissues.map((t: TissueMeta) => ({
               ...t,
               label:   savedLabels[t.id] ?? t.label,
@@ -137,6 +152,7 @@
 
   function labelsKey()  { return `dane_tissueLabels:${imzmlPath}`; }
   function enabledKey() { return `dane_tissueEnabled:${imzmlPath}`; }
+  function colorsKey()  { return `dane_tissueColors:${imzmlPath}`; }
 
   function saveTissueLabels() {
     const labels: Record<string,string> = {};
@@ -146,6 +162,10 @@
     lsSet(enabledKey(), enabled);
     lsSet("dane_tissueLabels", labels);   // current — dla +page.svelte
     onlabelschange?.(labels);
+  }
+
+  function saveColors() {
+    lsSet(colorsKey(), tissueColors);
   }
 
   async function refreshStatus() {
@@ -177,6 +197,7 @@
       detectionData = d;
       const savedLabels: Record<string,string> = lsGet(labelsKey(), {});
       const savedEnabled: Record<string,boolean> = lsGet(enabledKey(), {});
+      tissueColors = lsGet(colorsKey(), {});
       tissues = d.detected.map((t,i) => ({
         ...t, is_ref: i===0,
         label:   savedLabels[t.id] ?? t.label,
@@ -254,6 +275,7 @@
             const summary: {id:string;n_spectra:number}[] = data.summary ?? [];
             processLog = [...processLog, `✓ ${data.message}`, ...summary.map(s => `  ${s.id}: ${s.n_spectra.toLocaleString()} spektrów`)];
             await refreshStatus();
+            onfileload?.();
           } else if (event === "error") {
             processError = data.message + (data.trace ? "\n" + data.trace : "");
           }
@@ -298,7 +320,7 @@
 
     const yOff = detectionData.y_offset;
     tissues.forEach((t,i) => {
-      const color = TISSUE_COLORS[i%TISSUE_COLORS.length];
+      const color = getTissueColor(t, i);
       const disabled = t.enabled === false;
       // Przelicz współrzędne danych na CSS px
       const px0=(t.x_min-xOff)*sx, px1=(t.x_max-xOff)*sx;
@@ -350,7 +372,7 @@
     profileCanvas.width=W; profileCanvas.height=H;
     ctx.fillStyle="#111"; ctx.fillRect(0,0,W,H);
     tissues.forEach((t,i) => {
-      const color=TISSUE_COLORS[i%TISSUE_COLORS.length];
+      const color=getTissueColor(t, i);
       const x0=((t.x_min-detectionData!.x_offset)/profile.length)*W;
       const x1=((t.x_max-detectionData!.x_offset+1)/profile.length)*W;
       ctx.fillStyle=color+"25"; ctx.fillRect(x0,0,x1-x0,H);
@@ -656,37 +678,51 @@
         {/if}
 
         {#if tissues.length > 0}
-          <div class="tissue-chips">
+          <div class="tissue-list">
             {#each tissues as t, i}
+              {@const col = getTissueColor(t, i)}
               <div
-                class="tissue-chip"
-                class:chip-disabled={t.enabled === false}
-                style="border-color:{TISSUE_COLORS[i%TISSUE_COLORS.length]}"
+                class="tissue-row"
+                class:row-disabled={t.enabled === false}
+                style="border-left-color:{col}"
               >
-                <input
-                  class="chip-name-input"
-                  type="text"
-                  value={t.label}
-                  onclick={(e) => e.stopPropagation()}
-                  onchange={(e) => {
-                    const el = e.target as HTMLInputElement;
-                    const newVal = el.value.trim();
-                    if (!newVal) { el.value = t.label; return; }
-                    if (tissues.some((other, j) => j !== i && other.label === newVal)) {
-                      el.value = t.label;
-                      el.setCustomValidity(`Nazwa "${newVal}" jest już zajęta`);
-                      el.reportValidity();
-                      setTimeout(() => el.setCustomValidity(""), 3000);
-                      return;
-                    }
-                    tissues[i] = { ...t, label: newVal };
-                    saveTissueLabels();
-                  }}
-                  style="color:{TISSUE_COLORS[i%TISSUE_COLORS.length]}"
-                />
-                <span class="chip-range">x {t.x_min}–{t.x_max}{#if t.y_min != null}, y {t.y_min}–{t.y_max}{/if}</span>
-                {#if t.is_ref}<span class="chip-star">★</span>{/if}
-                {#if t.enabled === false}<span class="chip-off">off</span>{/if}
+                <div class="tissue-row-top">
+                  <input
+                    class="chip-name-input"
+                    type="text"
+                    value={t.label}
+                    onclick={(e) => e.stopPropagation()}
+                    onchange={(e) => {
+                      const el = e.target as HTMLInputElement;
+                      const newVal = el.value.trim();
+                      if (!newVal) { el.value = t.label; return; }
+                      if (tissues.some((other, j) => j !== i && other.label === newVal)) {
+                        el.value = t.label;
+                        el.setCustomValidity(`Nazwa "${newVal}" jest już zajęta`);
+                        el.reportValidity();
+                        setTimeout(() => el.setCustomValidity(""), 3000);
+                        return;
+                      }
+                      tissues[i] = { ...t, label: newVal };
+                      saveTissueLabels();
+                    }}
+                    style="color:{col}"
+                  />
+                  <div class="row-badges">
+                    {#if t.is_ref}<span class="chip-star">★</span>{/if}
+                    {#if t.enabled === false}<span class="chip-off">off</span>{/if}
+                  </div>
+                  <input
+                    type="color"
+                    class="color-swatch"
+                    value={col}
+                    title="Accent kolor tkanki"
+                    oninput={(e) => {
+                      tissueColors = { ...tissueColors, [t.id]: (e.target as HTMLInputElement).value };
+                    }}
+                  />
+                </div>
+                <div class="chip-range">x {t.x_min}–{t.x_max}{#if t.y_min != null}, y {t.y_min}–{t.y_max}{/if}</div>
               </div>
             {/each}
           </div>
@@ -739,9 +775,10 @@
           {#if status && status.npz_files.length > 0}
             <div class="npz-panel">
               {#each status.npz_files as f, i}
-                {@const customName = tissues.find(t => t.id === f.id)?.label}
+                {@const npzTissue = tissues.find(t => t.id === f.id)}
+                {@const customName = npzTissue?.label}
                 <div class="npz-row">
-                  <div class="npz-dot" style="background:{TISSUE_COLORS[i%TISSUE_COLORS.length]}"></div>
+                  <div class="npz-dot" style="background:{npzTissue ? getTissueColor(npzTissue, i) : TISSUE_COLORS[i%TISSUE_COLORS.length]}"></div>
                   <span class="npz-name">{customName ?? f.filename}</span>
                   <span class="npz-meta">{f.size_mb} MB</span>
                 </div>
@@ -981,27 +1018,45 @@
   }
 
   /* ── Tissue chips ──────────────────────────────────────────────────────── */
-  .tissue-chips {
-    display: flex; flex-wrap: wrap; gap: 4px; flex-shrink: 0;
+  .tissue-list {
+    display: flex; flex-direction: column; gap: 5px; flex-shrink: 0; margin-top: 4px;
   }
-  .tissue-chip {
-    display: flex; align-items: center; gap: 4px;
-    padding: 5px 9px;
+  .tissue-row {
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 8px 10px;
     background: rgba(255,255,255,0.03);
-    border: 1px solid; border-radius: 5px; font-size: 0.6rem;
-    transition: opacity 0.15s;
+    border: 1px solid rgba(255,255,255,0.07);
+    border-left: 3px solid;
+    border-radius: 7px; font-size: 0.66rem;
+    transition: opacity 0.15s, background 0.15s;
     user-select: none;
   }
-  .tissue-chip.chip-disabled { opacity: 0.35; background: rgba(0,0,0,0.2); }
+  .tissue-row:hover { background: rgba(255,255,255,0.05); }
+  .tissue-row.row-disabled { opacity: 0.35; background: rgba(0,0,0,0.2); }
+
+  .tissue-row-top {
+    display: flex; align-items: center; gap: 6px;
+  }
 
   .chip-name-input {
     background: transparent; border: none; outline: none;
-    font-family: inherit; font-size: inherit; font-weight: 600;
-    width: 60px; cursor: text; padding: 0;
+    font-family: inherit; font-size: 0.78rem; font-weight: 700;
+    flex: 1; cursor: text; padding: 0; min-width: 0;
   }
   .chip-name-input:focus { border-bottom: 1px solid rgba(255,255,255,0.3); }
 
-  .chip-range { color: rgba(255,255,255,0.3); }
+  .row-badges { display: flex; align-items: center; gap: 3px; }
+
+  .color-swatch {
+    width: 20px; height: 20px;
+    border: none; border-radius: 4px;
+    background: none; cursor: pointer; padding: 0;
+    flex-shrink: 0;
+  }
+  .color-swatch::-webkit-color-swatch-wrapper { padding: 0; border-radius: 4px; }
+  .color-swatch::-webkit-color-swatch { border: none; border-radius: 4px; }
+
+  .chip-range { color: rgba(255,255,255,0.28); font-size: 0.6rem; }
   .chip-star  { color: #ffc951; }
   .chip-off   { color: rgba(255,100,100,0.7); font-size: 0.55rem; }
 
