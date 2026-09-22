@@ -1,16 +1,19 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import { waitForSidecar, fetchIonImage, fetchDatasetStatus } from "$lib/api.js";
   import type { TissueImage } from "$lib/api.js";
   import IonGrid from "$lib/IonGrid.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import DaneTab from "$lib/DaneTab.svelte";
   import Widma from "$lib/Widma.svelte";
+  import WorkspaceSettings from "$lib/WorkspaceSettings.svelte";
+  import { loadWorkspaces, wsGet, wsSet } from "$lib/workspace.svelte";
   import "@fontsource/jetbrains-mono/400.css";
   import "@fontsource/jetbrains-mono/600.css";
 
   type AppState = "booting" | "ready" | "error";
-  type Tab = "dane" | "mz" | "preprocessing" | "widma" | "segmentacja";
+  type Tab = "dane" | "mz" | "preprocessing" | "widma" | "segmentacja" | "settings";
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "dane",          label: "Dane" },
@@ -29,9 +32,6 @@
   let bootProgress = $state(0);
   let dispMin      = $state(0);
   let dispMax      = $state(1);
-  function lsGet<T>(key: string, fb: T): T { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fb; } catch { return fb; } }
-  function lsSet(key: string, v: unknown) { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }
-
   let activeTab: Tab   = $state("dane");
   let mzMin            = $state(0);
   let mzMax            = $state(Infinity);
@@ -44,24 +44,37 @@
   let lastMz           = $state<number | null>(null);
   let lastTol          = $state(0.3);
   let defaultTol       = $state(0.3);
+  // Gdy true, workspace jest wczytany i stan poniżej odzwierciedla zapisane
+  // wartości — dopiero wtedy wolno zacząć zapisywać zmiany z powrotem
+  // (inaczej efekty odpaliłyby się z domyślnymi wartościami PRZED
+  // odczytaniem workspace i nadpisałyby to, co było zapisane).
+  let restored          = $state(false);
 
-  // Persist to localStorage (only write, browser-only)
-  $effect(() => { lsSet("app_activeTab", activeTab); });
-  $effect(() => { if (lastMz !== null) lsSet("app_lastMz", lastMz); });
-  $effect(() => { lsSet("app_lastTol", lastTol); });
+  // Persist to workspace (only write, browser-only)
+  $effect(() => { if (restored) wsSet("app_activeTab", activeTab); });
+  $effect(() => { if (restored && lastMz !== null) wsSet("app_lastMz", lastMz); });
+  $effect(() => { if (restored) wsSet("app_lastTol", lastTol); });
+  $effect(() => { if (restored) wsSet("app_dispMin", dispMin); });
+  $effect(() => { if (restored) wsSet("app_dispMax", dispMax); });
 
   onMount(async () => {
-    // Load all persisted state — must be in onMount (localStorage unavailable during SSR/build)
-    activeTab    = lsGet<Tab>("app_activeTab", "dane");
-    tissueLabels = lsGet("dane_tissueLabels", {});
-    lastMz       = lsGet("app_lastMz", null);
-    lastTol      = lsGet("app_lastTol", 0.3);
-
     const tick = setInterval(() => {
       bootProgress = Math.min(bootProgress + 3, 85);
     }, 200);
     try {
       await waitForSidecar();
+      await loadWorkspaces();
+
+      // Load all persisted state — dopiero po wczytaniu workspace
+      activeTab    = wsGet<Tab>("app_activeTab", "dane");
+      tissueLabels = wsGet("dane_tissueLabels", {});
+      lastMz       = wsGet("app_lastMz", null);
+      dispMin      = wsGet("app_dispMin", 0);
+      dispMax      = wsGet("app_dispMax", 1);
+      const hadSavedTol = wsGet<number | null>("app_lastTol", null) !== null;
+      lastTol      = wsGet("app_lastTol", 0.3);
+      restored     = true;
+
       bootProgress = 100;
       await new Promise(r => setTimeout(r, 400));
       state = "ready";
@@ -73,7 +86,7 @@
         if (ds.n_bins > 1) {
           const binSize = (ds.mz_max - ds.mz_min) / (ds.n_bins - 1);
           defaultTol = Math.round(binSize * 100) / 100;
-          if (!localStorage.getItem("app_lastTol")) lastTol = defaultTol;
+          if (!hadSavedTol) lastTol = defaultTol;
         }
         // Auto-restore last m/z query
         if (lastMz !== null) handleQuery({ mz: lastMz, tol: lastTol });
@@ -84,6 +97,8 @@
     } finally {
       clearInterval(tick);
     }
+
+    listen<string>("workspace-menu", () => { activeTab = "settings"; });
   });
 
   async function handleFileLoad() {
@@ -217,6 +232,9 @@
           <div class="tp-title">Segmentacja</div>
           <div class="tp-sub">Klasteryzacja pikseli na podstawie widm MSI — mapy segmentów i analiza składowych.</div>
         </div>
+      </main>
+      <main class="content" class:hidden={activeTab !== "settings"}>
+        <WorkspaceSettings />
       </main>
 
     </div>

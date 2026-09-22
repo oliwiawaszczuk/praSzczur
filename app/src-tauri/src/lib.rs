@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::menu::SubmenuBuilder;
+use tauri::{Emitter, Manager};
 
 struct Sidecar(Mutex<Option<Child>>);
 
@@ -128,6 +129,31 @@ pub fn run() {
 
             let child = spawn_sidecar(app.handle(), &root);
             *app.state::<Sidecar>().0.lock().unwrap() = Some(child);
+
+            // Standardowe menu systemowe (App/Plik/Edytuj/Widok/Okno/Pomoc z Cmd+Q itd.),
+            // do którego DODAJEMY własne menu Workspace — żeby nie stracić domyślnych
+            // skrótów (np. Cmd+Q) po podmianie całego paska menu.
+            let menu = tauri::menu::Menu::default(app.handle())?;
+            let workspace_menu = SubmenuBuilder::new(app, "Workspace")
+                .text("ws_new", "Nowy workspace…")
+                .text("ws_open", "Otwórz…")
+                .separator()
+                .text("ws_import", "Importuj…")
+                .text("ws_export", "Eksportuj aktywny…")
+                .build()?;
+            menu.append(&workspace_menu)?;
+            app.set_menu(menu)?;
+            app.on_menu_event(|app_handle, event| {
+                let action = match event.id().as_ref() {
+                    "ws_new"    => "new",
+                    "ws_open"   => "open",
+                    "ws_import" => "import",
+                    "ws_export" => "export",
+                    _ => return,
+                };
+                let _ = app_handle.emit("workspace-menu", action);
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {

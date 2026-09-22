@@ -3,6 +3,7 @@
   import Plotly from "plotly.js-dist-min";
   import { fetchTissuePixelMap, fetchPixelSpectrum, fetchPixelSpectrumRaw } from "./api.js";
   import type { TissuePixelMap, PixelSpectrum } from "./api.js";
+  import { wsGet, wsSet } from "$lib/workspace.svelte";
 
   const LS_LAYERS    = "widma_layers";
   const LS_NORM      = "widma_norm";
@@ -10,9 +11,6 @@
   const LS_ORIGINAL  = "widma_original";
 
   interface SavedLayer { tissue: string; x: number; y: number; label: string; color: string; visible: boolean; locked: boolean; }
-
-  function lsGet<T>(k: string, fb: T): T { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } }
-  function lsSet(k: string, v: unknown) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
 
   interface Props {
     tissues?: string[];
@@ -41,7 +39,7 @@
 
   const COLORS = ["#ffc951","#7ec8e3","#a8e6cf","#ff8b94","#c9b1ff","#ffcba4","#b5ead7","#ffdac1"];
 
-  let selectedTissue  = $state(tissues[0] ?? "");
+  let selectedTissue  = $state(wsGet<string>(LS_TISSUE, tissues[0] ?? ""));
   let pixelMap        = $state<TissuePixelMap | null>(null);
   let mapLoading      = $state(false);
   let layers          = $state<Layer[]>([]);
@@ -64,8 +62,8 @@
     }
   });
   let layerLoading    = $state(false);
-  let normMode        = $state<"none" | "max" | "tic">("none");
-  let showOriginal    = $state(false);
+  let normMode        = $state<"none" | "max" | "tic">(wsGet(LS_NORM, "none"));
+  let showOriginal    = $state(wsGet(LS_ORIGINAL, false));
   let originalError   = $state("");
   let binMz           = $state<number[]>([]);   // centra binów (z binnowanego widma)
   let binIntensity    = $state<number[]>([]);   // intensywności binów (z pierwszej warstwy binnowanej)
@@ -79,26 +77,23 @@
   let dragTarget      = $state<number | null>(null);
 
   // Persist (write-only effects — safe in browser)
-  $effect(() => { lsSet(LS_TISSUE, selectedTissue); });
-  $effect(() => { lsSet(LS_NORM, normMode); });
-  $effect(() => { lsSet(LS_ORIGINAL, showOriginal); });
+  $effect(() => { wsSet(LS_TISSUE, selectedTissue); });
+  $effect(() => { wsSet(LS_NORM, normMode); });
+  $effect(() => { wsSet(LS_ORIGINAL, showOriginal); });
   $effect(() => {
     if (layers.length === 0) return;
     const saved: SavedLayer[] = layers.map(l => ({
       tissue: l.spectrum.tissue, x: l.spectrum.x, y: l.spectrum.y,
       label: l.label, color: l.color, visible: l.visible, locked: l.locked,
     }));
-    lsSet(LS_LAYERS, saved);
+    wsSet(LS_LAYERS, saved);
   });
 
-  // Restore all from localStorage in onMount (browser-only)
+  // Warstwy wymagają fetchu (async) — jedyne co zostaje do zrobienia w onMount.
+  // selectedTissue/normMode/showOriginal są już zainicjalizowane z workspace
+  // bezpośrednio w deklaracjach $state powyżej.
   onMount(async () => {
-    const savedTissue = lsGet<string>(LS_TISSUE, "");
-    if (savedTissue) selectedTissue = savedTissue;
-    normMode = lsGet<"none"|"max"|"tic">(LS_NORM, "none");
-    showOriginal = lsGet<boolean>(LS_ORIGINAL, false);
-
-    const saved = lsGet<SavedLayer[]>(LS_LAYERS, []);
+    const saved = wsGet<SavedLayer[]>(LS_LAYERS, []);
     if (saved.length === 0) return;
     layerLoading = true;
     try {

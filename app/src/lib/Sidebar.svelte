@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import "@fontsource/jetbrains-mono/400.css";
   import "@fontsource/jetbrains-mono/600.css";
   import DualRange from "./DualRange.svelte";
+  import { wsGet, wsSet } from "$lib/workspace.svelte";
 
   const BASE = "http://127.0.0.1:7432";
 
@@ -36,25 +38,25 @@
   interface MzEntry { name: string; mz: number; }
   const STORAGE_KEY = "praSzczur_mzList";
 
-  function loadList(): MzEntry[] {
-    try { const raw = localStorage.getItem(STORAGE_KEY); if (raw) return JSON.parse(raw) as MzEntry[]; } catch {}
-    return [];
-  }
   function saveList(list: MzEntry[]) {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch {}
+    wsSet(STORAGE_KEY, list);
   }
 
-  let mzInput    = $state("");
-  let tol        = $state(tolDefault);
+  let mzInput    = $state(currentMz !== null ? String(currentMz) : "");
+  let tol        = $state(currentTol);
   let mzError    = $state("");
-  $effect(() => { tol = tolDefault; });
+  // Auto-dopasuj tolerancję do wykrytego bin size tylko gdy nie ma jeszcze
+  // przywróconego zapytania (świeża sesja) — inaczej nadpisałoby przywrócone tol.
+  $effect(() => { if (currentMz === null) tol = tolDefault; });
 
-  let mzList     = $state<MzEntry[]>(loadList());
+  let mzList     = $state<MzEntry[]>(wsGet(STORAGE_KEY, []));
   let selectedIdx = $state<number | null>(null);
   let newName    = $state("");
   let newMz      = $state("");
   let addError   = $state("");
-  let invertColors = $state(false);
+  let invertColors = $state(wsGet("sidebar_invertColors", false));
+  $effect(() => { wsSet("sidebar_invertColors", invertColors); });
+  onMount(() => { oninvert?.(invertColors); });
 
   // Section collapse state
   let showRange  = $state(true);

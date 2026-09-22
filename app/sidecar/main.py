@@ -8,7 +8,10 @@ from pathlib import Path
 import sys
 import time
 import json
+import shutil
+import uuid
 import asyncio
+from datetime import datetime, timezone
 from typing import AsyncIterator
 
 import os
@@ -18,23 +21,93 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-ROOT     = Path(os.environ.get("PRASZCZUR_ROOT", Path(__file__).resolve().parents[2]))
-DATA_DIR = ROOT / "data" / "processed"
-SRC_DIR  = ROOT / "src"
+ROOT           = Path(os.environ.get("PRASZCZUR_ROOT", Path(__file__).resolve().parents[2]))
+WORKSPACES_DIR = ROOT / "workspaces"
+SRC_DIR        = ROOT / "src"
 sys.path.insert(0, str(ROOT))
 
 # ── Cache ──────────────────────────────────────────────────────────────────
 _cache: dict[str, dict] = {}   # tissue_id → {spectra, coords, mz_bins}
 _tissues_meta: list[dict] = [] # wykryte tkanki (x_min, x_max, label, is_ref)
-_IMZML_PATH_FILE = DATA_DIR / "imzml_path.txt"
 _imzml_path: str = ""          # ostatnio przetworzony plik imzML
+_active_workspace_id: str = "" # aktywny workspace
+
+
+# ── Workspace helpers ────────────────────────────────────────────────────────
+_REGISTRY_FILE = WORKSPACES_DIR / "registry.json"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_registry() -> dict:
+    try:
+        if _REGISTRY_FILE.exists():
+            return json.loads(_REGISTRY_FILE.read_text())
+    except Exception:
+        pass
+    return {"active_id": "", "workspaces": []}
+
+
+def _save_registry(reg: dict) -> None:
+    WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
+    _REGISTRY_FILE.write_text(json.dumps(reg, indent=2))
+
+
+def _workspace_dir(wid: str) -> Path:
+    return WORKSPACES_DIR / wid
+
+
+def DATA_DIR() -> Path:
+    return _workspace_dir(_active_workspace_id) / "processed"
+
+
+def _settings_file(wid: str) -> Path:
+    return _workspace_dir(wid) / "workspace.json"
+
+
+def _imzml_path_file(wid: str) -> Path:
+    return _workspace_dir(wid) / "imzml_path.txt"
+
+
+def _find_ws(reg: dict, wid: str) -> dict | None:
+    return next((w for w in reg["workspaces"] if w["id"] == wid), None)
+
+
+def _ensure_default_workspace() -> dict:
+    """Wczytuje registry; jeśli brak workspace'ów, tworzy domyślny i migruje
+    ewentualne stare dane z data/processed/ (poprzedni, jednoworkspace'owy model)."""
+    reg = _load_registry()
+    if not reg["workspaces"]:
+        wid = uuid.uuid4().hex[:12]
+        now = _now_iso()
+        reg["workspaces"] = [{"id": wid, "name": "Domyślny", "createdAt": now, "updatedAt": now}]
+        reg["active_id"] = wid
+        ws_dir = _workspace_dir(wid)
+        (ws_dir / "processed").mkdir(parents=True, exist_ok=True)
+        _settings_file(wid).write_text("{}")
+
+        legacy = ROOT / "data" / "processed"
+        if legacy.exists():
+            for f in legacy.glob("*.npz"):
+                shutil.copy(f, ws_dir / "processed" / f.name)
+            legacy_path_file = legacy / "imzml_path.txt"
+            if legacy_path_file.exists():
+                shutil.copy(legacy_path_file, _imzml_path_file(wid))
+        _save_registry(reg)
+    elif not reg.get("active_id") or not _find_ws(reg, reg["active_id"]):
+        reg["active_id"] = reg["workspaces"][0]["id"]
+        _save_registry(reg)
+    return reg
 
 
 def _load_imzml_path() -> str:
-    """Odczytuje zapisaną ścieżkę imzML z pliku (persystuje między sesjami)."""
+    """Odczytuje zapisaną ścieżkę imzML aktywnego workspace."""
     try:
-        if _IMZML_PATH_FILE.exists():
-            p = _IMZML_PATH_FILE.read_text().strip()
+        f = _imzml_path_file(_active_workspace_id)
+        if f.exists():
+            p = f.read_text().strip()
             if p and Path(p).exists():
                 return p
     except Exception:
@@ -43,23 +116,22 @@ def _load_imzml_path() -> str:
 
 
 def _save_imzml_path(path: str) -> None:
-    """Zapisuje ścieżkę imzML do pliku."""
+    """Zapisuje ścieżkę imzML aktywnego workspace."""
     try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _IMZML_PATH_FILE.write_text(path)
+        _workspace_dir(_active_workspace_id).mkdir(parents=True, exist_ok=True)
+        _imzml_path_file(_active_workspace_id).write_text(path)
     except Exception:
         pass
 
 
 def _load_npz_files() -> list[str]:
-    """Ładuje wszystkie dostępne pliki .npz z DATA_DIR. Zwraca listę tissue_id."""
+    """Ładuje wszystkie dostępne pliki .npz z DATA_DIR aktywnego workspace. Zwraca listę tissue_id."""
     global _imzml_path
     _cache.clear()
-    # Przywróć ścieżkę imzML jeśli nie jest jeszcze znana
-    if not _imzml_path:
-        _imzml_path = _load_imzml_path()
+    _imzml_path = _load_imzml_path()
     found = []
-    for path in sorted(DATA_DIR.glob("*.npz")):
+    DATA_DIR().mkdir(parents=True, exist_ok=True)
+    for path in sorted(DATA_DIR().glob("*.npz")):
         tid = path.stem
         d = np.load(path)
         _cache[tid] = {
@@ -155,7 +227,9 @@ def _detect_tissues_from_tic(col_tic: np.ndarray, x_offset: int,
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    global _tissues_meta
+    global _tissues_meta, _active_workspace_id
+    reg = _ensure_default_workspace()
+    _active_workspace_id = reg["active_id"]
     ids = _load_npz_files()
     _tissues_meta = _build_tissues_meta(ids)
     yield
@@ -180,7 +254,7 @@ def health() -> dict:
 @app.get("/dataset_status")
 def dataset_status() -> dict:
     npz_files = []
-    for path in sorted(DATA_DIR.glob("*.npz")):
+    for path in sorted(DATA_DIR().glob("*.npz")):
         stat = path.stat()
         npz_files.append({
             "id":       path.stem,
@@ -191,7 +265,7 @@ def dataset_status() -> dict:
 
     mz_bins = _cache[list(_cache.keys())[0]]["mz_bins"] if _cache else np.array([])
     return {
-        "data_dir":    str(DATA_DIR),
+        "data_dir":    str(DATA_DIR()),
         "npz_files":   npz_files,
         "tissues":     _tissues_meta,
         "n_tissues":   len(_cache),
@@ -579,6 +653,7 @@ async def process(body: dict) -> StreamingResponse:
     from src.msi.constants import MZ_MIN, MZ_MAX, BIN_SIZE
 
     bin_size   = float(body.get("bin_size",  BIN_SIZE))
+    bin_agg    = str(body.get("bin_agg", "sum"))  # "sum" | "mean" | "peak_apex"
     mz_min     = float(body.get("mz_min",   MZ_MIN))
     mz_max     = float(body.get("mz_max",   MZ_MAX))
     tissues    = body.get("tissues", _tissues_meta)
@@ -647,7 +722,16 @@ async def process(body: dict) -> StreamingResponse:
                 in_range = (idx < n_bins) & (
                     np.abs(mz_arr - bin_centers[np.clip(idx, 0, n_bins-1)]) <= half
                 )
-                np.add.at(binned, idx[in_range], ints[in_range])
+                if bin_agg == "mean":
+                    counts = np.zeros(n_bins, dtype=np.int32)
+                    np.add.at(binned, idx[in_range], ints[in_range])
+                    np.add.at(counts, idx[in_range], 1)
+                    np.divide(binned, counts, out=binned, where=counts > 0)
+                elif bin_agg == "peak_apex":
+                    # bierze maksimum surowych punktów w oknie bina (bez sumowania/uśredniania)
+                    np.maximum.at(binned, idx[in_range], ints[in_range])
+                else:
+                    np.add.at(binned, idx[in_range], ints[in_range])
                 buffers[t["id"]]["spectra"].append(binned)
                 buffers[t["id"]]["coords"].append([x, y])
 
@@ -659,8 +743,8 @@ async def process(body: dict) -> StreamingResponse:
 
             yield _sse("progress", {"step": "saving", "pct": 92,
                                      "message": "Zapis plików .npz…"})
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            for old in DATA_DIR.glob("*.npz"):
+            DATA_DIR().mkdir(parents=True, exist_ok=True)
+            for old in DATA_DIR().glob("*.npz"):
                 old.unlink()
             summary = []
             for t in tissues:
@@ -670,7 +754,7 @@ async def process(body: dict) -> StreamingResponse:
                     continue
                 spectra_arr = np.stack(buf["spectra"])
                 coords_out  = np.array(buf["coords"], dtype=np.int16)
-                out_path = DATA_DIR / f"{tid}.npz"
+                out_path = DATA_DIR() / f"{tid}.npz"
                 np.savez_compressed(out_path, spectra=spectra_arr,
                                     coords=coords_out, mz_bins=bin_centers)
                 summary.append({"id": tid, "n_spectra": len(buf["spectra"])})
@@ -684,6 +768,7 @@ async def process(body: dict) -> StreamingResponse:
             _tissues_meta.clear()
             ids = _load_npz_files()
             _tissues_meta.extend(_build_tissues_meta(ids))
+            _touch_workspace(_active_workspace_id)
 
             yield _sse("done", {"message": "Preprocessing zakończony", "summary": summary})
 
@@ -774,6 +859,131 @@ def tissue_pixel_map(tissue: str, mz: float = -1.0, tol: float = 0.3,
         norm_by = global_vmax if global_vmax > 0 else local_vmax
         values = (tic / norm_by).tolist()
     return {"tissue": tissue, "xs": xs, "ys": ys, "values": values}
+
+
+# ── Workspaces ────────────────────────────────────────────────────────────
+def _touch_workspace(wid: str) -> None:
+    reg = _load_registry()
+    ws = _find_ws(reg, wid)
+    if ws:
+        ws["updatedAt"] = _now_iso()
+        _save_registry(reg)
+
+
+@app.get("/workspaces")
+def list_workspaces() -> dict:
+    reg = _load_registry()
+    return {"workspaces": reg["workspaces"], "active_id": reg["active_id"]}
+
+
+@app.post("/workspaces")
+def create_workspace(body: dict) -> dict:
+    name = (body.get("name") or "Nowy workspace").strip() or "Nowy workspace"
+    reg = _load_registry()
+    wid = uuid.uuid4().hex[:12]
+    now = _now_iso()
+    ws = {"id": wid, "name": name, "createdAt": now, "updatedAt": now}
+    reg["workspaces"].append(ws)
+    _save_registry(reg)
+    (_workspace_dir(wid) / "processed").mkdir(parents=True, exist_ok=True)
+    _settings_file(wid).write_text("{}")
+    return ws
+
+
+@app.put("/workspaces/{wid}")
+def update_workspace(wid: str, body: dict) -> dict:
+    reg = _load_registry()
+    ws = _find_ws(reg, wid)
+    if not ws:
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    if "name" in body and body["name"].strip():
+        ws["name"] = body["name"].strip()
+    ws["updatedAt"] = _now_iso()
+    _save_registry(reg)
+    return ws
+
+
+@app.delete("/workspaces/{wid}")
+def delete_workspace(wid: str) -> dict:
+    reg = _load_registry()
+    if not _find_ws(reg, wid):
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    if len(reg["workspaces"]) <= 1:
+        raise HTTPException(400, "Nie można usunąć jedynego workspace")
+    reg["workspaces"] = [w for w in reg["workspaces"] if w["id"] != wid]
+    if reg["active_id"] == wid:
+        reg["active_id"] = reg["workspaces"][0]["id"]
+    _save_registry(reg)
+    shutil.rmtree(_workspace_dir(wid), ignore_errors=True)
+    return {"ok": True}
+
+
+@app.post("/workspaces/{wid}/activate")
+def activate_workspace(wid: str) -> dict:
+    global _active_workspace_id, _tissues_meta
+    reg = _load_registry()
+    if not _find_ws(reg, wid):
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    reg["active_id"] = wid
+    _save_registry(reg)
+    _active_workspace_id = wid
+    ids = _load_npz_files()
+    _tissues_meta = _build_tissues_meta(ids)
+    return {"ok": True, "active_id": wid}
+
+
+@app.get("/workspaces/{wid}/settings")
+def get_workspace_settings(wid: str) -> dict:
+    f = _settings_file(wid)
+    if not f.exists():
+        return {}
+    try:
+        return json.loads(f.read_text())
+    except Exception:
+        return {}
+
+
+@app.put("/workspaces/{wid}/settings")
+def put_workspace_settings(wid: str, body: dict) -> dict:
+    reg = _load_registry()
+    if not _find_ws(reg, wid):
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    _workspace_dir(wid).mkdir(parents=True, exist_ok=True)
+    _settings_file(wid).write_text(json.dumps(body))
+    _touch_workspace(wid)
+    return {"ok": True}
+
+
+@app.post("/workspaces/{wid}/export")
+def export_workspace(wid: str, body: dict) -> dict:
+    reg = _load_registry()
+    ws = _find_ws(reg, wid)
+    if not ws:
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    dest_dir = Path(body["dest_dir"])
+    if not dest_dir.exists():
+        raise HTTPException(404, f"Brak folderu docelowego: {dest_dir}")
+    safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in ws["name"]).strip() or wid
+    out_dir = dest_dir / f"praSzczur_workspace_{safe_name}"
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    shutil.copytree(_workspace_dir(wid), out_dir)
+    return {"ok": True, "path": str(out_dir)}
+
+
+@app.post("/workspaces/import")
+def import_workspace(body: dict) -> dict:
+    src_dir = Path(body["src_dir"])
+    if not src_dir.exists() or not (src_dir / "workspace.json").exists():
+        raise HTTPException(400, f"'{src_dir}' nie jest poprawnym folderem workspace")
+    reg = _load_registry()
+    wid = uuid.uuid4().hex[:12]
+    now = _now_iso()
+    name = src_dir.name.replace("praSzczur_workspace_", "") or "Zaimportowany"
+    shutil.copytree(src_dir, _workspace_dir(wid))
+    reg["workspaces"].append({"id": wid, "name": name, "createdAt": now, "updatedAt": now})
+    _save_registry(reg)
+    return {"id": wid, "name": name, "createdAt": now, "updatedAt": now}
 
 
 if __name__ == "__main__":

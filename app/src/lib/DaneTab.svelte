@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
+  import { wsGet, wsSet } from "$lib/workspace.svelte";
 
   const BASE = "http://127.0.0.1:7432";
 
@@ -36,7 +37,12 @@
   let { onlabelschange, oncolorschange, onfileload }: Props = $props();
 
   // ── State ────────────────────────────────────────────────────────────────
-  let imzmlPath    = $state("source/FMP10_Rat_brain_breg_084.imzML");
+  // Inicjalizacja bezpośrednio z wsGet (nie w onMount!) — efekty poniżej
+  // zapisują przy KAŻDEJ zmianie stanu, w tym przy montowaniu; gdyby stan
+  // startował z twardych domyślnych wartości i dopiero potem był nadpisywany
+  // w onMount, efekt zdążyłby zapisać domyślną wartość i nadpisać nią to,
+  // co było już zapisane w workspace.
+  let imzmlPath    = $state(wsGet("dane_imzmlPath", ""));
   let fileInfo     = $state<{width:number;height:number}|null>(null);
   let fileError    = $state("");
   let loadingFile  = $state(false);
@@ -47,21 +53,16 @@
 
   let spectrumData    = $state<{mz:number[];intensity:number[];mz_min:number;mz_max:number}|null>(null);
   let loadingSpectrum = $state(false);
-  // ── Persistence helpers ───────────────────────────────────────────────────
-  function lsGet<T>(key: string, fallback: T): T {
-    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
-  }
-  function lsSet(key: string, val: unknown) {
-    try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-  }
 
-  let mzMin   = $state(300);
-  let mzMax   = $state(1500);
-  let binSize = $state(0.3);
+  let mzMin   = $state(wsGet("dane_mzMin", 300));
+  let mzMax   = $state(wsGet("dane_mzMax", 1500));
+  let binSize = $state(wsGet("dane_binSize", 0.3));
+  let binAgg  = $state(wsGet<"sum"|"mean"|"peak_apex">("dane_binAgg", "sum"));
 
-  $effect(() => { lsSet("dane_mzMin", mzMin); });
-  $effect(() => { lsSet("dane_mzMax", mzMax); });
-  $effect(() => { lsSet("dane_binSize", binSize); });
+  $effect(() => { wsSet("dane_mzMin", mzMin); });
+  $effect(() => { wsSet("dane_mzMax", mzMax); });
+  $effect(() => { wsSet("dane_binSize", binSize); });
+  $effect(() => { wsSet("dane_binAgg", binAgg); });
   const nBins = $derived(Math.floor((mzMax - mzMin) / binSize));
 
   // Widok widma — null = pełny zakres danych
@@ -83,10 +84,64 @@
   let processPct   = $state(0);
   let processError = $state("");
 
+  // ── Historia niezapisanych zmian ────────────────────────────────────────
+  // Migawka parametrów, którymi wygenerowano AKTUALNE pliki .npz. Porównanie
+  // jej z bieżącym stanem pozwala pokazać, co się zmieniło od ostatniego
+  // przetwarzania (i że dane na dysku są nieaktualne).
+  interface ProcessedSnapshot {
+    mzMin: number; mzMax: number; binSize: number; binAgg: string;
+    tissues: { id: string; label: string; enabled: boolean; x_min: number; x_max: number; y_min?: number; y_max?: number }[];
+  }
+  let processedSnapshot = $state<ProcessedSnapshot | null>(null);
+
+  function snapshotNow(): ProcessedSnapshot {
+    return {
+      mzMin, mzMax, binSize, binAgg,
+      tissues: tissues.map(t => ({
+        id: t.id, label: t.label, enabled: t.enabled !== false,
+        x_min: t.x_min, x_max: t.x_max, y_min: t.y_min, y_max: t.y_max,
+      })),
+    };
+  }
+
+  const pendingChanges = $derived.by(() => {
+    if (!processedSnapshot) return [] as string[];
+    const changes: string[] = [];
+    if (mzMin !== processedSnapshot.mzMin) changes.push(`m/z min: ${processedSnapshot.mzMin} → ${mzMin} Da`);
+    if (mzMax !== processedSnapshot.mzMax) changes.push(`m/z max: ${processedSnapshot.mzMax} → ${mzMax} Da`);
+    if (binSize !== processedSnapshot.binSize) changes.push(`bin size: ${processedSnapshot.binSize} → ${binSize} Da`);
+    if (binAgg !== processedSnapshot.binAgg) changes.push(`agregacja binów: ${binAggLabel(processedSnapshot.binAgg)} → ${binAggLabel(binAgg)}`);
+
+    const oldById = new Map(processedSnapshot.tissues.map(t => [t.id, t]));
+    const newIds = new Set(tissues.map(t => t.id));
+    for (const t of tissues) {
+      const enabled = t.enabled !== false;
+      const old = oldById.get(t.id);
+      if (!old) { changes.push(`+ nowa tkanka „${t.label}”`); continue; }
+      if (old.label !== t.label) changes.push(`nazwa: „${old.label}” → „${t.label}”`);
+      if (old.enabled !== enabled) changes.push(`„${t.label}”: ${enabled ? "włączona" : "wyłączona"}`);
+      if (old.x_min !== t.x_min || old.x_max !== t.x_max || old.y_min !== t.y_min || old.y_max !== t.y_max) {
+        changes.push(`„${t.label}”: zmieniony zakres ROI`);
+      }
+    }
+    for (const old of processedSnapshot.tissues) {
+      if (!newIds.has(old.id)) changes.push(`− usunięta tkanka „${old.label}”`);
+    }
+    return changes;
+  });
+
+  function binAggLabel(v: string): string {
+    return v === "mean" ? "średnia" : v === "peak_apex" ? "peak apex" : "suma";
+  }
+
   const TISSUE_COLORS = ["#ffc951","#4ecdc4","#ff6b6b","#a8e6cf","#c3a6ff","#ffb347"];
 
+  // UWAGA: celowo NIE ma tu reaktywnego $effect zapisującego tissueColors —
+  // taki efekt odpaliłby się natychmiast przy montowaniu (zanim loadFile()
+  // zdąży wczytać zapisane kolory z workspace) i skasowałby je pustym
+  // obiektem. saveColors() jest wywoływane jawnie tam, gdzie użytkownik
+  // faktycznie zmienia kolor (kliknięcie color-swatch).
   let tissueColors = $state<Record<string, string>>({});
-  $effect(() => { if (imzmlPath) saveColors(); });
 
   function getTissueColor(t: TissueMeta, i: number): string {
     return tissueColors[t.id] ?? TISSUE_COLORS[i % TISSUE_COLORS.length];
@@ -114,39 +169,18 @@
   let dragBinStartCenter = 0;
 
   // ── On mount ─────────────────────────────────────────────────────────────
+  // mzMin/mzMax/binSize/imzmlPath są już zainicjalizowane z workspace w
+  // deklaracjach $state powyżej — tu tylko ewentualne auto-przywrócenie pliku.
   onMount(async () => {
-    // Restore persisted settings (must be in onMount — localStorage unavailable during SSR)
-    mzMin        = lsGet("dane_mzMin", 300);
-    mzMax        = lsGet("dane_mzMax", 1500);
-    binSize      = lsGet("dane_binSize", 0.3);
-    imzmlPath    = lsGet("dane_imzmlPath", imzmlPath);
-
     await refreshStatus();
-    // Auto-reload detection data so UI shows previous state
     if (imzmlPath) {
-      try { await loadFile(); } catch {}
-    } else {
-      // Fallback: load from default_tissues if no file path
-      try {
-        const r = await fetch(`${BASE}/default_tissues`);
-        if (r.ok) {
-          const d = await r.json();
-          if (tissues.length === 0 && d.tissues?.length > 0) {
-            const savedLabels: Record<string,string> = lsGet(labelsKey(), {});
-            const savedEnabled: Record<string,boolean> = lsGet(enabledKey(), {});
-            tissueColors = lsGet(colorsKey(), {});
-            tissues = d.tissues.map((t: TissueMeta) => ({
-              ...t,
-              label:   savedLabels[t.id] ?? t.label,
-              enabled: savedEnabled[t.id] ?? true,
-            }));
-            // Notify parent of restored labels
-            const labels: Record<string,string> = {};
-            tissues.forEach(t => { labels[t.id] = t.label; });
-            onlabelschange?.(labels);
-          }
-        }
-      } catch {}
+      try { await loadFile(true); } catch {}
+    }
+    // Jeśli na dysku są już przetworzone pliki .npz, przyjmujemy bieżący
+    // (dopiero co przywrócony) stan jako punkt odniesienia — inaczej po
+    // starcie aplikacji od razu pokazałoby się "nieprzetworzone zmiany".
+    if (status && status.npz_files.length > 0) {
+      processedSnapshot = snapshotNow();
     }
   });
 
@@ -158,14 +192,14 @@
     const labels: Record<string,string> = {};
     const enabled: Record<string,boolean> = {};
     tissues.forEach(t => { labels[t.id] = t.label; enabled[t.id] = t.enabled ?? true; });
-    lsSet(labelsKey(), labels);
-    lsSet(enabledKey(), enabled);
-    lsSet("dane_tissueLabels", labels);   // current — dla +page.svelte
+    wsSet(labelsKey(), labels);
+    wsSet(enabledKey(), enabled);
+    wsSet("dane_tissueLabels", labels);   // current — dla +page.svelte
     onlabelschange?.(labels);
   }
 
   function saveColors() {
-    lsSet(colorsKey(), tissueColors);
+    wsSet(colorsKey(), tissueColors);
   }
 
   async function refreshStatus() {
@@ -184,7 +218,11 @@
     if (selected) { imzmlPath = selected as string; await loadFile(); }
   }
 
-  async function loadFile() {
+  // isRestore=true → automatyczne przywrócenie ostatnio wczytanego pliku przy
+  // starcie workspace: NIE resetuje zakresu m/z (zachowuje to, co zapisane)
+  // i NIE zgłasza onfileload (żeby nie czyścić warstw w zakładce Widma —
+  // filekey++ tam oznacza "nowy plik", a to tylko przywrócenie tego samego).
+  async function loadFile(isRestore: boolean = false) {
     loadingFile = true; fileError = ""; fileInfo = null;
     detectionData = null; spectrumData = null;
     try {
@@ -195,23 +233,23 @@
       }
       const d: DetectionResult = await r.json();
       detectionData = d;
-      const savedLabels: Record<string,string> = lsGet(labelsKey(), {});
-      const savedEnabled: Record<string,boolean> = lsGet(enabledKey(), {});
-      tissueColors = lsGet(colorsKey(), {});
+      const savedLabels: Record<string,string> = wsGet(labelsKey(), {});
+      const savedEnabled: Record<string,boolean> = wsGet(enabledKey(), {});
+      tissueColors = wsGet(colorsKey(), {});
       tissues = d.detected.map((t,i) => ({
         ...t, is_ref: i===0,
         label:   savedLabels[t.id] ?? t.label,
         enabled: savedEnabled[t.id] ?? true,
       }));
       fileInfo = { width: d.width, height: d.height };
-      lsSet("dane_imzmlPath", imzmlPath);  // tylko po udanym załadowaniu
+      wsSet("dane_imzmlPath", imzmlPath);  // tylko po udanym załadowaniu
       // Notify parent with restored/current labels
       const labels: Record<string,string> = {};
       tissues.forEach(t => { labels[t.id] = t.label; });
       onlabelschange?.(labels);
-      onfileload?.();
+      if (!isRestore) onfileload?.();
       const t1 = d.detected[0];
-      loadSpectrum(t1?.x_min, t1?.x_max);
+      loadSpectrum(t1?.x_min, t1?.x_max, isRestore);
     } catch (e) {
       fileError = (e as Error).message;
     } finally { loadingFile = false; }
@@ -223,7 +261,9 @@
   }
 
   // ── Krok 3: widmo ────────────────────────────────────────────────────────
-  async function loadSpectrum(xMin?: number, xMax?: number) {
+  // keepRange=true → nie nadpisuj mzMin/mzMax (używane przy automatycznym
+  // przywracaniu pliku, żeby nie kasować zapisanego zakresu przetwarzania).
+  async function loadSpectrum(xMin?: number, xMax?: number, keepRange: boolean = false) {
     loadingSpectrum = true;
     try {
       let url = `${BASE}/sample_spectrum?path=${encodeURIComponent(imzmlPath)}&n_samples=300`;
@@ -232,8 +272,10 @@
       if (r.ok) {
         spectrumData = await r.json();
         if (spectrumData) {
-          mzMin = Math.ceil(spectrumData.mz_min);
-          mzMax = Math.floor(spectrumData.mz_max);
+          if (!keepRange) {
+            mzMin = Math.ceil(spectrumData.mz_min);
+            mzMax = Math.floor(spectrumData.mz_max);
+          }
           viewMin = null; viewMax = null;
           binCenter = Math.round((mzMin + mzMax) / 2);
           binYShift = 0;
@@ -249,7 +291,7 @@
       const resp = await fetch(`${BASE}/process`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bin_size: binSize, mz_min: mzMin, mz_max: mzMax, tissues: tissues.filter(t => t.enabled !== false), imzml_path: imzmlPath }),
+        body: JSON.stringify({ bin_size: binSize, bin_agg: binAgg, mz_min: mzMin, mz_max: mzMax, tissues: tissues.filter(t => t.enabled !== false), imzml_path: imzmlPath }),
       });
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
@@ -275,6 +317,7 @@
             const summary: {id:string;n_spectra:number}[] = data.summary ?? [];
             processLog = [...processLog, `✓ ${data.message}`, ...summary.map(s => `  ${s.id}: ${s.n_spectra.toLocaleString()} spektrów`)];
             await refreshStatus();
+            processedSnapshot = snapshotNow();
             onfileload?.();
           } else if (event === "error") {
             processError = data.message + (data.trace ? "\n" + data.trace : "");
@@ -718,6 +761,7 @@
                     title="Accent kolor tkanki"
                     oninput={(e) => {
                       tissueColors = { ...tissueColors, [t.id]: (e.target as HTMLInputElement).value };
+                      saveColors();
                     }}
                   />
                 </div>
@@ -738,7 +782,9 @@
         <div class="step-header">
           <span class="step-num">4</span>
           <span class="step-title">Przetwarzanie</span>
-          {#if status && status.npz_files.length > 0 && !processing}
+          {#if !processing && pendingChanges.length > 0}
+            <span class="badge warn ml-auto">⚠ niezapisane zmiany</span>
+          {:else if status && status.npz_files.length > 0 && !processing}
             <span class="badge ok ml-auto">✓ gotowe</span>
           {/if}
         </div>
@@ -764,7 +810,14 @@
         {/if}
 
         <div class="process-bottom">
-          {#if processLog.length > 0}
+          {#if !processing && pendingChanges.length > 0}
+            <div class="changes-panel">
+              <div class="changes-title">⚠ Zmiany od ostatniego przetworzenia:</div>
+              {#each pendingChanges as change}
+                <div class="change-line">{change}</div>
+              {/each}
+            </div>
+          {:else if processLog.length > 0}
             <div class="process-log">
               {#each processLog.slice(-6) as line}
                 <div class="log-line">{line}</div>
@@ -808,6 +861,14 @@
               <label class="param-label">Bin size [Da]</label>
               <input class="param-input" type="number" min="0.05" max="2" step="0.05"
                      bind:value={binSize} style="width:70px" />
+            </div>
+            <div class="param-group" style="flex-shrink:0">
+              <label class="param-label">Agregacja</label>
+              <select class="param-input" bind:value={binAgg} style="width:120px">
+                <option value="sum">Suma</option>
+                <option value="mean">Średnia</option>
+                <option value="peak_apex">Peak apex</option>
+              </select>
             </div>
             <div class="slider-group">
               <label class="param-label">Pozycja</label>
@@ -960,6 +1021,7 @@
   }
   .badge.ok { background: rgba(100,220,100,0.12); color: #80e080; border-color: rgba(100,220,100,0.2); }
   .badge.accent { background: rgba(255,201,81,0.12); color: #ffc951; border-color: rgba(255,201,81,0.2); }
+  .badge.warn { background: rgba(255,160,50,0.14); color: #ffa632; border-color: rgba(255,160,50,0.25); }
 
   /* ── File row ──────────────────────────────────────────────────────────── */
   .file-row { display: flex; gap: 5px; align-items: center; flex-shrink: 0; }
@@ -1231,6 +1293,14 @@
     padding: 5px 8px; display: flex; flex-direction: column; gap: 2px; min-width: 0;
   }
   .log-line { font-size: 0.58rem; color: rgba(255,255,255,0.28); }
+  .changes-panel {
+    flex: 1; background: rgba(255,160,50,0.05);
+    border: 1px solid rgba(255,160,50,0.15); border-radius: 6px;
+    padding: 5px 8px; display: flex; flex-direction: column; gap: 2px; min-width: 0;
+    max-height: 96px; overflow-y: auto;
+  }
+  .changes-title { font-size: 0.58rem; font-weight: 700; color: #ffa632; margin-bottom: 1px; }
+  .change-line { font-size: 0.58rem; color: rgba(255,200,150,0.75); }
   .npz-panel {
     flex: 1; background: rgba(100,220,100,0.04);
     border: 1px solid rgba(100,220,100,0.1); border-radius: 6px;
