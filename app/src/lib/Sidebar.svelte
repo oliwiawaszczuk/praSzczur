@@ -486,9 +486,10 @@
   }
   .cb-input:checked::after {
     content: ""; position: absolute;
-    left: 4px; top: 1px; width: 5px; height: 9px;
-    border: 2px solid #1a1a1a; border-top: none; border-left: none;
-    transform: rotate(45deg);
+    left: 50%; top: 50%;
+    width: 4px; height: 7px;
+    border-right: 1.5px solid #1a1a1a; border-bottom: 1.5px solid #1a1a1a;
+    transform: translate(-50%, -62%) rotate(45deg);
   }
   .cb-input:hover { border-color: rgba(255,201,81,0.5); }
   .cb-label {

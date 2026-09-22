@@ -14,6 +14,14 @@
   let lo = $state(Math.round(min * 100));
   let hi = $state(Math.round(max * 100));
 
+  // Synchronizuj z propami gdy zmienią się z zewnątrz (np. Reset)
+  $effect(() => {
+    const newLo = Math.round(min * 100);
+    const newHi = Math.round(max * 100);
+    if (newLo !== lo) lo = newLo;
+    if (newHi !== hi) hi = newHi;
+  });
+
   function onLo(e: Event) {
     const v = parseInt((e.target as HTMLInputElement).value);
     lo = Math.min(v, hi - 1);

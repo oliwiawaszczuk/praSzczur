@@ -16,6 +16,10 @@
 
   const keys = $derived(tissues ? Object.keys(tissues) : ["", "", "", ""]);
 
+  // Oblicz liczbę kolumn: 2 dla ≤4, 3 dla ≤9, 4 dla ≤16 itd.
+  const cols = $derived(Math.ceil(Math.sqrt(keys.length)));
+  const gridStyle = $derived(`grid-template-columns: repeat(${cols}, 1fr);`);
+
   let focusedKey = $state<string | null>(null);
   $effect(() => { keys; focusedKey = null; });
 
@@ -47,7 +51,7 @@
       <div class="notice-msg">Wpisz wartość m/z i kliknij Wczytaj</div>
     </div>
   {:else if focusedKey === null}
-    <div class="grid-normal">
+    <div class="grid-normal" style={gridStyle}>
       {#each keys as key}
         <div class="tile" onclick={() => handleClick(key)} role="button" tabindex="0">
           <IonCanvas tissue={withLabel(key, tissues?.[key] ?? null)} {loading} {dispMin} {dispMax} accentColor={tissueColors[key] ?? ""} {invertColors} />
@@ -97,8 +101,7 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr 1fr;
+    grid-auto-rows: 1fr;
     gap: 14px;
     padding: 14px;
     box-sizing: border-box;

@@ -15,9 +15,10 @@
   const TABS: { key: Tab; label: string }[] = [
     { key: "dane",          label: "Dane" },
     { key: "mz",            label: "m/z" },
-    { key: "preprocessing", label: "Preprocessing" },
     { key: "widma",         label: "Widma" },
+    { key: "preprocessing", label: "Preprocessing" },
     { key: "segmentacja",   label: "Segmentacja" },
+    { key: "settings",   label: "Ustawienia" },
   ];
 
   let state:       AppState = $state("booting");
@@ -38,6 +39,8 @@
   let tissueLabels     = $state<Record<string,string>>({});
   let tissueColors     = $state<Record<string,string>>({});
   let invertColors     = $state(false);
+  let filekey          = $state(0);
+  let tissueVmax       = $state<Record<string, number>>({});
   let lastMz           = $state<number | null>(null);
   let lastTol          = $state(0.3);
   let defaultTol       = $state(0.3);
@@ -85,6 +88,7 @@
 
   async function handleFileLoad() {
     // Nowy plik — odśwież dataset, ponów m/z query, wyczyść ion images
+    filekey += 1;
     tissues = null;
     queryError = "";
     try {
@@ -110,6 +114,10 @@
     try {
       const res = await fetchIonImage(mz, tol);
       tissues = res.tissues;
+      // Zapisz globalny vmax per tkanka (spójny z Widma)
+      const newVmax: Record<string, number> = {};
+      for (const [id, t] of Object.entries(res.tissues)) newVmax[id] = t.vmax;
+      tissueVmax = newVmax;
       const allZero = Object.values(res.tissues).every(t => t.vmax === 0);
       if (allZero) {
         queryError = `Brak sygnału przy m/z ${mz.toFixed(3)} Da — wartość poza zakresem przetworzonych danych lub brak jonów.`;
@@ -201,7 +209,7 @@
         </div>
       </main>
       <main class="content" class:hidden={activeTab !== "widma"}>
-        <Widma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} />
+        <Widma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {filekey} {tissueVmax} />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "segmentacja"}>
         <div class="tab-placeholder">

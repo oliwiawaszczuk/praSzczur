@@ -26,11 +26,38 @@ sys.path.insert(0, str(ROOT))
 # ── Cache ──────────────────────────────────────────────────────────────────
 _cache: dict[str, dict] = {}   # tissue_id → {spectra, coords, mz_bins}
 _tissues_meta: list[dict] = [] # wykryte tkanki (x_min, x_max, label, is_ref)
+_IMZML_PATH_FILE = DATA_DIR / "imzml_path.txt"
+_imzml_path: str = ""          # ostatnio przetworzony plik imzML
+
+
+def _load_imzml_path() -> str:
+    """Odczytuje zapisaną ścieżkę imzML z pliku (persystuje między sesjami)."""
+    try:
+        if _IMZML_PATH_FILE.exists():
+            p = _IMZML_PATH_FILE.read_text().strip()
+            if p and Path(p).exists():
+                return p
+    except Exception:
+        pass
+    return ""
+
+
+def _save_imzml_path(path: str) -> None:
+    """Zapisuje ścieżkę imzML do pliku."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _IMZML_PATH_FILE.write_text(path)
+    except Exception:
+        pass
 
 
 def _load_npz_files() -> list[str]:
     """Ładuje wszystkie dostępne pliki .npz z DATA_DIR. Zwraca listę tissue_id."""
+    global _imzml_path
     _cache.clear()
+    # Przywróć ścieżkę imzML jeśli nie jest jeszcze znana
+    if not _imzml_path:
+        _imzml_path = _load_imzml_path()
     found = []
     for path in sorted(DATA_DIR.glob("*.npz")):
         tid = path.stem
@@ -650,6 +677,9 @@ async def process(body: dict) -> StreamingResponse:
                 await asyncio.sleep(0)
 
             # Przeładuj cache
+            global _imzml_path
+            _imzml_path = str(imzml_path)
+            _save_imzml_path(_imzml_path)
             _cache.clear()
             _tissues_meta.clear()
             ids = _load_npz_files()
@@ -672,6 +702,31 @@ def _sse(event: str, data: dict) -> str:
 
 
 # ── Pixel spectrum ─────────────────────────────────────────────────────────
+@app.get("/pixel_spectrum_raw")
+def pixel_spectrum_raw(tissue: str, x: int, y: int) -> dict:
+    """Zwraca oryginalne (niebinowane) widmo dla piksela z pliku imzML."""
+    if not _imzml_path:
+        raise HTTPException(503, "Brak ścieżki do pliku imzML — uruchom preprocessing")
+    path = Path(_imzml_path)
+    if not path.exists():
+        raise HTTPException(404, f"Plik {path} nie istnieje")
+    try:
+        from pyimzml.ImzMLParser import ImzMLParser
+        p = ImzMLParser(str(path))
+        coords_arr = np.array(p.coordinates)
+        idx = np.where((coords_arr[:, 0] == x) & (coords_arr[:, 1] == y))[0]
+        if len(idx) == 0:
+            raise HTTPException(404, f"Brak piksela ({x},{y})")
+        mz_arr, ints = p.getspectrum(int(idx[0]))
+        return {"tissue": tissue, "x": x, "y": y,
+                "mz": [round(float(m), 6) for m in mz_arr],
+                "intensity": [float(v) for v in ints]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.get("/pixel_spectrum")
 def pixel_spectrum(tissue: str, x: int, y: int) -> dict:
     """Zwraca pełne widmo binned dla piksela (x, y) w tkance."""
@@ -690,8 +745,11 @@ def pixel_spectrum(tissue: str, x: int, y: int) -> dict:
 
 # ── Tissue pixel map for Widma tab ────────────────────────────────────────
 @app.get("/tissue_pixel_map")
-def tissue_pixel_map(tissue: str, mz: float = -1.0, tol: float = 0.3) -> dict:
-    """Zwraca listę pikseli tkanki z opcjonalną intensywnością jonu (mz±tol)."""
+def tissue_pixel_map(tissue: str, mz: float = -1.0, tol: float = 0.3,
+                     global_vmax: float = -1.0) -> dict:
+    """Zwraca listę pikseli tkanki z opcjonalną intensywnością jonu (mz±tol).
+    global_vmax: jeśli > 0, normalizuje przez tę wartość (jak ion_image) zamiast
+    lokalnego max — zapewnia spójną skalę kolorów z zakładką m/z."""
     if tissue not in _cache:
         raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
     d = _cache[tissue]
@@ -707,12 +765,14 @@ def tissue_pixel_map(tissue: str, mz: float = -1.0, tol: float = 0.3) -> dict:
             intensities = d["spectra"][:, mask].sum(axis=1)
         else:
             intensities = np.zeros(len(coords), dtype=np.float32)
-        vmax = float(intensities.max()) if intensities.max() > 0 else 1.0
-        values = (intensities / vmax).tolist()
+        local_vmax = float(intensities.max()) if intensities.max() > 0 else 1.0
+        norm_by = global_vmax if global_vmax > 0 else local_vmax
+        values = (intensities / norm_by).tolist()
     else:
         tic = d["spectra"].sum(axis=1).astype(np.float32)
-        vmax = float(tic.max()) if tic.max() > 0 else 1.0
-        values = (tic / vmax).tolist()
+        local_vmax = float(tic.max()) if tic.max() > 0 else 1.0
+        norm_by = global_vmax if global_vmax > 0 else local_vmax
+        values = (tic / norm_by).tolist()
     return {"tissue": tissue, "xs": xs, "ys": ys, "values": values}
 
 

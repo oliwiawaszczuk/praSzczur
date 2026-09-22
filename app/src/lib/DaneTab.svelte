@@ -709,7 +709,6 @@
                     style="color:{col}"
                   />
                   <div class="row-badges">
-                    {#if t.is_ref}<span class="chip-star">★</span>{/if}
                     {#if t.enabled === false}<span class="chip-off">off</span>{/if}
                   </div>
                   <input
@@ -1019,7 +1018,11 @@
 
   /* ── Tissue chips ──────────────────────────────────────────────────────── */
   .tissue-list {
-    display: flex; flex-direction: column; gap: 5px; flex-shrink: 0; margin-top: 4px;
+    display: flex; flex-direction: column; gap: 5px; margin-top: 4px;
+    max-height: calc(4 * (72px + 5px));
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.08) transparent;
   }
   .tissue-row {
     display: flex; flex-direction: column; gap: 3px;

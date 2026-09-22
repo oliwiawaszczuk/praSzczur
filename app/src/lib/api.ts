@@ -64,13 +64,20 @@ export async function fetchPixelSpectrum(tissue: string, x: number, y: number): 
   return r.json();
 }
 
+export async function fetchPixelSpectrumRaw(tissue: string, x: number, y: number): Promise<PixelSpectrum> {
+  const r = await fetch(`${BASE}/pixel_spectrum_raw?tissue=${tissue}&x=${x}&y=${y}`);
+  if (!r.ok) throw new Error(`API error ${r.status}`);
+  return r.json();
+}
+
 export interface TissuePixelMap {
   tissue: string; xs: number[]; ys: number[]; values: number[];
 }
 
-export async function fetchTissuePixelMap(tissue: string, mz?: number, tol?: number): Promise<TissuePixelMap> {
+export async function fetchTissuePixelMap(tissue: string, mz?: number, tol?: number, globalVmax?: number): Promise<TissuePixelMap> {
   const params = new URLSearchParams({ tissue });
   if (mz !== undefined) { params.set("mz", mz.toString()); params.set("tol", (tol ?? 0.3).toString()); }
+  if (globalVmax !== undefined && globalVmax > 0) params.set("global_vmax", globalVmax.toString());
   const r = await fetch(`${BASE}/tissue_pixel_map?${params}`);
   if (!r.ok) throw new Error(`API error ${r.status}`);
   return r.json();
