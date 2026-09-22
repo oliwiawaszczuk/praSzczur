@@ -619,6 +619,60 @@ def ion_image(mz: float, tol: float = 0.3) -> dict:
     return {"mz": mz, "tol": tol, "tissues": result}
 
 
+@app.get("/ion_image_raw")
+def ion_image_raw(mz: float, tol: float = 0.3) -> dict:
+    """Jak /ion_image, ale liczy sumę intensywności bezpośrednio z oryginalnego
+    pliku imzML (mz ± tol), z pominięciem binowania z .npz."""
+    if not _cache:
+        raise HTTPException(503, "Dane nie załadowane")
+    if not _imzml_path:
+        raise HTTPException(503, "Brak ścieżki do pliku imzML — uruchom preprocessing raz aby zapamiętać ścieżkę.")
+    path = Path(_imzml_path)
+    if not path.exists():
+        raise HTTPException(404, f"Plik {path} nie istnieje")
+
+    from pyimzml.ImzMLParser import ImzMLParser
+    p = ImzMLParser(str(path))
+    raw_coords = np.array(p.coordinates)
+    coord_to_idx = {(int(rx), int(ry)): i for i, (rx, ry, *_ ) in enumerate(raw_coords)}
+
+    result = {}
+    for tid, d in _cache.items():
+        coords = d["coords"]
+        xs, ys = coords[:, 0].astype(int), coords[:, 1].astype(int)
+        x0, y0 = xs.min(), ys.min()
+        img = np.zeros((ys.max()-y0+1, xs.max()-x0+1), dtype=np.float64)
+        for x, y in zip(xs, ys):
+            idx = coord_to_idx.get((int(x), int(y)))
+            if idx is None:
+                continue
+            mz_arr, ints = p.getspectrum(idx)
+            mz_arr = np.asarray(mz_arr, dtype=np.float64)
+            ints   = np.asarray(ints,   dtype=np.float64)
+            mask = np.abs(mz_arr - mz) <= tol
+            img[y-y0, x-x0] = float(ints[mask].sum()) if mask.any() else 0.0
+
+        vmax_local = float(img.max())
+        meta = next((m for m in _tissues_meta if m["id"] == tid), {})
+        result[tid] = {
+            "label":  meta.get("label", tid),
+            "_img":   img,
+            "width":  int(xs.max()-x0+1),
+            "height": int(ys.max()-y0+1),
+            "vmax":   vmax_local,
+        }
+
+    global_vmax = max((v["vmax"] for v in result.values()), default=1.0)
+    if global_vmax <= 0:
+        global_vmax = 1.0
+    for tid, v in result.items():
+        img = v.pop("_img")
+        v["data"] = (img / global_vmax).tolist()
+        v["vmax"] = global_vmax
+
+    return {"mz": mz, "tol": tol, "tissues": result}
+
+
 @app.get("/mz_profile")
 def mz_profile(mz: float, tol: float = 0.3, n: int = 7) -> dict:
     """Summed intensity across all tissues for n bins around mz."""

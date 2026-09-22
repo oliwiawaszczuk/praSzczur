@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
 
@@ -184,6 +184,28 @@
     }
   });
 
+  // Layout (flex/grid, animacje wejścia zakładki) może się jeszcze ustalać
+  // po pierwszym renderze, więc rysowanie na podstawie getBoundingClientRect
+  // w $effect-ach potrafi złapać nieprawidłowy rozmiar. ResizeObserver
+  // odpala się natychmiast po observe() z aktualnym rozmiarem i ponownie za
+  // każdym razem, gdy layout się zmieni — to naprawia zarówno pierwszy render,
+  // jak i zmianę rozmiaru okna.
+  let resizeObserver: ResizeObserver | undefined;
+  $effect(() => {
+    resizeObserver?.disconnect();
+    resizeObserver = new ResizeObserver(() => {
+      requestAnimationFrame(drawTic);
+      requestAnimationFrame(drawProfile);
+      requestAnimationFrame(drawSpectrum);
+      requestAnimationFrame(drawBinPreview);
+    });
+    if (ticCanvas)     resizeObserver.observe(ticCanvas);
+    if (profileCanvas) resizeObserver.observe(profileCanvas);
+    if (specCanvas)    resizeObserver.observe(specCanvas);
+    if (binCanvas)     resizeObserver.observe(binCanvas);
+  });
+  onDestroy(() => resizeObserver?.disconnect());
+
   function labelsKey()  { return `dane_tissueLabels:${imzmlPath}`; }
   function enabledKey() { return `dane_tissueEnabled:${imzmlPath}`; }
   function colorsKey()  { return `dane_tissueColors:${imzmlPath}`; }
@@ -329,7 +351,7 @@
   }
 
   // ── Canvas: TIC ──────────────────────────────────────────────────────────
-  $effect(() => {
+  function drawTic() {
     if (!ticCanvas || !detectionData?.presence_image) return;
     const ctx = ticCanvas.getContext("2d"); if (!ctx) return;
     const { presence_image: img, width: W, height: H, x_offset: xOff } = detectionData;
@@ -387,7 +409,8 @@
       ctx.fillStyle = disabled ? "rgba(180,180,180,0.8)" : color;
       ctx.fillText(t.label, labelX, labelY);
     });
-  });
+  }
+  $effect(() => { detectionData; tissues; if (ticCanvas) requestAnimationFrame(drawTic); });
 
   function onTicClick(e: MouseEvent) {
     if (!ticCanvas || !detectionData) return;
@@ -407,7 +430,7 @@
   }
 
   // ── Canvas: profil X ─────────────────────────────────────────────────────
-  $effect(() => {
+  function drawProfile() {
     if (!profileCanvas || !detectionData) return;
     const ctx = profileCanvas.getContext("2d"); if (!ctx) return;
     const profile = detectionData.col_profile;
@@ -426,7 +449,8 @@
       i===0?ctx.moveTo(px,py):ctx.lineTo(px,py);
     });
     ctx.stroke();
-  });
+  }
+  $effect(() => { detectionData; tissues; if (profileCanvas) requestAnimationFrame(drawProfile); });
 
   // ── Canvas: widmo pełne z suwakami ───────────────────────────────────────
   $effect(() => { mzMin; mzMax; viewMin; viewMax; spectrumData; binCenter; binNBins; binSize; if (specCanvas && spectrumData) requestAnimationFrame(drawSpectrum); });

@@ -9,7 +9,7 @@
 
   interface Props {
     loading?: boolean;
-    onquery?: (args: { mz: number; tol: number }) => void;
+    onquery?: (args: { mz: number; tol: number; raw: boolean }) => void;
     dispMin?: number;
     dispMax?: number;
     ondisprange?: (min: number, max: number) => void;
@@ -57,6 +57,11 @@
   let invertColors = $state(wsGet("sidebar_invertColors", false));
   $effect(() => { wsSet("sidebar_invertColors", invertColors); });
   onMount(() => { oninvert?.(invertColors); });
+
+  // Oryginalne m/z: mapa jonowa liczona bezpośrednio z pliku imzML (mz ± tol)
+  // zamiast z binowanych danych .npz.
+  let rawMz = $state(wsGet("sidebar_rawMz", false));
+  $effect(() => { wsSet("sidebar_rawMz", rawMz); });
 
   // Section collapse state
   let showRange  = $state(true);
@@ -125,7 +130,7 @@
     return mz;
   }
 
-  function submit() {
+  function submit(raw: boolean = false) {
     const mz = validateMz(mzInput);
     if (mz === null) {
       const lo = mzMin > 0 ? mzMin : 0;
@@ -134,14 +139,14 @@
       return;
     }
     mzError = "";
-    onquery?.({ mz, tol });
+    onquery?.({ mz, tol, raw });
   }
 
   function selectEntry(i: number) {
     selectedIdx = i;
     mzInput = mzList[i].mz.toString();
     mzError = "";
-    onquery?.({ mz: mzList[i].mz, tol });
+    onquery?.({ mz: mzList[i].mz, tol, raw: false });
   }
 
   function removeEntry(i: number) {
@@ -174,38 +179,27 @@
   <!-- ── m/z input ─────────────────────────────────── -->
   <section class="section">
     <label class="field-label" for="mz-input">m/z [Da]</label>
-    <input
-      id="mz-input"
-      class="field-input"
-      class:error={!!mzError}
-      type="number"
-      min={mzMin > 0 ? mzMin : 0}
-      max={isFinite(mzMax) ? mzMax : undefined}
-      step="0.01"
-      placeholder="np. 569.25"
-      bind:value={mzInput}
-      onkeydown={onKeydown}
-      oninput={onInputChange}
-      disabled={loading}
-    />
+    <div class="mz-row">
+      <input
+        id="mz-input"
+        class="field-input mz-input-shrink"
+        class:error={!!mzError}
+        type="number"
+        min={mzMin > 0 ? mzMin : 0}
+        max={isFinite(mzMax) ? mzMax : undefined}
+        step="0.01"
+        placeholder="np. 569.25"
+        bind:value={mzInput}
+        onkeydown={onKeydown}
+        oninput={onInputChange}
+        disabled={loading}
+      />
+      <button class="btn-primary btn-inline" onclick={() => submit(false)} disabled={loading || !mzInput}>
+        {#if loading}<span class="spinner"></span>{:else}Wczytaj{/if}
+      </button>
+    </div>
     {#if mzError}<span class="error-msg">{mzError}</span>{/if}
   </section>
-
-  <section class="section">
-    <label class="field-label" for="tol-input">Tolerancja ± [Da]</label>
-    <input
-      id="tol-input"
-      class="field-input"
-      type="number"
-      min="0.05" max="2" step="0.05"
-      bind:value={tol}
-      disabled={loading}
-    />
-  </section>
-
-  <button class="btn-primary" onclick={submit} disabled={loading || !mzInput}>
-    {#if loading}<span class="spinner"></span>Wczytuję…{:else}Wczytaj{/if}
-  </button>
 
   <!-- ── Zakres wyświetlania ────────────────────────── -->
   <div class="divider"></div>
@@ -292,6 +286,29 @@
         />
         <span class="cb-label">Odwróć kolory</span>
       </label>
+
+      <label class="checkbox-row">
+        <input type="checkbox" class="cb-input" bind:checked={rawMz} />
+        <span class="cb-label">Oryginalne m/z</span>
+      </label>
+      {#if rawMz}
+        <div class="section" style="margin-top:8px">
+          <label class="field-label" for="tol-input">Tolerancja ± [Da]</label>
+          <div class="mz-row">
+            <input
+              id="tol-input"
+              class="field-input mz-input-shrink"
+              type="number"
+              min="0.05" max="2" step="0.05"
+              bind:value={tol}
+              disabled={loading}
+            />
+            <button class="btn-primary btn-inline" onclick={() => submit(true)} disabled={loading || !mzInput}>
+              {#if loading}<span class="spinner"></span>{:else}Załaduj{/if}
+            </button>
+          </div>
+        </div>
+      {/if}
     </div>
   </div>
 
@@ -362,6 +379,10 @@
     transform: translateY(-1px);
   }
   .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .mz-row { display: flex; gap: 6px; align-items: flex-start; }
+  .mz-input-shrink { flex: 1; min-width: 0; }
+  .btn-inline { width: auto; flex-shrink: 0; padding: 8px 14px; }
 
   .spinner {
     width: 12px; height: 12px;

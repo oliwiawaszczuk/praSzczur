@@ -36,6 +36,12 @@ export async function fetchIonImage(mz: number, tol: number): Promise<IonImageRe
   return r.json();
 }
 
+export async function fetchIonImageRaw(mz: number, tol: number): Promise<IonImageResponse> {
+  const r = await fetch(`${BASE}/ion_image_raw?mz=${mz}&tol=${tol}`);
+  if (!r.ok) throw new Error(`API error ${r.status}`);
+  return r.json();
+}
+
 export interface DatasetStatus {
   mz_min: number;
   mz_max: number;

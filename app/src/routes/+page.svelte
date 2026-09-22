@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { waitForSidecar, fetchIonImage, fetchDatasetStatus } from "$lib/api.js";
+  import { waitForSidecar, fetchIonImage, fetchIonImageRaw, fetchDatasetStatus } from "$lib/api.js";
   import type { TissueImage } from "$lib/api.js";
   import IonGrid from "$lib/IonGrid.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
@@ -121,13 +121,13 @@
     } catch {}
   }
 
-  async function handleQuery({ mz, tol }: { mz: number; tol: number }) {
+  async function handleQuery({ mz, tol, raw = false }: { mz: number; tol: number; raw?: boolean }) {
     queryLoading = true;
     queryError = "";
     lastMz = mz;
     lastTol = tol;
     try {
-      const res = await fetchIonImage(mz, tol);
+      const res = raw ? await fetchIonImageRaw(mz, tol) : await fetchIonImage(mz, tol);
       tissues = res.tissues;
       // Zapisz globalny vmax per tkanka (spójny z Widma)
       const newVmax: Record<string, number> = {};
@@ -224,7 +224,7 @@
         </div>
       </main>
       <main class="content" class:hidden={activeTab !== "widma"}>
-        <Widma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {filekey} {tissueVmax} />
+        <Widma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {invertColors} {filekey} {tissueVmax} />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "segmentacja"}>
         <div class="tab-placeholder">

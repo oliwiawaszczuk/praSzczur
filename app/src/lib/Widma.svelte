@@ -4,6 +4,7 @@
   import { fetchTissuePixelMap, fetchPixelSpectrum, fetchPixelSpectrumRaw } from "./api.js";
   import type { TissuePixelMap, PixelSpectrum } from "./api.js";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
+  import { BRUKER_LUT } from "$lib/colormap";
 
   const LS_LAYERS    = "widma_layers";
   const LS_NORM      = "widma_norm";
@@ -19,11 +20,12 @@
     tissueLabels?: Record<string, string>;
     dispMin?: number;
     dispMax?: number;
+    invertColors?: boolean;
     filekey?: number;  // inkrementowany przy każdym nowym pliku → czyści warstwy
     tissueVmax?: Record<string, number>;  // globalny vmax per tkanka z ion_image
   }
 
-  let { tissues = [], activeMz = null, activeTol = 0.3, tissueLabels = {}, dispMin = 0, dispMax = 1, filekey = 0, tissueVmax = {} }: Props = $props();
+  let { tissues = [], activeMz = null, activeTol = 0.3, tissueLabels = {}, dispMin = 0, dispMax = 1, invertColors = false, filekey = 0, tissueVmax = {} }: Props = $props();
 
   function tLabel(id: string): string { return tissueLabels[id] || id; }
 
@@ -35,6 +37,9 @@
     visible: boolean;
     locked: boolean;
     spectrum: PixelSpectrum;
+    // Zbinowana intensywność tego piksela (ta sama siatka co binMz), niezależna
+    // od trybu wyświetlania (showOriginal) — używana do słupków binów.
+    binIntensity: number[];
   }
 
   const COLORS = ["#ffc951","#7ec8e3","#a8e6cf","#ff8b94","#c9b1ff","#ffcba4","#b5ead7","#ffdac1"];
@@ -100,9 +105,12 @@
       const restored: Layer[] = [];
       for (const s of saved) {
         try {
-          const spec = await fetchPixelSpectrum(s.tissue, s.x, s.y);
-          if (binMz.length === 0) { binMz = spec.mz; binIntensity = spec.intensity; }
-          restored.push({ id: `${s.tissue}_${s.x}_${s.y}`, label: s.label, color: s.color, visible: s.visible, locked: s.locked, spectrum: spec });
+          const spec = await fetchSpec(s.tissue, s.x, s.y);
+          // binIntensity to zawsze zbinowana intensywność tego piksela —
+          // niezależna od showOriginal, potrzebna do słupków binów.
+          const binnedSpec = showOriginal ? await fetchPixelSpectrum(s.tissue, s.x, s.y) : spec;
+          if (binMz.length === 0) { binMz = binnedSpec.mz; binIntensity = binnedSpec.intensity; }
+          restored.push({ id: `${s.tissue}_${s.x}_${s.y}`, label: s.label, color: s.color, visible: s.visible, locked: s.locked, spectrum: spec, binIntensity: binnedSpec.intensity });
         } catch {}
       }
       layers = restored;
@@ -135,20 +143,10 @@
   });
 
   // ── Rysowanie mapy pikseli na canvas ──────────────────────────────────────
-  const BRUKER_LUT: [number,number,number][] = [
-    [0,0,131],[0,0,255],[0,125,255],[0,255,255],
-    [125,255,125],[255,255,0],[255,125,0],[255,0,0],[131,0,0],
-  ];
-
-  function lut(v: number): [number,number,number] {
-    const t = Math.max(0, Math.min(1, v)) * (BRUKER_LUT.length - 1);
-    const lo = Math.floor(t), hi = Math.min(lo + 1, BRUKER_LUT.length - 1);
-    const f  = t - lo;
-    return [
-      Math.round(BRUKER_LUT[lo][0] * (1-f) + BRUKER_LUT[hi][0] * f),
-      Math.round(BRUKER_LUT[lo][1] * (1-f) + BRUKER_LUT[hi][1] * f),
-      Math.round(BRUKER_LUT[lo][2] * (1-f) + BRUKER_LUT[hi][2] * f),
-    ];
+  // Ten sam BRUKER_LUT co w zakładce m/z (colormap.ts) — spójne kolory między zakładkami.
+  function lut(t: number): [number,number,number] {
+    const i = Math.round(Math.min(Math.max(t, 0), 1) * 255) * 4;
+    return [BRUKER_LUT[i], BRUKER_LUT[i+1], BRUKER_LUT[i+2]];
   }
 
   function drawMapToCanvas(canvas: HTMLCanvasElement, scale: number, circleScale = 2) {
@@ -167,12 +165,12 @@
     ctx.fillStyle = "#111";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    const span = dispMax - dispMin;
+    const lo = dispMin, hi = dispMax, span = hi - lo;
     for (let i = 0; i < xs.length; i++) {
       const v = values[i];
-      if (v <= 0) continue;
-      const t = span > 0 ? Math.min(1, Math.max(0, (v - dispMin) / span)) : v;
-      if (t <= 0) continue;
+      if (span <= 0 || v <= 0) continue;
+      let t = Math.min(1, Math.max(0, (v - lo) / span));
+      t = invertColors ? 1 - t : t;
       const [r,g,b] = lut(t);
       ctx.fillStyle = `rgb(${r},${g},${b})`;
       ctx.fillRect((xs[i]-xMin)*scale, (ys[i]-yMin)*scale, scale, scale);
@@ -261,7 +259,10 @@
     layerLoading = true;
     try {
       const spec = await fetchSpec(selectedTissue, x, y);
-      if (!showOriginal && binMz.length === 0) { binMz = spec.mz; binIntensity = spec.intensity; }
+      // binIntensity to zawsze zbinowana intensywność tego piksela — niezależna
+      // od trybu wyświetlania (showOriginal), potrzebna do słupków binów.
+      const binnedSpec = showOriginal ? await fetchPixelSpectrum(selectedTissue, x, y) : spec;
+      if (binMz.length === 0) { binMz = binnedSpec.mz; binIntensity = binnedSpec.intensity; }
       const color = COLORS[layers.length % COLORS.length];
       layers = [...layers, {
         id:      `${selectedTissue}_${x}_${y}`,
@@ -269,6 +270,7 @@
         color,
         visible: true,
         locked:  false,
+        binIntensity: binnedSpec.intensity,
         spectrum: spec,
       }];
     } catch { /* pixel not found */ }
@@ -402,34 +404,20 @@
     }] : [];
 
     // Pionowe przerywane linie — słupki intensywności binów (od binLevel w górę)
-    // Wysokość = średnia intensywność widocznych warstw w okolicach centrum binu
+    // Wysokość słupka bina = dokładnie ta sama wartość, jaką pokazuje przetworzone
+    // (zbinowane) widmo w tym binie — nie średnia surowych punktów w oknie.
+    // Przy wielu widocznych warstwach: średnia znormalizowanej intensywności binu
+    // po wszystkich widocznych warstwach (dla tego samego bina).
     const binBarTrace: Plotly.Data[] = (showOriginal && binMz.length > 0) ? (() => {
-      const visLayers = layers.filter(l => l.visible);
+      const visLayers = layers.filter(l => l.visible && l.binIntensity?.length === binMz.length);
       if (visLayers.length === 0) return [];
 
-      // szerokość binu (zakładamy równomierne rozmieszczenie)
       const halfBin = binMz.length > 1 ? (binMz[1] - binMz[0]) / 2 : 0.5;
-
-      // binary search: pierwszy indeks >= value
-      function lowerBound(arr: number[], value: number): number {
-        let lo = 0, hi = arr.length;
-        while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < value) lo = mid + 1; else hi = mid; }
-        return lo;
-      }
-
-      const avgInts = binMz.map(bm => {
-        const lo = bm - halfBin, hi = bm + halfBin;
-        let total = 0, count = 0;
-        for (const l of visLayers) {
-          const mzArr = l.spectrum.mz;
-          const normInt = normalize(l.spectrum.intensity);
-          const start = lowerBound(mzArr, lo);
-          for (let j = start; j < mzArr.length && mzArr[j] < hi; j++) {
-            total += normInt[j];
-            count++;
-          }
-        }
-        return count > 0 ? total / count : 0;
+      const normed = visLayers.map(l => normalize(l.binIntensity));
+      const avgInts = binMz.map((_, i) => {
+        let total = 0;
+        for (const arr of normed) total += arr[i];
+        return total / normed.length;
       });
 
       const xs: (number | null)[] = [];
@@ -495,6 +483,7 @@
         color:      "#888",
         gridcolor:  "#2a2a2a",
         zerolinecolor: "#333",
+        rangemode:  "tozero",
         // Priorytet: zachowaj zoom użytkownika; jeśli brak — zastosuj dispMin/dispMax
         ...(() => {
           if (userZoomedY) return { range: savedYRange, autorange: false };
@@ -681,6 +670,9 @@
           <input type="checkbox" bind:checked={showOriginal} />
         </span>
         <span class="orig-label">Oryginalne widmo</span>
+        {#if showOriginal && binMz.length > 1}
+          <span class="orig-label" style="opacity:.6">(bin size = {(binMz[1] - binMz[0]).toFixed(3)} Da)</span>
+        {/if}
       </label>
       {#if showOriginal}
         <div class="bin-level-row">
