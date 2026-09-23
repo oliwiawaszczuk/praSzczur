@@ -37,6 +37,9 @@ app/src-tauri/gen/schemas/
 source/
 data/processed/
 
+# praSzczur app workspaces (per-user data: imzML paths, preprocessed .npz, UI settings)
+workspaces/
+
 # IDE
 .idea/
 .vscode/
