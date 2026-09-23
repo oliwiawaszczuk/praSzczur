@@ -92,7 +92,8 @@
     mzMin: number; mzMax: number; binSize: number; binAgg: string;
     tissues: { id: string; label: string; enabled: boolean; x_min: number; x_max: number; y_min?: number; y_max?: number }[];
   }
-  let processedSnapshot = $state<ProcessedSnapshot | null>(null);
+  let processedSnapshot = $state<ProcessedSnapshot | null>(wsGet<ProcessedSnapshot | null>("dane_processedSnapshot", null));
+  $effect(() => { wsSet("dane_processedSnapshot", processedSnapshot); });
 
   function snapshotNow(): ProcessedSnapshot {
     return {
@@ -176,10 +177,11 @@
     if (imzmlPath) {
       try { await loadFile(true); } catch {}
     }
-    // Jeśli na dysku są już przetworzone pliki .npz, przyjmujemy bieżący
-    // (dopiero co przywrócony) stan jako punkt odniesienia — inaczej po
-    // starcie aplikacji od razu pokazałoby się "nieprzetworzone zmiany".
-    if (status && status.npz_files.length > 0) {
+    // processedSnapshot jest już przywrócony z workspace (patrz deklaracja $state
+    // powyżej). Fallback tylko gdy nic nie było zapisane (stare workspace'y sprzed
+    // tej zmiany) — wtedy przyjmujemy bieżący stan jako punkt odniesienia, inaczej
+    // po starcie od razu pokazałoby się "nieprzetworzone zmiany".
+    if (status && status.npz_files.length > 0 && !processedSnapshot) {
       processedSnapshot = snapshotNow();
     }
   });

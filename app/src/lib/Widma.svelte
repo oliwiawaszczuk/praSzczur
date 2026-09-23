@@ -77,9 +77,10 @@
   let mapCanvas       = $state<HTMLCanvasElement | null>(null);
   let hoverPixel      = $state<{x:number;y:number}|null>(null);
 
-  // drag-to-reorder — dragIdx NIE jest reaktywny (zmiana by przerywała drag przez re-render)
-  let dragIdx: number | null = null;
-  let dragTarget      = $state<number | null>(null);
+  // drag-to-reorder — oparte na Pointer Events (natywny HTML5 DnD jest niestabilny w webview Tauri)
+  let draggingIdx     = $state<number | null>(null);
+  let dragOverIdx     = $state<number | null>(null);
+  let layersListEl: HTMLDivElement | undefined = $state();
 
   // Persist (write-only effects — safe in browser)
   $effect(() => { wsSet(LS_TISSUE, selectedTissue); });
@@ -315,40 +316,36 @@
     layers = layers.filter(l => l.id !== id);
   }
 
-  // ── Drag-to-reorder ───────────────────────────────────────────────────────
-  function listEl(e: Event): Element | null {
-    return (e.currentTarget as HTMLElement).closest('.layers-list');
-  }
-
-  function onDragStart(e: DragEvent, i: number) {
-    dragIdx = i;
-    e.dataTransfer?.setData("text/plain", String(i));
-    // Klasa przez bezpośredni DOM — bez re-renderu Svelte
-    listEl(e)?.classList.add('is-dragging');
-  }
-
-  function onDragOver(e: DragEvent, i: number) {
+  // ── Drag-to-reorder (Pointer Events) ─────────────────────────────────────
+  function startDrag(e: PointerEvent, i: number) {
+    if (layers[i]?.locked) return;
     e.preventDefault();
-    dragTarget = i;  // reaktywne tylko to → re-render dodaje highlight na row, nie psuje dragged el
+    draggingIdx = i;
+    dragOverIdx = i;
+    window.addEventListener("pointermove", onDragPointerMove);
+    window.addEventListener("pointerup", onDragPointerUp);
   }
 
-  function onDrop(e: DragEvent, i: number) {
-    e.preventDefault();
-    const from = dragIdx;
-    dragIdx = null;
-    dragTarget = null;
-    listEl(e)?.classList.remove('is-dragging');
-    if (from === null || from === i) return;
-    const arr = [...layers];
-    const [moved] = arr.splice(from, 1);
-    arr.splice(i, 0, moved);
-    layers = arr;
+  function onDragPointerMove(e: PointerEvent) {
+    if (draggingIdx === null || !layersListEl) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const row = (el as HTMLElement | null)?.closest(".layer-row") as HTMLElement | null;
+    if (!row || !layersListEl.contains(row)) return;
+    const idx = Number(row.dataset.idx);
+    if (!isNaN(idx)) dragOverIdx = idx;
   }
 
-  function onDragEnd(e: DragEvent) {
-    dragIdx = null;
-    dragTarget = null;
-    listEl(e)?.classList.remove('is-dragging');
+  function onDragPointerUp() {
+    if (draggingIdx !== null && dragOverIdx !== null && dragOverIdx !== draggingIdx) {
+      const arr = [...layers];
+      const [moved] = arr.splice(draggingIdx, 1);
+      arr.splice(dragOverIdx, 0, moved);
+      layers = arr;
+    }
+    draggingIdx = null;
+    dragOverIdx = null;
+    window.removeEventListener("pointermove", onDragPointerMove);
+    window.removeEventListener("pointerup", onDragPointerUp);
   }
 
   function toggleVisible(id: string) {
@@ -436,7 +433,10 @@
       }];
     })() : [];
 
-    const traces: Plotly.Data[] = [...binTrace, ...binBarTrace, ...layers
+    // Plotly rysuje późniejsze trace na wierzchu — odwracamy kolejność, żeby
+    // warstwa na GÓRZE listy była rzeczywiście na wierzchu wykresu.
+    const traces: Plotly.Data[] = [...binTrace, ...binBarTrace, ...[...layers]
+      .reverse()
       .filter(l => l.visible)
       .map(l => ({
         x: l.spectrum.mz,
@@ -484,16 +484,10 @@
         gridcolor:  "#2a2a2a",
         zerolinecolor: "#333",
         rangemode:  "tozero",
-        // Priorytet: zachowaj zoom użytkownika; jeśli brak — zastosuj dispMin/dispMax
-        ...(() => {
-          if (userZoomedY) return { range: savedYRange, autorange: false };
-          if (dispMin === 0 && dispMax === 1) return {};
-          const visible = layers.filter(l => l.visible);
-          if (visible.length === 0) return {};
-          const gmax = Math.max(...visible.flatMap(l => normalize(l.spectrum.intensity)));
-          if (!isFinite(gmax) || gmax === 0) return {};
-          return { range: [dispMin * gmax, dispMax * gmax], autorange: false };
-        })(),
+        // dispMin/dispMax to suwak jasności obrazu jonowego (zakładka m/z) —
+        // nie ma nic wspólnego z widokiem widma, więc tu go nie stosujemy.
+        // Priorytet: zachowaj zoom użytkownika na tym wykresie, inaczej autorange od 0.
+        ...(userZoomedY ? { range: savedYRange, autorange: false } : {}),
       },
       legend: {
         bgcolor:     "rgba(30,30,30,0.9)",
@@ -598,21 +592,21 @@
       {#if layers.length === 0}
         <div class="layers-empty">Kliknij piksel na mapie aby dodać widmo</div>
       {:else}
-        <div class="layers-list">
+        <div class="layers-list" bind:this={layersListEl}>
           {#each layers as layer, i (layer.id)}
             <div
               class="layer-row"
               class:hidden-layer={!layer.visible}
-              class:drag-target={dragTarget === i}
+              class:drag-target={dragOverIdx === i && draggingIdx !== null}
+              class:dragging={draggingIdx === i}
               class:is-locked={layer.locked}
-              draggable={!layer.locked}
-              ondragstart={(e) => onDragStart(e, i)}
-              ondragover={(e) => onDragOver(e, i)}
-              ondrop={(e) => onDrop(e, i)}
-              ondragend={(e) => onDragEnd(e)}
-              ondragleave={() => { if (dragIdx !== null) dragTarget = null; }}
+              data-idx={i}
             >
-              <span class="drag-handle" class:drag-disabled={layer.locked}>⠿</span>
+              <span
+                class="drag-handle"
+                class:drag-disabled={layer.locked}
+                onpointerdown={(e) => startDrag(e, i)}
+              >⠿</span>
               <input
                 type="color"
                 class="layer-color"
@@ -848,30 +842,22 @@
     scrollbar-color: rgba(255,255,255,0.08) transparent;
   }
 
-  /* Podczas drag: children nie przechwytują zdarzeń → drop trafia do .layer-row */
-  .layers-list.is-dragging .layer-row > * {
-    pointer-events: none;
-  }
-
   .layer-row {
     display: flex;
     align-items: center;
     gap: 5px;
     padding: 3px 8px 3px 6px;
     background: #1a1a1a;
-    border-radius: 16px;
+    border-radius: 12px;
     border: 1px solid rgba(255,255,255,0.06);
-    cursor: grab;
     user-select: none;
-    transition: border-color 0.15s, background 0.15s;
+    transition: border-color 0.15s, background 0.15s, opacity 0.15s;
     min-height: 30px;
   }
-  .layer-row:active { cursor: grabbing; }
   .layer-row.dragging { opacity: 0.35; border-style: dashed; }
   .layer-row.drag-target { border-color: rgba(255,201,81,0.5); background: rgba(255,201,81,0.05); }
   .layer-row.hidden-layer { opacity: 0.38; }
   .layer-row.is-locked {
-    cursor: default;
     border-color: rgba(255,160,50,0.2);
     background: rgba(255,160,50,0.04);
   }
@@ -882,7 +868,9 @@
     cursor: grab;
     flex-shrink: 0;
     line-height: 1;
+    touch-action: none;
   }
+  .drag-handle:active { cursor: grabbing; }
   .drag-handle.drag-disabled {
     color: rgba(255,255,255,0.08);
     cursor: default;

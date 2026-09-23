@@ -179,7 +179,7 @@
 
       <!-- Zakładki nad contentem -->
       <div class="tabbar">
-        {#each TABS as t}
+        {#each TABS.filter(t => t.key !== "preprocessing" && t.key !== "segmentacja") as t}
           <button
             class="tab"
             class:active={activeTab === t.key}

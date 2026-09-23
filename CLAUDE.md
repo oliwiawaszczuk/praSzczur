@@ -17,6 +17,7 @@ src/msi/         # biblioteka analityczna (loader.py, ...)
 scripts/         # jednorazowe skrypty analityczne
 praOutputs/      # raporty i wykresy dla użytkownika (.md + .png)
 docs/            # dokumentacja techniczna (dataset.md, ...)
+workspaces/      # dane per-workspace aplikacji praSzczur (patrz sekcja Workspace)
 ```
 
 ## Dataset
@@ -38,9 +39,26 @@ docs/            # dokumentacja techniczna (dataset.md, ...)
 
 ## Dane przetworzone
 
-- `data/processed/<tissue>.npz` — zbinnowane spektra per tkanka
+- `data/processed/<tissue>.npz` — zbinnowane spektra per tkanka (dane "domyślne"/eksploracyjne, poza appką)
 - Odtwarzanie: `uv run python scripts/01_preprocess.py` (po zmianie BIN_SIZE/TISSUE_BOUNDS)
 - Ładowanie: `np.load("data/processed/T1_ref.npz")` → klucze: `spectra`, `coords`, `mz_bins`
+- W aplikacji praSzczur każdy workspace ma **własną** kopię: `workspaces/<id>/processed/<tissue>.npz` + `workspaces/<id>/imzml_path.txt` — patrz sekcja Workspace poniżej.
+
+## Workspace (WAŻNE przy dodawaniu nowych funkcji do aplikacji)
+
+Aplikacja praSzczur ma koncepcję **workspace'ów** — każdy to osobny "projekt" (własny plik imzML,
+własne przetworzone dane `.npz`, własne ustawienia UI), przechowywany w `workspaces/<id>/`
+i zarządzany przez `app/src/lib/workspace.svelte.ts` + endpointy `/workspaces/*` w sidecarze.
+
+**Zasada przy dodawaniu nowej funkcjonalności we froncie (Svelte):** każdy stan UI, który
+sensownie powinien przetrwać restart aplikacji lub różnić się między workspace'ami (wybrane
+zakładki/tryby, parametry przetwarzania, listy/etykiety/kolory, zapamiętane warstwy, checkboxy
+trybów wyświetlania, zapisane zapytania m/z, itp.) **musi** być zapisywany przez
+`wsGet(key, fallback)` / `wsSet(key, value)` z `$lib/workspace.svelte`, a NIE przez zwykły
+`localStorage`, zmienną modułową czy stan tylko w pamięci komponentu. `wsSet` zapisuje
+(debounced) do sidecara per aktywny workspace — dzięki temu przełączenie/eksport/import
+workspace'u przenosi też te ustawienia. Zobacz istniejące wzorce w `DaneTab.svelte`,
+`Sidebar.svelte`, `Widma.svelte` (np. `wsGet("dane_binSize", 0.3)`).
 
 ## Konwencje
 
