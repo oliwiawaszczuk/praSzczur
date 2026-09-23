@@ -40,6 +40,9 @@ data/processed/
 # praSzczur app workspaces (per-user data: imzML paths, preprocessed .npz, UI settings)
 workspaces/
 
+# praSzczur app boards (per-user Tablica data: board.json + uploaded image assets)
+boards/
+
 # IDE
 .idea/
 .vscode/

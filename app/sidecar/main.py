@@ -17,12 +17,13 @@ from typing import AsyncIterator
 import os
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 
 ROOT           = Path(os.environ.get("PRASZCZUR_ROOT", Path(__file__).resolve().parents[2]))
 WORKSPACES_DIR = ROOT / "workspaces"
+BOARDS_DIR     = ROOT / "boards"
 SRC_DIR        = ROOT / "src"
 sys.path.insert(0, str(ROOT))
 
@@ -1038,6 +1039,139 @@ def import_workspace(body: dict) -> dict:
     reg["workspaces"].append({"id": wid, "name": name, "createdAt": now, "updatedAt": now})
     _save_registry(reg)
     return {"id": wid, "name": name, "createdAt": now, "updatedAt": now}
+
+
+# ── Boards (Tablica) ──────────────────────────────────────────────────────
+# Tablice są niezależne od workspace'ów — jedna wspólna lista, osobny folder
+# na dysku (boards/), widoczna niezależnie od aktywnego workspace'u.
+_BOARDS_REGISTRY_FILE = BOARDS_DIR / "registry.json"
+
+
+def _load_boards_registry() -> dict:
+    try:
+        if _BOARDS_REGISTRY_FILE.exists():
+            return json.loads(_BOARDS_REGISTRY_FILE.read_text())
+    except Exception:
+        pass
+    return {"boards": []}
+
+
+def _save_boards_registry(reg: dict) -> None:
+    BOARDS_DIR.mkdir(parents=True, exist_ok=True)
+    _BOARDS_REGISTRY_FILE.write_text(json.dumps(reg, indent=2))
+
+
+def _board_dir(bid: str) -> Path:
+    return BOARDS_DIR / bid
+
+
+def _board_json_file(bid: str) -> Path:
+    return _board_dir(bid) / "board.json"
+
+
+def _board_assets_dir(bid: str) -> Path:
+    return _board_dir(bid) / "assets"
+
+
+def _find_board(reg: dict, bid: str) -> dict | None:
+    return next((b for b in reg["boards"] if b["id"] == bid), None)
+
+
+_EMPTY_BOARD = {"objects": [], "viewport": {"x": 0, "y": 0, "zoom": 1}}
+
+
+@app.get("/boards")
+def list_boards() -> dict:
+    reg = _load_boards_registry()
+    return {"boards": reg["boards"]}
+
+
+@app.post("/boards")
+def create_board(body: dict) -> dict:
+    name = (body.get("name") or "Nowa tablica").strip() or "Nowa tablica"
+    reg = _load_boards_registry()
+    bid = uuid.uuid4().hex[:12]
+    now = _now_iso()
+    b = {"id": bid, "name": name, "createdAt": now, "updatedAt": now}
+    reg["boards"].append(b)
+    _save_boards_registry(reg)
+    _board_assets_dir(bid).mkdir(parents=True, exist_ok=True)
+    _board_json_file(bid).write_text(json.dumps(_EMPTY_BOARD))
+    return b
+
+
+@app.put("/boards/{bid}")
+def rename_board(bid: str, body: dict) -> dict:
+    reg = _load_boards_registry()
+    b = _find_board(reg, bid)
+    if not b:
+        raise HTTPException(404, f"Tablica '{bid}' nie istnieje")
+    if "name" in body and body["name"].strip():
+        b["name"] = body["name"].strip()
+    b["updatedAt"] = _now_iso()
+    _save_boards_registry(reg)
+    return b
+
+
+@app.delete("/boards/{bid}")
+def delete_board(bid: str) -> dict:
+    reg = _load_boards_registry()
+    if not _find_board(reg, bid):
+        raise HTTPException(404, f"Tablica '{bid}' nie istnieje")
+    reg["boards"] = [b for b in reg["boards"] if b["id"] != bid]
+    _save_boards_registry(reg)
+    shutil.rmtree(_board_dir(bid), ignore_errors=True)
+    return {"ok": True}
+
+
+@app.get("/boards/{bid}/data")
+def get_board(bid: str) -> dict:
+    f = _board_json_file(bid)
+    if not f.exists():
+        raise HTTPException(404, f"Tablica '{bid}' nie istnieje")
+    try:
+        return json.loads(f.read_text())
+    except Exception:
+        return dict(_EMPTY_BOARD)
+
+
+@app.put("/boards/{bid}/data")
+def save_board(bid: str, body: dict) -> dict:
+    reg = _load_boards_registry()
+    b = _find_board(reg, bid)
+    if not b:
+        raise HTTPException(404, f"Tablica '{bid}' nie istnieje")
+    _board_dir(bid).mkdir(parents=True, exist_ok=True)
+    _board_json_file(bid).write_text(json.dumps(body))
+    b["updatedAt"] = _now_iso()
+    _save_boards_registry(reg)
+    return {"ok": True}
+
+
+@app.post("/boards/{bid}/assets")
+async def upload_board_asset(bid: str, file: UploadFile = File(...)) -> dict:
+    reg = _load_boards_registry()
+    if not _find_board(reg, bid):
+        raise HTTPException(404, f"Tablica '{bid}' nie istnieje")
+    assets_dir = _board_assets_dir(bid)
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename or "").suffix.lower() or ".png"
+    if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"):
+        raise HTTPException(400, f"Niedozwolony format pliku: {ext}")
+    asset_id = uuid.uuid4().hex[:16]
+    filename = f"{asset_id}{ext}"
+    dest = assets_dir / filename
+    data = await file.read()
+    dest.write_bytes(data)
+    return {"id": asset_id, "filename": filename, "url": f"/boards/{bid}/assets/{filename}"}
+
+
+@app.get("/boards/{bid}/assets/{filename}")
+def get_board_asset(bid: str, filename: str):
+    path = _board_assets_dir(bid) / filename
+    if ".." in filename or not path.exists():
+        raise HTTPException(404, "Brak pliku")
+    return FileResponse(path)
 
 
 if __name__ == "__main__":

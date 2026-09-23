@@ -8,12 +8,13 @@
   import DaneTab from "$lib/DaneTab.svelte";
   import Widma from "$lib/Widma.svelte";
   import WorkspaceSettings from "$lib/WorkspaceSettings.svelte";
+  import Tablica from "$lib/Tablica.svelte";
   import { loadWorkspaces, wsGet, wsSet } from "$lib/workspace.svelte";
   import "@fontsource/jetbrains-mono/400.css";
   import "@fontsource/jetbrains-mono/600.css";
 
   type AppState = "booting" | "ready" | "error";
-  type Tab = "dane" | "mz" | "preprocessing" | "widma" | "segmentacja" | "settings";
+  type Tab = "dane" | "mz" | "preprocessing" | "widma" | "segmentacja" | "tablica" | "settings";
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "dane",          label: "Dane" },
@@ -21,6 +22,7 @@
     { key: "widma",         label: "Widma" },
     { key: "preprocessing", label: "Preprocessing" },
     { key: "segmentacja",   label: "Segmentacja" },
+    { key: "tablica",       label: "Tablica" },
     { key: "settings",   label: "Ustawienia" },
   ];
 
@@ -232,6 +234,9 @@
           <div class="tp-title">Segmentacja</div>
           <div class="tp-sub">Klasteryzacja pikseli na podstawie widm MSI — mapy segmentów i analiza składowych.</div>
         </div>
+      </main>
+      <main class="content" class:hidden={activeTab !== "tablica"}>
+        <Tablica />
       </main>
       <main class="content" class:hidden={activeTab !== "settings"}>
         <WorkspaceSettings />

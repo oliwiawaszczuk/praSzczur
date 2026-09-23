@@ -18,6 +18,7 @@ scripts/         # jednorazowe skrypty analityczne
 praOutputs/      # raporty i wykresy dla użytkownika (.md + .png)
 docs/            # dokumentacja techniczna (dataset.md, ...)
 workspaces/      # dane per-workspace aplikacji praSzczur (patrz sekcja Workspace)
+boards/          # dane tablic (Tablica, Miro-like) aplikacji praSzczur (patrz sekcja Tablica)
 ```
 
 ## Dataset
@@ -59,6 +60,23 @@ trybów wyświetlania, zapisane zapytania m/z, itp.) **musi** być zapisywany pr
 (debounced) do sidecara per aktywny workspace — dzięki temu przełączenie/eksport/import
 workspace'u przenosi też te ustawienia. Zobacz istniejące wzorce w `DaneTab.svelte`,
 `Sidebar.svelte`, `Widma.svelte` (np. `wsGet("dane_binSize", 0.3)`).
+
+## Tablica (freeform whiteboard, Miro-like)
+
+Zakładka **Tablica** to niezależna od workspace'ów, freeform tablica (obrazy + tekst, drag/resize/rotate,
+zoom/pan, multi-select, kopiuj-wklej) zbudowana na **Konva.js** (`app/src/lib/BoardCanvas.svelte`).
+
+- **Tablice są globalne, NIE per-workspace** — jedna wspólna lista widoczna niezależnie od aktywnego
+  workspace'u, przechowywana w `boards/<board_id>/` (osobny top-level folder, sibling do `workspaces/`),
+  zarządzana przez `app/src/lib/board.svelte.ts` + endpointy `/boards/*` w sidecarze.
+- Każdy workspace zapamiętuje tylko **ID ostatnio otwartej tablicy** (`wsGet/wsSet("tablica_activeBoardId", ...)`)
+  — jeśli żadna tablica nie istnieje, aplikacja tworzy pustą automatycznie.
+- Struktura na dysku: `boards/registry.json` (lista tablic), `boards/<id>/board.json` (obiekty + viewport,
+  autozapis debounced 800ms), `boards/<id>/assets/` (wgrane obrazy, endpoint upload `/boards/{id}/assets`).
+- Komponenty: `Tablica.svelte` (tab + spinanie stanu), `BoardCanvas.svelte` (Konva Stage/Layer/Transformer:
+  render obiektów, zoom/pan myszką, multi-select rubber-band, resize/rotate przez `Transformer`, edycja
+  tekstu przez overlay `<textarea>`), `BoardSidebar.svelte` (lista tablic gdy brak zaznaczenia, właściwości
+  obiektu — kolor/rozmiar/bold dla tekstu, przezroczystość dla obrazu — gdy coś zaznaczone).
 
 ## Konwencje
 
