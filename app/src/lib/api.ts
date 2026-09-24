@@ -76,6 +76,25 @@ export async function fetchPixelSpectrumRaw(tissue: string, x: number, y: number
   return r.json();
 }
 
+export type PreprocessMethod = "smooth" | "baseline" | "normalize" | "peakpick";
+
+export interface PreprocessResult {
+  tissue: string; x: number; y: number; method: PreprocessMethod;
+  info: Record<string, number>;
+  mz: number[]; intensity_before: number[]; intensity_after: number[];
+}
+
+export async function fetchPreprocess(
+  method: PreprocessMethod, tissue: string, x: number, y: number,
+  params: Record<string, number> = {},
+): Promise<PreprocessResult> {
+  const q = new URLSearchParams({ tissue, x: String(x), y: String(y), method });
+  for (const [k, v] of Object.entries(params)) q.set(k, String(v));
+  const r = await fetch(`${BASE}/preprocess?${q}`);
+  if (!r.ok) throw new Error(`API error ${r.status}`);
+  return r.json();
+}
+
 export interface TissuePixelMap {
   tissue: string; xs: number[]; ys: number[]; values: number[];
 }

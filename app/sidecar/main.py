@@ -29,6 +29,23 @@ sys.path.insert(0, str(ROOT))
 
 # ── Cache ──────────────────────────────────────────────────────────────────
 _cache: dict[str, dict] = {}   # tissue_id → {spectra, coords, mz_bins}
+_imzml_parser_cache: dict[str, tuple] = {}  # path → (ImzMLParser, coords_arr)
+_target_tic_cache: dict[str, float] = {}  # tissue_id → mediana TIC (dla normalize())
+
+
+def _get_imzml_parser(path: Path):
+    """Zwraca (i cache'uje) sparsowany ImzMLParser + tablicę koordynatów.
+    Parsowanie samego XML-a imzML jest kosztowne (tysiące widm) — bez cache
+    każde żądanie widma piksela od nowa parsowałoby cały plik."""
+    key = str(path)
+    cached = _imzml_parser_cache.get(key)
+    if cached is not None:
+        return cached
+    from pyimzml.ImzMLParser import ImzMLParser
+    p = ImzMLParser(key)
+    coords_arr = np.array(p.coordinates)
+    _imzml_parser_cache[key] = (p, coords_arr)
+    return p, coords_arr
 _tissues_meta: list[dict] = [] # wykryte tkanki (x_min, x_max, label, is_ref)
 _imzml_path: str = ""          # ostatnio przetworzony plik imzML
 _active_workspace_id: str = "" # aktywny workspace
@@ -851,9 +868,7 @@ def pixel_spectrum_raw(tissue: str, x: int, y: int) -> dict:
     if not path.exists():
         raise HTTPException(404, f"Plik {path} nie istnieje")
     try:
-        from pyimzml.ImzMLParser import ImzMLParser
-        p = ImzMLParser(str(path))
-        coords_arr = np.array(p.coordinates)
+        p, coords_arr = _get_imzml_parser(path)
         idx = np.where((coords_arr[:, 0] == x) & (coords_arr[:, 1] == y))[0]
         if len(idx) == 0:
             raise HTTPException(404, f"Brak piksela ({x},{y})")
@@ -861,6 +876,70 @@ def pixel_spectrum_raw(tissue: str, x: int, y: int) -> dict:
         return {"tissue": tissue, "x": x, "y": y,
                 "mz": [round(float(m), 6) for m in mz_arr],
                 "intensity": [float(v) for v in ints]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+def _target_tic(tissue: str) -> float:
+    """Mediana TIC (całkowitego prądu jonowego) tkanki — referencja dla normalize()."""
+    if tissue in _target_tic_cache:
+        return _target_tic_cache[tissue]
+    if tissue not in _cache:
+        raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
+    d = _cache[tissue]
+    tic = float(np.median(d["spectra"].sum(axis=1)))
+    _target_tic_cache[tissue] = tic
+    return tic
+
+
+@app.get("/preprocess")
+def preprocess(tissue: str, x: int, y: int, method: str,
+                window: int = 15, polyorder: int = 3,
+                iterations: int = 40, prominence: float = 0.02) -> dict:
+    """Stosuje wybraną metodę preprocessingu widma do surowego widma piksela
+    (z pliku imzML) i zwraca widmo przed/po do porównania na wykresie."""
+    if not _imzml_path:
+        raise HTTPException(503, "Brak ścieżki do pliku imzML — uruchom preprocessing")
+    path = Path(_imzml_path)
+    if not path.exists():
+        raise HTTPException(404, f"Plik {path} nie istnieje")
+    try:
+        p, coords_arr = _get_imzml_parser(path)
+        idx = np.where((coords_arr[:, 0] == x) & (coords_arr[:, 1] == y))[0]
+        if len(idx) == 0:
+            raise HTTPException(404, f"Brak piksela ({x},{y})")
+        mz_arr, ints = p.getspectrum(int(idx[0]))
+        mz_arr = np.asarray(mz_arr, dtype=float)
+        ints = np.asarray(ints, dtype=float)
+
+        from src.msi.preprocessing import (
+            smooth_savgol, baseline_correction_snip, normalize_tic, peak_pick,
+        )
+
+        info: dict = {}
+        if method == "smooth":
+            after = smooth_savgol(ints, window=window, polyorder=polyorder)
+        elif method == "baseline":
+            after, baseline = baseline_correction_snip(ints, iterations=iterations)
+            info["baseline_max"] = round(float(baseline.max()), 3)
+        elif method == "normalize":
+            target = _target_tic(tissue)
+            after, factor = normalize_tic(ints, target_tic=target)
+            info["factor"] = round(factor, 4)
+        elif method == "peakpick":
+            after, n_peaks = peak_pick(mz_arr, ints, prominence_frac=prominence)
+            info["n_peaks"] = n_peaks
+        else:
+            raise HTTPException(400, f"Nieznana metoda '{method}'")
+
+        return {
+            "tissue": tissue, "x": x, "y": y, "method": method, "info": info,
+            "mz": [round(float(m), 6) for m in mz_arr],
+            "intensity_before": [float(v) for v in ints],
+            "intensity_after": [float(v) for v in after],
+        }
     except HTTPException:
         raise
     except Exception as e:

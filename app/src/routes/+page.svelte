@@ -7,6 +7,7 @@
   import Sidebar from "$lib/Sidebar.svelte";
   import DaneTab from "$lib/DaneTab.svelte";
   import Widma from "$lib/Widma.svelte";
+  import PreWidma from "$lib/PreWidma.svelte";
   import WorkspaceSettings from "$lib/WorkspaceSettings.svelte";
   import Tablica from "$lib/Tablica.svelte";
   import { loadWorkspaces, wsGet, wsSet } from "$lib/workspace.svelte";
@@ -14,12 +15,13 @@
   import "@fontsource/jetbrains-mono/600.css";
 
   type AppState = "booting" | "ready" | "error";
-  type Tab = "dane" | "mz" | "preprocessing" | "widma" | "segmentacja" | "tablica" | "settings";
+  type Tab = "dane" | "mz" | "preprocessing" | "widma" | "prewidma" | "segmentacja" | "tablica" | "settings";
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "dane",          label: "Dane" },
     { key: "mz",            label: "m/z" },
     { key: "widma",         label: "Widma" },
+    { key: "prewidma",      label: "preWidma" },
     { key: "preprocessing", label: "Preprocessing" },
     { key: "segmentacja",   label: "Segmentacja" },
     { key: "tablica",       label: "Tablica" },
@@ -227,6 +229,9 @@
       </main>
       <main class="content" class:hidden={activeTab !== "widma"}>
         <Widma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {invertColors} {filekey} {tissueVmax} />
+      </main>
+      <main class="content" class:hidden={activeTab !== "prewidma"}>
+        <PreWidma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {invertColors} {filekey} {tissueVmax} />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "segmentacja"}>
         <div class="tab-placeholder">

@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
   import Plotly from "plotly.js-dist-min";
-  import { fetchTissuePixelMap, fetchPixelSpectrum, fetchPixelSpectrumRaw } from "./api.js";
-  import type { TissuePixelMap, PixelSpectrum } from "./api.js";
+  import { fetchPixelSpectrum, fetchPixelSpectrumRaw } from "./api.js";
+  import type { PixelSpectrum } from "./api.js";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
-  import { BRUKER_LUT } from "$lib/colormap";
+  import PixelMapPanel from "$lib/PixelMapPanel.svelte";
 
   const LS_LAYERS    = "widma_layers";
   const LS_NORM      = "widma_norm";
@@ -45,9 +45,8 @@
   const COLORS = ["#ffc951","#7ec8e3","#a8e6cf","#ff8b94","#c9b1ff","#ffcba4","#b5ead7","#ffdac1"];
 
   let selectedTissue  = $state(wsGet<string>(LS_TISSUE, tissues[0] ?? ""));
-  let pixelMap        = $state<TissuePixelMap | null>(null);
-  let mapLoading      = $state(false);
   let layers          = $state<Layer[]>([]);
+  let mapMarkers = $derived(layers.filter(l => l.visible).map(l => ({ x: l.spectrum.x, y: l.spectrum.y, color: l.color })));
   let _prevTissueKey  = $state("");   // do wykrywania zmiany zestawu tkanek
 
   $effect(() => {
@@ -74,8 +73,6 @@
   let binIntensity    = $state<number[]>([]);   // intensywności binów (z pierwszej warstwy binnowanej)
   let binLevel        = $state(0);              // Y poziom kreski binów na wykresie
   let plotDiv         = $state<HTMLDivElement | null>(null);
-  let mapCanvas       = $state<HTMLCanvasElement | null>(null);
-  let hoverPixel      = $state<{x:number;y:number}|null>(null);
 
   // drag-to-reorder — oparte na Pointer Events (natywny HTML5 DnD jest niestabilny w webview Tauri)
   let draggingIdx     = $state<number | null>(null);
@@ -118,134 +115,9 @@
     } finally { layerLoading = false; }
   });
 
-  // ── Ładowanie mapy pikseli ────────────────────────────────────────────────
-  async function loadMap() {
-    if (!selectedTissue) return;
-    mapLoading = true;
-    try {
-      const gVmax = tissueVmax[selectedTissue];
-      pixelMap = await fetchTissuePixelMap(
-        selectedTissue,
-        activeMz ?? undefined,
-        activeTol,
-        gVmax,  // globalny vmax = identyczna skala jak w zakładce m/z
-      );
-    } catch { pixelMap = null; }
-    finally { mapLoading = false; }
-  }
-
-  $effect(() => {
-    selectedTissue; activeMz; activeTol; tissueVmax;
-    loadMap();
-  });
-
   $effect(() => {
     if (tissues.length > 0 && !selectedTissue) selectedTissue = tissues[0];
   });
-
-  // ── Rysowanie mapy pikseli na canvas ──────────────────────────────────────
-  // Ten sam BRUKER_LUT co w zakładce m/z (colormap.ts) — spójne kolory między zakładkami.
-  function lut(t: number): [number,number,number] {
-    const i = Math.round(Math.min(Math.max(t, 0), 1) * 255) * 4;
-    return [BRUKER_LUT[i], BRUKER_LUT[i+1], BRUKER_LUT[i+2]];
-  }
-
-  function drawMapToCanvas(canvas: HTMLCanvasElement, scale: number, circleScale = 2) {
-    if (!pixelMap) return;
-    const { xs, ys, values } = pixelMap;
-    if (xs.length === 0) return;
-
-    const xMin = Math.min(...xs), xMax = Math.max(...xs);
-    const yMin = Math.min(...ys), yMax = Math.max(...ys);
-    const W = xMax - xMin + 1, H = yMax - yMin + 1;
-
-    canvas.width  = W * scale;
-    canvas.height = H * scale;
-
-    const ctx = canvas.getContext("2d")!;
-    ctx.fillStyle = "#111";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    const lo = dispMin, hi = dispMax, span = hi - lo;
-    for (let i = 0; i < xs.length; i++) {
-      const v = values[i];
-      if (span <= 0 || v <= 0) continue;
-      let t = Math.min(1, Math.max(0, (v - lo) / span));
-      t = invertColors ? 1 - t : t;
-      const [r,g,b] = lut(t);
-      ctx.fillStyle = `rgb(${r},${g},${b})`;
-      ctx.fillRect((xs[i]-xMin)*scale, (ys[i]-yMin)*scale, scale, scale);
-    }
-
-    const circleR = Math.max(scale * circleScale, 4);
-    for (const layer of layers) {
-      if (!layer.visible) continue;
-      const { x, y } = layer.spectrum;
-      const cx = (x - xMin) * scale + scale / 2;
-      const cy = (y - yMin) * scale + scale / 2;
-      ctx.beginPath();
-      ctx.arc(cx, cy, circleR, 0, Math.PI * 2);
-      ctx.fillStyle = layer.color + "bb";
-      ctx.fill();
-      ctx.strokeStyle = "#000000aa";
-      ctx.lineWidth = Math.max(1, scale * 0.3);
-      ctx.stroke();
-    }
-
-    (canvas as any)._mapMeta = { xMin, yMin, SCALE: scale };
-  }
-
-  let mapFullscreen = $state(false);
-  let mapCanvasFull = $state<HTMLCanvasElement | null>(null);
-
-  $effect(() => {
-    if (!mapCanvas || !pixelMap) return;
-    layers; dispMin; dispMax;
-    const { xs, ys } = pixelMap;
-    const W = Math.max(...xs) - Math.min(...xs) + 1;
-    const H = Math.max(...ys) - Math.min(...ys) + 1;
-    const SCALE = Math.min(Math.floor(280 / W), Math.floor(300 / H), 6) || 1;
-    drawMapToCanvas(mapCanvas, SCALE);
-  });
-
-  $effect(() => {
-    if (!mapCanvasFull || !pixelMap || !mapFullscreen) return;
-    layers; dispMin; dispMax;
-    const { xs, ys } = pixelMap;
-    const W = Math.max(...xs) - Math.min(...xs) + 1;
-    const H = Math.max(...ys) - Math.min(...ys) + 1;
-    const availW = window.innerWidth  - 80;
-    const availH = window.innerHeight - 80;
-    const SCALE = Math.max(Math.min(Math.floor(availW / W), Math.floor(availH / H), 20), 1);
-    drawMapToCanvas(mapCanvasFull, SCALE, 0.8);
-  });
-
-  function canvasCoords(e: MouseEvent): { px: number; py: number } | null {
-    const canvas = e.currentTarget as HTMLCanvasElement;
-    const meta = (canvas as any)._mapMeta;
-    if (!meta) return null;
-    const rect = canvas.getBoundingClientRect();
-    const { xMin, yMin, SCALE } = meta;
-    return {
-      px: xMin + Math.floor((e.clientX - rect.left) / SCALE),
-      py: yMin + Math.floor((e.clientY - rect.top)  / SCALE),
-    };
-  }
-
-  function onMapClick(e: MouseEvent) {
-    if (!pixelMap) return;
-    const c = canvasCoords(e);
-    if (!c) return;
-    addLayer(c.px, c.py);
-  }
-
-  function onMapMouseMove(e: MouseEvent) {
-    if (!pixelMap) return;
-    const c = canvasCoords(e);
-    if (!c) return;
-    const idx = pixelMap.xs.findIndex((x, i) => x === c.px && pixelMap!.ys[i] === c.py);
-    hoverPixel = idx >= 0 ? { x: c.px, y: c.py } : null;
-  }
 
   // ── Warstwy ───────────────────────────────────────────────────────────────
   async function fetchSpec(tissue: string, x: number, y: number) {
@@ -541,47 +413,21 @@
   <div class="top-row">
 
     <!-- Mapa pikseli -->
-    <div class="map-panel card">
-      <div class="panel-header">
-        <span class="panel-title">Mapa pikseli</span>
-        <select class="tissue-select" bind:value={selectedTissue}>
-          {#each tissues as t}
-            <option value={t}>{tLabel(t)}</option>
-          {/each}
-        </select>
-        {#if mapLoading}<span class="loading-dot">●</span>{/if}
-        <button class="expand-btn" onclick={() => mapFullscreen = true} title="Powiększ mapę">⤢</button>
-      </div>
-
-      <div class="map-wrap">
-        {#if !pixelMap && !mapLoading}
-          <div class="map-hint">Brak danych — uruchom preprocessing</div>
-        {:else}
-          <canvas
-            bind:this={mapCanvas}
-            class="map-canvas"
-            class:map-loading={layerLoading}
-            onclick={onMapClick}
-            onmousemove={onMapMouseMove}
-            onmouseleave={() => hoverPixel = null}
-            title="Kliknij piksel aby dodać widmo"
-          ></canvas>
-        {/if}
-      </div>
-
-      <div class="map-footer">
-        {#if layerLoading}
-          <span class="loading-dot">● Wczytuję widmo…</span>
-        {:else if hoverPixel}
-          <span class="pixel-hint">x={hoverPixel.x}, y={hoverPixel.y}</span>
-        {:else}
-          <span class="pixel-hint muted">najedź na piksel</span>
-        {/if}
-        <span class="mz-badge {activeMz != null ? '' : 'muted'}">
-          {activeMz != null ? `m/z ${activeMz.toFixed(3)} Da` : 'TIC'}
-        </span>
-      </div>
-    </div>
+    <PixelMapPanel
+      {tissues}
+      {tissueLabels}
+      {selectedTissue}
+      {activeMz}
+      {activeTol}
+      {dispMin}
+      {dispMax}
+      {invertColors}
+      {tissueVmax}
+      markers={mapMarkers}
+      loading={layerLoading}
+      onselecttissue={(t) => selectedTissue = t}
+      onpixelclick={addLayer}
+    />
 
     <!-- Warstwy -->
     <div class="layers-panel card">
@@ -711,32 +557,6 @@
 
 </div>
 
-<!-- ── FULLSCREEN MAP MODAL ───────────────────────────────── -->
-{#if mapFullscreen}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="map-modal-backdrop" onclick={() => mapFullscreen = false}>
-    <div class="map-modal-box" onclick={(e) => e.stopPropagation()}>
-      <div class="map-modal-header">
-        <span class="panel-title">
-          {tLabel(selectedTissue)} — {activeMz != null ? `m/z ${activeMz.toFixed(3)} Da` : 'TIC'}
-          {#if hoverPixel}<span class="modal-coords"> · x={hoverPixel.x}, y={hoverPixel.y}</span>{/if}
-        </span>
-        <button class="close-btn" onclick={() => mapFullscreen = false}>✕</button>
-      </div>
-      <div class="map-modal-body">
-        <canvas
-          bind:this={mapCanvasFull}
-          class="map-canvas"
-          onclick={onMapClick}
-          onmousemove={onMapMouseMove}
-          onmouseleave={() => hoverPixel = null}
-          title="Kliknij piksel aby dodać widmo"
-        ></canvas>
-      </div>
-    </div>
-  </div>
-{/if}
-
 <style>
   .widma-layout {
     display: flex;
@@ -761,60 +581,6 @@
     padding: 10px 12px;
     box-sizing: border-box;
   }
-
-  /* ── Mapa ────── */
-  .map-panel {
-    width: 320px;
-    min-width: 320px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .map-wrap {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 120px;
-  }
-
-  .map-canvas {
-    cursor: crosshair;
-    image-rendering: pixelated;
-    max-width: 100%;
-  }
-
-  .map-hint {
-    font-size: 0.72rem;
-    color: rgba(255,255,255,0.2);
-    text-align: center;
-  }
-
-  .map-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    margin-top: 4px;
-    min-height: 16px;
-  }
-
-  .pixel-hint {
-    font-size: 0.65rem;
-    color: rgba(255,255,255,0.45);
-  }
-  .pixel-hint.muted { color: rgba(255,255,255,0.18); }
-
-  .map-canvas.map-loading { cursor: wait; opacity: 0.6; }
-
-  .mz-badge {
-    font-size: 0.65rem;
-    color: #ffc951;
-    opacity: 0.8;
-    white-space: nowrap;
-  }
-  .mz-badge.muted { color: rgba(255,255,255,0.25); }
 
   /* ── Warstwy ────── */
   .layers-panel {
@@ -1093,85 +859,6 @@
     animation: pulse 1s ease-in-out infinite;
   }
   @keyframes pulse { 0%,100%{opacity:0.3} 50%{opacity:1} }
-
-  /* ── Expand button ────── */
-  .expand-btn {
-    background: none;
-    border: none;
-    color: rgba(255,255,255,0.3);
-    font-size: 0.9rem;
-    cursor: pointer;
-    padding: 2px 4px;
-    border-radius: 4px;
-    line-height: 1;
-    flex-shrink: 0;
-    transition: color 0.15s;
-  }
-  .expand-btn:hover { color: #ffc951; }
-
-  /* ── Fullscreen modal ────── */
-  .map-modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.75);
-    z-index: 1000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    backdrop-filter: blur(4px);
-  }
-
-  .map-modal-box {
-    background: #1a1a1a;
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 12px;
-    padding: 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    max-width: calc(100vw - 60px);
-    max-height: calc(100vh - 60px);
-    box-shadow: 0 24px 60px rgba(0,0,0,0.6);
-    animation: modal-in 0.18s ease;
-  }
-
-  @keyframes modal-in {
-    from { opacity: 0; transform: scale(0.96); }
-    to   { opacity: 1; transform: scale(1); }
-  }
-
-  .map-modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .close-btn {
-    background: none;
-    border: none;
-    color: rgba(255,255,255,0.35);
-    font-size: 1rem;
-    cursor: pointer;
-    padding: 2px 6px;
-    border-radius: 4px;
-    transition: color 0.15s;
-  }
-  .close-btn:hover { color: #ff6b6b; }
-
-  .map-modal-body {
-    overflow: auto;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .modal-coords {
-    font-size: 0.65rem;
-    color: rgba(255,255,255,0.4);
-    font-weight: 400;
-    letter-spacing: 0;
-  }
 
   /* ── Checkbox oryginalne widmo ────── */
   .orig-row {
