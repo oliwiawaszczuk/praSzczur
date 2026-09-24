@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { wsGet, wsSet } from "$lib/workspace.svelte";
+  import { wsGet, wsSet, activeWorkspace } from "$lib/workspace.svelte";
 
   const BASE = "http://127.0.0.1:7432";
 
@@ -43,9 +43,16 @@
   // w onMount, efekt zdążyłby zapisać domyślną wartość i nadpisać nią to,
   // co było już zapisane w workspace.
   let imzmlPath    = $state(wsGet("dane_imzmlPath", ""));
+  // Tekst w polu ścieżki — celowo OSOBNY stan od imzmlPath: imzmlPath to
+  // ścieżka faktycznie wczytana (używana we wszystkich fetchach), pathInput
+  // to to, co user właśnie wpisuje/wybrał. Dzięki temu można porównać
+  // "co jest wczytane" z "co user chce wczytać" i pokazać ostrzeżenie
+  // o nadpisaniu, zanim faktycznie zmienimy imzmlPath.
+  let pathInput    = $state(imzmlPath);
   let fileInfo     = $state<{width:number;height:number}|null>(null);
   let fileError    = $state("");
   let loadingFile  = $state(false);
+  let confirmOverwritePath = $state<string|null>(null);
 
   let detectionData = $state<DetectionResult|null>(null);
   let tissues       = $state<TissueMeta[]>([]);
@@ -155,6 +162,7 @@
   });
 
   // Canvas refs
+  let ticWrap: HTMLDivElement|undefined          = $state();
   let ticCanvas: HTMLCanvasElement|undefined     = $state();
   let profileCanvas: HTMLCanvasElement|undefined = $state();
   let specCanvas: HTMLCanvasElement|undefined    = $state();
@@ -201,6 +209,7 @@
       requestAnimationFrame(drawSpectrum);
       requestAnimationFrame(drawBinPreview);
     });
+    if (ticWrap)       resizeObserver.observe(ticWrap);
     if (ticCanvas)     resizeObserver.observe(ticCanvas);
     if (profileCanvas) resizeObserver.observe(profileCanvas);
     if (specCanvas)    resizeObserver.observe(specCanvas);
@@ -239,7 +248,37 @@
       filters: [{ name: "imzML", extensions: ["imzML","imzml"] }],
       multiple: false,
     });
-    if (selected) { imzmlPath = selected as string; await loadFile(); }
+    if (selected) { pathInput = selected as string; requestLoad(pathInput); }
+  }
+
+  // Ten workspace ma już wczytane/przetworzone dane dla innego pliku?
+  function hasExistingData(): boolean {
+    return !!imzmlPath && (tissues.length > 0 || (status?.npz_files?.length ?? 0) > 0);
+  }
+
+  // Wywoływane zarówno przez wybór pliku z dialogu, jak i przycisk "Wczytaj".
+  // Jeśli w workspace są już dane powiązane z INNĄ ścieżką pliku, pokazuje
+  // ostrzeżenie zamiast od razu nadpisywać (detekcję/tkanki/przetworzone .npz).
+  function requestLoad(path: string) {
+    if (!path) return;
+    if (path !== imzmlPath && hasExistingData()) {
+      confirmOverwritePath = path;
+      return;
+    }
+    imzmlPath = path;
+    loadFile();
+  }
+
+  function proceedOverwrite() {
+    if (confirmOverwritePath === null) return;
+    imzmlPath = confirmOverwritePath;
+    confirmOverwritePath = null;
+    loadFile();
+  }
+
+  function cancelOverwrite() {
+    confirmOverwritePath = null;
+    pathInput = imzmlPath;   // cofnij pole tekstowe do pliku, który jest wczytany
   }
 
   // isRestore=true → automatyczne przywrócenie ostatnio wczytanego pliku przy
@@ -267,6 +306,7 @@
       }));
       fileInfo = { width: d.width, height: d.height };
       wsSet("dane_imzmlPath", imzmlPath);  // tylko po udanym załadowaniu
+      pathInput = imzmlPath;
       // Notify parent with restored/current labels
       const labels: Record<string,string> = {};
       tissues.forEach(t => { labels[t.id] = t.label; });
@@ -359,10 +399,17 @@
     const { presence_image: img, width: W, height: H, x_offset: xOff } = detectionData;
     const dpr = window.devicePixelRatio || 1;
 
-    // CSS width z kontenera, height z proporcji danych
-    const rect = ticCanvas.getBoundingClientRect();
-    const cssW = rect.width || W;
-    const cssH = cssW * (H / W);   // zachowaj aspect ratio danych
+    // Dopasuj canvas do dostępnej przestrzeni kontenera zachowując aspect ratio
+    // danych (fit "contain") — dla tkanek ułożonych pionowo (jedna pod drugą)
+    // dopasowanie tylko do szerokości potrafiło dać wysokość większą niż
+    // dostępna, a kontener z overflow:hidden obcinał dolną część mapy.
+    const wrap = ticCanvas.parentElement;
+    const availW = wrap?.clientWidth || 300;
+    const availH = wrap?.clientHeight || (availW * (H / W));
+    const scale = Math.min(availW / W, availH / H);
+    const cssW = W * scale;
+    const cssH = H * scale;
+    ticCanvas.style.width  = cssW + "px";
     ticCanvas.style.height = cssH + "px";
 
     ticCanvas.width  = cssW * dpr;
@@ -412,7 +459,16 @@
       ctx.fillText(t.label, labelX, labelY);
     });
   }
-  $effect(() => { detectionData; tissues; if (ticCanvas) requestAnimationFrame(drawTic); });
+  // UWAGA: samo odwołanie do `tissues` (bez dotknięcia właściwości elementów)
+  // NIE rejestruje zależności na zmianach pojedynczych pól (np. `enabled`
+  // ustawianym przy kliknięciu na tkankę) — Svelte śledzi odczyty properties
+  // przez proxy, a `drawTic()` czyta je dopiero asynchronicznie w rAF, poza
+  // zakresem śledzenia efektu. Dlatego jawnie "dotykamy" każdego pola tutaj.
+  $effect(() => {
+    detectionData;
+    for (const t of tissues) { t.enabled; t.x_min; t.x_max; t.y_min; t.y_max; t.label; tissueColors[t.id]; }
+    if (ticCanvas) requestAnimationFrame(drawTic);
+  });
 
   function onTicClick(e: MouseEvent) {
     if (!ticCanvas || !detectionData) return;
@@ -452,7 +508,11 @@
     });
     ctx.stroke();
   }
-  $effect(() => { detectionData; tissues; if (profileCanvas) requestAnimationFrame(drawProfile); });
+  $effect(() => {
+    detectionData;
+    for (const t of tissues) { t.enabled; t.x_min; t.x_max; t.y_min; t.y_max; t.label; tissueColors[t.id]; }
+    if (profileCanvas) requestAnimationFrame(drawProfile);
+  });
 
   // ── Canvas: widmo pełne z suwakami ───────────────────────────────────────
   $effect(() => { mzMin; mzMax; viewMin; viewMax; spectrumData; binCenter; binNBins; binSize; if (specCanvas && spectrumData) requestAnimationFrame(drawSpectrum); });
@@ -708,16 +768,19 @@
         </div>
         <div class="file-row">
           <input class="path-input" type="text" placeholder="ścieżka .imzML"
-                 bind:value={imzmlPath} />
+                 bind:value={pathInput} />
           <button class="btn-secondary" onclick={pickFile}>📁</button>
-          <button class="btn-load" onclick={loadFile} disabled={loadingFile}>
+          <button class="btn-load" onclick={() => requestLoad(pathInput)} disabled={loadingFile}>
             {#if loadingFile}<span class="spinner-sm"></span>{:else}Wczytaj{/if}
           </button>
         </div>
         {#if fileError}
           <div class="error-msg">⚠ {fileError}</div>
         {:else if fileInfo}
-          <div class="file-info">{fileInfo.width}×{fileInfo.height} px</div>
+          <div class="file-info">
+            {fileInfo.width}×{fileInfo.height} px
+            {#if activeWorkspace()}<span class="file-info-ws">· Workspace: {activeWorkspace()!.name}</span>{/if}
+          </div>
         {/if}
       </div>
 
@@ -733,7 +796,7 @@
         </div>
 
         {#if detectionData}
-          <div class="tic-wrap">
+          <div class="tic-wrap" bind:this={ticWrap}>
             <canvas bind:this={ticCanvas} class="tic-canvas" onclick={onTicClick} style="cursor:pointer"></canvas>
           </div>
           <canvas bind:this={profileCanvas} class="profile-canvas"></canvas>
@@ -962,6 +1025,29 @@
     </div>
   </div>
 
+  <!-- ── MODAL: ostrzeżenie o nadpisaniu danych workspace'u ─────────────── -->
+  {#if confirmOverwritePath !== null}
+    <div class="modal-backdrop" onclick={cancelOverwrite}>
+      <div class="modal-box" onclick={(e) => e.stopPropagation()}>
+        <div class="modal-title">⚠ Nadpisać dane workspace'u?</div>
+        <div class="modal-body">
+          Workspace <strong>{activeWorkspace()?.name ?? "bieżący"}</strong> ma już wczytany
+          i przetworzony plik <strong>{imzmlPath.split(/[\\/]/).pop()}</strong>
+          ({tissues.length} {tissues.length === 1 ? "wykryta tkanka" : "wykrytych tkanek"}{#if status && status.npz_files.length > 0}, {status.npz_files.length} przetworzonych .npz{/if}).
+          <br /><br />
+          Jeśli wczytasz nowy plik <strong>{confirmOverwritePath.split(/[\\/]/).pop()}</strong>,
+          bieżąca detekcja tkanek, widma i przetworzone dane w tym workspace zostaną
+          zastąpione danymi z nowego pliku — poprzednie ustawienia dla tego pliku nie
+          zostaną zachowane.
+        </div>
+        <div class="modal-actions">
+          <button class="btn-secondary" onclick={cancelOverwrite}>Anuluj</button>
+          <button class="btn-load" onclick={proceedOverwrite}>Dalej — nadpisz</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -1075,12 +1161,37 @@
   .btn-load:hover:not(:disabled) { background: rgba(255,201,81,0.25); }
   .btn-load:disabled { opacity: 0.5; cursor: not-allowed; }
   .file-info { font-size: 0.62rem; color: rgba(255,255,255,0.28); }
+  .file-info-ws { color: rgba(255,201,81,0.55); }
   .error-msg { font-size: 0.62rem; color: #ff8080; }
 
+  /* ── Modal: ostrzeżenie o nadpisaniu ──────────────────────────────────── */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+  }
+  .modal-box {
+    background: #222; border: 1px solid rgba(255,160,50,0.3);
+    border-radius: 12px; padding: 18px 20px; max-width: 420px;
+    display: flex; flex-direction: column; gap: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  .modal-title { font-size: 0.85rem; font-weight: 700; color: #ffa632; }
+  .modal-body { font-size: 0.72rem; line-height: 1.5; color: rgba(255,255,255,0.65); }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
   /* ── TIC ───────────────────────────────────────────────────────────────── */
-  .tic-wrap { position: relative; flex-shrink: 0; }
+  /* flex: 1 + min-height:0 pozwala kontenerowi kurczyć/rosnąć w dostępnej
+     przestrzeni karty; max-height chroni przed zajęciem całej karty przy
+     tkankach ułożonych pionowo. Canvas jest dopasowywany w JS (drawTic,
+     fit "contain") i wyśrodkowywany tu przez flex. */
+  .tic-wrap {
+    position: relative; flex: 1 1 auto; min-height: 90px; max-height: 260px;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
   .tic-canvas {
-    width: 100%; height: auto; display: block;
+    display: block;
     image-rendering: pixelated;
   }
   .tic-labels-abs {

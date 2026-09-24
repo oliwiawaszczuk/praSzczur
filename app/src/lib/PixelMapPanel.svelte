@@ -308,15 +308,25 @@
   }
 
   .tissue-select {
-    background: #1a1a1a;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background: #1a1a1a
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23ffc951' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>")
+      no-repeat right 8px center;
+    background-size: 9px 6px;
     border: 1px solid rgba(255,255,255,0.1);
     border-radius: 6px;
     color: #e0e0e0;
-    font-size: 0.75rem;
-    padding: 3px 6px;
+    font-size: 0.72rem;
+    padding: 4px 22px 4px 8px;
     font-family: inherit;
     cursor: pointer;
+    outline: none;
+    transition: border-color 0.15s, color 0.15s;
   }
+  .tissue-select:hover  { border-color: rgba(255,201,81,0.3); color: #ffc951; }
+  .tissue-select option { background: #1a1a1a; color: #e0e0e0; }
 
   .loading-dot {
     font-size: 0.6rem;

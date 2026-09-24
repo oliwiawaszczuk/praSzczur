@@ -298,8 +298,8 @@
 
       {#if resultLeft || resultRight}
         <div class="align-stats">
-          {#if resultLeft}<span>góra: {infoText(resultLeft)}</span>{/if}
-          {#if resultRight}<span>dół: {infoText(resultRight)}</span>{/if}
+          {#if resultLeft}<span>lewa: {infoText(resultLeft)}</span>{/if}
+          {#if resultRight}<span>prawa: {infoText(resultRight)}</span>{/if}
         </div>
       {/if}
 
@@ -311,7 +311,7 @@
   <SpectrumPlot
     spectrum={spectrumLeft}
     color={COLOR_L}
-    label="oryginał (góra)"
+    label="oryginał (lewa)"
     overlaySpectrum={overlayLeft}
     overlayLabel="po przetworzeniu"
     loading={loadingLeft || (applying && !!selectedPixelLeft)}
@@ -336,7 +336,7 @@
   <SpectrumPlot
     spectrum={spectrumRight}
     color={COLOR_R}
-    label="oryginał (dół)"
+    label="oryginał (prawa)"
     overlaySpectrum={overlayRight}
     overlayLabel="po przetworzeniu"
     loading={loadingRight || (applying && !!selectedPixelRight)}
