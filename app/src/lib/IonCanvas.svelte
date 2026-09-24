@@ -27,8 +27,8 @@
 
     const remapped = tissue.data.map(row =>
       row.map(v => {
-        if (span <= 0 || v <= 0) return 0;
-        let t = Math.min(1, Math.max(0, (v - lo) / span));
+        if (span <= 0) return invertColors ? 1 : 0;
+        const t = Math.min(1, Math.max(0, (v - lo) / span));
         return invertColors ? 1 - t : t;
       })
     );

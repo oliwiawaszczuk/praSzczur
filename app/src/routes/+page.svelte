@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { waitForSidecar, fetchIonImage, fetchIonImageRaw, fetchDatasetStatus } from "$lib/api.js";
+  import { waitForSidecar, fetchIonImage, fetchDatasetStatus } from "$lib/api.js";
   import type { TissueImage } from "$lib/api.js";
   import IonGrid from "$lib/IonGrid.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
@@ -45,6 +45,10 @@
   let invertColors     = $state(false);
   let filekey          = $state(0);
   let tissueVmax       = $state<Record<string, number>>({});
+  // Zestaw danych użyty do ostatniego zapytania m/z — Widma/preWidma muszą
+  // liczyć mapy pikseli z tego SAMEGO zestawu, inaczej pokazują inne dane niż
+  // to, co widać w zakładce m/z (mapa musi być zwierciadłem, 1:1).
+  let lastDataset      = $state<string | undefined>(undefined);
   let lastMz           = $state<number | null>(null);
   let lastTol          = $state(0.3);
   let defaultTol       = $state(0.3);
@@ -125,13 +129,14 @@
     } catch {}
   }
 
-  async function handleQuery({ mz, tol, raw = false }: { mz: number; tol: number; raw?: boolean }) {
+  async function handleQuery({ mz, tol, dataset }: { mz: number; tol: number; dataset?: string }) {
     queryLoading = true;
     queryError = "";
     lastMz = mz;
     lastTol = tol;
+    lastDataset = dataset;
     try {
-      const res = raw ? await fetchIonImageRaw(mz, tol) : await fetchIonImage(mz, tol);
+      const res = await fetchIonImage(mz, tol, dataset);
       tissues = res.tissues;
       // Zapisz globalny vmax per tkanka (spójny z Widma)
       const newVmax: Record<string, number> = {};
@@ -228,10 +233,10 @@
         </div>
       </main>
       <main class="content" class:hidden={activeTab !== "widma"}>
-        <Widma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {invertColors} {filekey} {tissueVmax} />
+        <Widma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {invertColors} {filekey} {tissueVmax} mapDataset={lastDataset} />
       </main>
       <main class="content" class:hidden={activeTab !== "prewidma"}>
-        <PreWidma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {invertColors} {filekey} {tissueVmax} />
+        <PreWidma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {invertColors} {filekey} {tissueVmax} mapDataset={lastDataset} />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "segmentacja"}>
         <div class="tab-placeholder">

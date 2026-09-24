@@ -22,9 +22,10 @@
     invertColors?: boolean;
     filekey?: number;
     tissueVmax?: Record<string, number>;
+    mapDataset?: string;  // zestaw, z którego liczona jest mapa jonowa w zakładce m/z — mapa pikseli MUSI używać tego samego, inaczej pokazuje inne dane
   }
 
-  let { tissues = [], activeMz = null, activeTol = 0.3, tissueLabels = {}, dispMin = 0, dispMax = 1, invertColors = false, filekey = 0, tissueVmax = {} }: Props = $props();
+  let { tissues = [], activeMz = null, activeTol = 0.3, tissueLabels = {}, dispMin = 0, dispMax = 1, invertColors = false, filekey = 0, tissueVmax = {}, mapDataset = undefined }: Props = $props();
 
   interface Pixel { tissue: string; x: number; y: number; }
 
@@ -172,6 +173,7 @@
       {dispMax}
       {invertColors}
       {tissueVmax}
+      dataset={mapDataset}
       markers={markersLeft}
       loading={loadingLeft}
       title="Mapa pikseli — górne widmo"
@@ -188,6 +190,7 @@
       {dispMax}
       {invertColors}
       {tissueVmax}
+      dataset={mapDataset}
       markers={markersRight}
       loading={loadingRight}
       title="Mapa pikseli — dolne widmo"

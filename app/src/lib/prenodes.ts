@@ -38,6 +38,11 @@ export interface PreNode {
   x: number;
   y: number;
   params: Record<string, number>;
+  /** Tylko dla source_binned: id wybranego zestawu danych (puste = aktywny zestaw workspace'u). */
+  datasetId?: string;
+  /** Tylko dla kategorii "preprocessing": czy węzeł jest aktywny (domyślnie true).
+   * Wygaszony (false) węzeł jest pomijany w łańcuchu — dane przechodzą przez niego bez zmian. */
+  enabled?: boolean;
 }
 
 export interface PreEdge {
@@ -169,7 +174,7 @@ export function defaultGraph(): PreGraph {
 export function buildChain(
   graph: PreGraph,
   nodeId: string,
-): { source: "raw" | "binned"; steps: { method: string; params: Record<string, number> }[] } | null {
+): { source: "raw" | "binned"; datasetId?: string; steps: { method: string; params: Record<string, number> }[] } | null {
   const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
   const incomingByTarget = new Map<string, PreEdge>();
   for (const e of graph.edges) incomingByTarget.set(e.to, e);
@@ -181,12 +186,14 @@ export function buildChain(
     if (visited.has(cur.id)) return null; // cycle guard
     visited.add(cur.id);
     if (cur.type === "source_raw") return { source: "raw", steps: chain.reverse() };
-    if (cur.type === "source_binned") return { source: "binned", steps: chain.reverse() };
+    if (cur.type === "source_binned") return { source: "binned", datasetId: cur.datasetId, steps: chain.reverse() };
     // Only real processing methods (both ports present) become chain steps —
     // an "output" node (input-only, no ports beyond it) is just the walk's
     // starting point and must not itself be sent as a method.
     const curDef = NODE_TYPES[cur.type];
-    if (curDef?.hasInput && curDef?.hasOutput) {
+    // Wygaszony node (enabled === false) jest pomijany — dane przechodzą przez
+    // niego bez zmian, jakby był bezpośrednio podłączony w tym miejscu grafu.
+    if (curDef?.hasInput && curDef?.hasOutput && cur.enabled !== false) {
       chain.push({ method: cur.type, params: cur.params });
     }
     const inEdge = incomingByTarget.get(cur.id);

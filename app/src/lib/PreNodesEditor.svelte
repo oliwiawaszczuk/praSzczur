@@ -7,6 +7,7 @@
     NODE_TYPE_LIST, NODE_TYPES, CATEGORY_ORDER, CATEGORY_LABELS, defaultGraph, defaultParams, makeId, buildChain,
     type PreGraph, type PreNode, type PreEdge, type PreViewport,
   } from "$lib/prenodes";
+  import { datasets, loadDatasets, datasetsLoaded, activeDatasetId, createDataset, buildPipelineDataset } from "$lib/datasets.svelte";
 
   interface Pixel { tissue: string; x: number; y: number; }
 
@@ -16,6 +17,25 @@
     onResult?: (side: "left" | "right", result: PreprocessChainResult | null) => void;
   }
   let { pixelLeft = null, pixelRight = null, onResult }: Props = $props();
+
+  onMount(async () => { if (!datasetsLoaded()) await loadDatasets(); });
+
+  function setNodeDataset(node: PreNode, datasetId: string) {
+    const idx = graph.nodes.findIndex((n) => n.id === node.id);
+    if (idx === -1) return;
+    graph.nodes[idx] = { ...graph.nodes[idx], datasetId };
+    persist();
+  }
+
+  // Wygaszenie node'a preprocessingu (oczko) — dane przechodzą przez niego
+  // bez zmian, patrz buildChain() w prenodes.ts.
+  function toggleNodeEnabled(node: PreNode) {
+    const idx = graph.nodes.findIndex((n) => n.id === node.id);
+    if (idx === -1) return;
+    const enabled = graph.nodes[idx].enabled === false; // był false → włącz, inaczej wygaś
+    graph.nodes[idx] = { ...graph.nodes[idx], enabled };
+    persist();
+  }
 
   // Actual bin size (per-workspace, set in the "Dane" tab) — shown as the
   // "Dane przetworzone" source node's dynamic subtitle.
@@ -86,7 +106,8 @@
     let h = 30 + 20; // header + body padding
     if (def.detail || node.type === "source_binned") h += 22; // subtitle row
     h += def.params.length * 40;
-    if (node.type === "output") h += 50; // "Realizuj" button + result line
+    if (node.type === "output") h += 110; // "Realizuj" + zapis jako zestaw + wyniki
+    if (node.type === "source_binned") h += 40; // dropdown zestawu danych
     return Math.max(h, 60);
   }
 
@@ -97,7 +118,7 @@
     for (const n of graph.nodes) {
       minX = Math.min(minX, n.x);
       minY = Math.min(minY, n.y);
-      maxX = Math.max(maxX, n.x + NODE_WIDTH);
+      maxX = Math.max(maxX, n.x + nodeWidth(n));
       maxY = Math.max(maxY, n.y + nodeHeight(n));
     }
     const pad = 48;
@@ -164,14 +185,35 @@
   let connDrag = $state<DragConn | null>(null);
   let cursorWorld = $state<{ x: number; y: number }>({ x: 0, y: 0 });
 
+  // Node "Wynik" jest dwa razy szerszy — ma osobne sekcje Wyświetl/Zapisz.
+  function nodeWidth(node: PreNode): number {
+    return node.type === "output" ? 400 : 200;
+  }
+
   function portPos(node: PreNode, port: "in" | "out"): { x: number; y: number } {
-    const width = 200;
     const headerH = 30;
-    return { x: node.x + (port === "in" ? 0 : width), y: node.y + headerH / 2 };
+    return { x: node.x + (port === "in" ? 0 : nodeWidth(node)), y: node.y + headerH / 2 };
   }
 
   function onPortPointerDown(e: PointerEvent, node: PreNode, port: "in" | "out") {
     e.stopPropagation();
+    if (port === "in") {
+      // Blender-style: chwytanie za końcówkę JUŻ podłączonego wejścia odłącza
+      // istniejące połączenie i zaczyna je ciągnąć od strony źródła (wyjścia)
+      // — puszczenie w pustym miejscu po prostu je usuwa, puszczenie na innym
+      // wejściu przełącza połączenie tam.
+      const existing = graph.edges.find((e2) => e2.to === node.id);
+      if (existing) {
+        const sourceNode = graph.nodes.find((n) => n.id === existing.from);
+        graph.edges = graph.edges.filter((e2) => e2.id !== existing.id);
+        persist();
+        if (sourceNode) {
+          const sp = portPos(sourceNode, "out");
+          connDrag = { nodeId: sourceNode.id, port: "out", x: sp.x, y: sp.y };
+          return;
+        }
+      }
+    }
     const p = portPos(node, port);
     connDrag = { nodeId: node.id, port, x: p.x, y: p.y };
   }
@@ -384,7 +426,7 @@
     try {
       const lines: string[] = [];
       for (const { label, pixel } of pixels) {
-        const res = await fetchPreprocessChain(pixel.tissue, pixel.x, pixel.y, chain.source, chain.steps);
+        const res = await fetchPreprocessChain(pixel.tissue, pixel.x, pixel.y, chain.source, chain.steps, chain.datasetId);
         const last = res.steps_applied[res.steps_applied.length - 1];
         const info = last ? formatStepInfo(last) : "";
         lines.push(`${label}: OK${info ? " — " + info : ""}`);
@@ -398,7 +440,49 @@
     }
   }
 
-  const NODE_WIDTH = 200;
+  // ── Zapisz jako zestaw danych — buduje pełny zestaw (WSZYSTKIE piksele
+  // źródłowego zestawu, nie tylko podglądane 1-2), stosując łańcuch kroków
+  // z tego node'a "Wynik". Wymaga source_binned (bulk build nie parsuje
+  // surowego imzML per piksel — patrz build_pipeline w sidecarze).
+  let savingDataset = $state<string | null>(null);
+  let saveDatasetName = $state<Record<string, string>>({});
+  // "" = nowy zestaw (z saveDatasetName); w przeciwnym razie id istniejącego
+  // zestawu do NADPISANIA (wybrany z dropdowna).
+  let saveDatasetTarget = $state<Record<string, string>>({});
+  let saveProgress = $state<Record<string, string>>({});
+
+  async function saveOutputAsDataset(node: PreNode) {
+    const chain = buildChain(graph, node.id);
+    if (!chain || chain.source !== "binned") {
+      saveProgress = { ...saveProgress, [node.id]: "wymagane źródło: Dane przetworzone" };
+      return;
+    }
+    const sourceId = chain.datasetId || activeDatasetId();
+    const overwriteId = saveDatasetTarget[node.id] || "";
+    savingDataset = node.id;
+    saveProgress = { ...saveProgress, [node.id]: "budowanie…" };
+    try {
+      let targetId = overwriteId;
+      let targetName = datasets().find((d) => d.id === overwriteId)?.name ?? "";
+      if (!targetId) {
+        const name = (saveDatasetName[node.id] || "").trim();
+        if (!name) { savingDataset = null; return; }
+        const ds = await createDataset(name, "pipeline");
+        targetId = ds.id;
+        targetName = name;
+      }
+      await buildPipelineDataset(targetId, sourceId, chain.steps, (pct, msg) => {
+        saveProgress = { ...saveProgress, [node.id]: `${pct}% ${msg}` };
+      });
+      saveProgress = { ...saveProgress, [node.id]: `✓ zapisano jako "${targetName}"` };
+      saveDatasetName = { ...saveDatasetName, [node.id]: "" };
+    } catch (e) {
+      saveProgress = { ...saveProgress, [node.id]: e instanceof Error ? e.message : String(e) };
+    } finally {
+      savingDataset = null;
+    }
+  }
+
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />
@@ -441,7 +525,8 @@
     {#each graph.nodes as node (node.id)}
       {@const def = NODE_TYPES[node.type]}
       {#if def}
-        <div class="pnode" style="left:{node.x}px; top:{node.y}px; width:{NODE_WIDTH}px;"
+        <div class="pnode" class:pnode-disabled={def.category === "preprocessing" && node.enabled === false}
+             style="left:{node.x}px; top:{node.y}px; width:{nodeWidth(node)}px;"
              oncontextmenu={(e) => onNodeContextMenu(e, node)}
              onpointerenter={() => (hoveredNodeId = node.id)}
              onpointerleave={() => (hoveredNodeId = null)}>
@@ -449,6 +534,12 @@
                onpointerdown={(e) => onNodeHeaderPointerDown(e, node)}
                onpointerup={onNodeHeaderPointerUp}>
             <span class="pnode-title">{def.label}</span>
+            {#if def.category === "preprocessing"}
+              <button class="node-eye-btn" class:off={node.enabled === false}
+                      title={node.enabled === false ? "Wygaszony — dane przechodzą bez zmian" : "Aktywny — kliknij aby wygasić"}
+                      onpointerdown={(e) => e.stopPropagation()}
+                      onclick={() => toggleNodeEnabled(node)}></button>
+            {/if}
             <span class="node-info" tabindex="0" role="note">
               <span class="node-info-icon">i</span>
               <span class="node-info-tip">{def.description}</span>
@@ -462,6 +553,20 @@
           {/if}
 
           <div class="pnode-body">
+            {#if node.type === "source_binned"}
+              <label class="field">
+                <span>Zestaw danych</span>
+                <select class="ds-select"
+                        value={node.datasetId ?? ""}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setNodeDataset(node, (e.target as HTMLSelectElement).value)}>
+                  <option value="">(aktywny — {activeDatasetId()})</option>
+                  {#each datasets() as d}
+                    <option value={d.id}>{d.name}</option>
+                  {/each}
+                </select>
+              </label>
+            {/if}
             {#each def.params as p (p.key)}
               <label class="field">
                 <span>{p.label}: {node.params[p.key] ?? p.default}</span>
@@ -473,14 +578,51 @@
             {/each}
 
             {#if node.type === "output"}
-              <button class="run-btn" disabled={runBusy === node.id}
-                      onpointerdown={(e) => e.stopPropagation()}
-                      onclick={() => runOutputNode(node)}>
-                {runBusy === node.id ? "Realizacja…" : "Realizuj"}
-              </button>
-              {#if runText[node.id]}
-                <span class="preview-result">{runText[node.id]}</span>
-              {/if}
+              <div class="output-columns">
+                <!-- Wyświetl — wymaga wybranego piksela, tylko podgląd na wykresach -->
+                <div class="output-col" onpointerdown={(e) => e.stopPropagation()}>
+                  <span class="output-col-title">Wyświetl</span>
+                  <button class="run-btn" disabled={runBusy === node.id}
+                          onclick={() => runOutputNode(node)}>
+                    {runBusy === node.id ? "Wyświetlanie…" : "Wyświetl"}
+                  </button>
+                  {#if runText[node.id]}
+                    <span class="preview-result">{runText[node.id]}</span>
+                  {/if}
+                </div>
+
+                <!-- Zapisz — cała tkanka, wszystkie piksele, bez wymogu wybranego piksela -->
+                <div class="output-col" onpointerdown={(e) => e.stopPropagation()}>
+                  <span class="output-col-title">Zapisz</span>
+                  <select class="ds-select"
+                          value={saveDatasetTarget[node.id] ?? ""}
+                          onchange={(e) => saveDatasetTarget = { ...saveDatasetTarget, [node.id]: (e.target as HTMLSelectElement).value }}>
+                    <option value="">+ nowy zestaw…</option>
+                    {#each datasets().filter((d) => d.id !== "original") as d}
+                      <option value={d.id}>nadpisz: {d.name}</option>
+                    {/each}
+                  </select>
+                  {#if !saveDatasetTarget[node.id]}
+                    <input class="save-dataset-input" type="text" placeholder="nazwa nowego zestawu…"
+                           value={saveDatasetName[node.id] ?? ""}
+                           oninput={(e) => saveDatasetName = { ...saveDatasetName, [node.id]: (e.target as HTMLInputElement).value }} />
+                  {:else}
+                    <span class="save-warning">⚠ nadpisze zestaw "{datasets().find((d) => d.id === saveDatasetTarget[node.id])?.name}"</span>
+                  {/if}
+                  <button class="run-btn save-btn"
+                          disabled={savingDataset === node.id || (!saveDatasetTarget[node.id] && !(saveDatasetName[node.id] ?? "").trim())}
+                          onclick={() => saveOutputAsDataset(node)}>
+                    {#if savingDataset === node.id}
+                      <span class="spin"></span> Zapisywanie…
+                    {:else}
+                      Zapisz (cała tkanka)
+                    {/if}
+                  </button>
+                  {#if saveProgress[node.id]}
+                    <span class="preview-result">{saveProgress[node.id]}</span>
+                  {/if}
+                </div>
+              </div>
             {/if}
           </div>
 
@@ -585,7 +727,40 @@
     border-radius: 10px;
     box-shadow: 0 4px 16px rgba(0,0,0,0.35);
     user-select: none;
+    transition: opacity 0.15s;
   }
+
+  /* Wygaszony node preprocessingu — dane przechodzą bez zmian (pass-through). */
+  .pnode-disabled { opacity: 0.45; }
+
+  /* Ikona oczka (widoczny/wygaszony) — ta sama elipsa co .vis-btn w Widma.svelte. */
+  .node-eye-btn {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 16px;
+    padding: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+  }
+  .node-eye-btn::before {
+    content: "";
+    display: inline-block;
+    width: 12px;
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.45);
+    transition: background 0.15s;
+  }
+  .node-eye-btn.off::before {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.18);
+  }
+  .node-eye-btn:hover::before { background: rgba(255,201,81,0.7); }
+  .node-eye-btn.off:hover::before { border-color: rgba(255,255,255,0.5); }
 
   .pnode-header {
     display: flex;
@@ -669,6 +844,37 @@
     color: rgba(255,255,255,0.6);
   }
 
+  .output-columns {
+    display: flex;
+    gap: 10px;
+  }
+
+  .output-col {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .output-col-title {
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.35);
+  }
+
+  .spin {
+    display: inline-block;
+    width: 9px; height: 9px;
+    border: 1.5px solid rgba(126,200,227,0.3);
+    border-top-color: #7ec8e3;
+    border-radius: 50%;
+    animation: pn-spin 0.7s linear infinite;
+  }
+  @keyframes pn-spin { to { transform: rotate(360deg); } }
+
   .run-btn {
     width: 100%;
     background: rgba(255,201,81,0.12);
@@ -687,6 +893,60 @@
   .preview-result {
     font-size: 0.62rem;
     color: rgba(255,255,255,0.45);
+  }
+
+  /* Jednolity styl dropdownów zestawów danych — jak .tissue-select w PixelMapPanel. */
+  .ds-select {
+    width: 100%;
+    appearance: none; -webkit-appearance: none; -moz-appearance: none;
+    background: #1a1a1a
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23ffc951' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>")
+      no-repeat right 6px center;
+    background-size: 8px 5px;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 5px;
+    color: #e0e0e0;
+    font-size: 0.65rem;
+    padding: 3px 18px 3px 5px;
+    font-family: inherit;
+    cursor: pointer;
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .ds-select:hover  { border-color: rgba(255,201,81,0.3); color: #ffc951; }
+  .ds-select option { background: #1a1a1a; color: #e0e0e0; }
+
+  .save-dataset-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+  }
+
+  .save-dataset-input {
+    width: 100%;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 5px;
+    color: #e0e0e0;
+    font-size: 0.65rem;
+    font-family: inherit;
+    padding: 4px 6px;
+    box-sizing: border-box;
+  }
+
+  .save-btn {
+    background: rgba(126,200,227,0.12);
+    border-color: rgba(126,200,227,0.4);
+    color: #7ec8e3;
+  }
+  .save-btn:hover:not(:disabled) { background: rgba(126,200,227,0.2); }
+
+  .save-warning {
+    font-size: 0.6rem;
+    color: #ffc951;
+    line-height: 1.3;
   }
 
   /* Port colors are intentional: #7ec8e3 (secondary accent) marks inputs,

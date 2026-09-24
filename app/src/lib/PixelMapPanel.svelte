@@ -15,6 +15,10 @@
     dispMax?: number;
     invertColors?: boolean;
     tissueVmax?: Record<string, number>;
+    /** Zestaw danych, z którego liczona jest mapa — MUSI być ten sam, co użyty
+     * do policzenia `tissueVmax` (mapa jonowa w zakładce m/z), inaczej mapa
+     * pikseli pokazuje inne dane niż to, co widać w m/z. */
+    dataset?: string;
     markers?: PixelMarker[];
     title?: string;
     loading?: boolean;
@@ -32,6 +36,7 @@
     dispMax = 1,
     invertColors = false,
     tissueVmax = {},
+    dataset = undefined,
     markers = [],
     title = "Mapa pikseli",
     loading = false,
@@ -53,13 +58,13 @@
     mapLoading = true;
     try {
       const gVmax = tissueVmax[selectedTissue];
-      pixelMap = await fetchTissuePixelMap(selectedTissue, activeMz ?? undefined, activeTol, gVmax);
+      pixelMap = await fetchTissuePixelMap(selectedTissue, activeMz ?? undefined, activeTol, gVmax, dataset);
     } catch { pixelMap = null; }
     finally { mapLoading = false; }
   }
 
   $effect(() => {
-    selectedTissue; activeMz; activeTol; tissueVmax;
+    selectedTissue; activeMz; activeTol; tissueVmax; dataset;
     loadMap();
   });
 
@@ -87,7 +92,7 @@
     const lo = dispMin, hi = dispMax, span = hi - lo;
     for (let i = 0; i < xs.length; i++) {
       const v = values[i];
-      if (span <= 0 || v <= 0) continue;
+      if (span <= 0) continue;
       let t = Math.min(1, Math.max(0, (v - lo) / span));
       t = invertColors ? 1 - t : t;
       const [r, g, b] = lut(t);

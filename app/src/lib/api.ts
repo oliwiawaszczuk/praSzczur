@@ -30,8 +30,10 @@ export interface IonImageResponse {
   tissues: Record<string, TissueImage>;
 }
 
-export async function fetchIonImage(mz: number, tol: number): Promise<IonImageResponse> {
-  const r = await fetch(`${BASE}/ion_image?mz=${mz}&tol=${tol}`);
+export async function fetchIonImage(mz: number, tol: number, dataset?: string): Promise<IonImageResponse> {
+  const q = new URLSearchParams({ mz: String(mz), tol: String(tol) });
+  if (dataset) q.set("dataset", dataset);
+  const r = await fetch(`${BASE}/ion_image?${q}`);
   if (!r.ok) throw new Error(`API error ${r.status}`);
   return r.json();
 }
@@ -49,9 +51,10 @@ export interface DatasetStatus {
   n_tissues: number;
 }
 
-export async function fetchDatasetStatus(): Promise<DatasetStatus | null> {
+export async function fetchDatasetStatus(dataset?: string): Promise<DatasetStatus | null> {
   try {
-    const r = await fetch(`${BASE}/dataset_status`);
+    const q = dataset ? `?dataset=${dataset}` : "";
+    const r = await fetch(`${BASE}/dataset_status${q}`);
     if (!r.ok) return null;
     return r.json();
   } catch {
@@ -64,8 +67,10 @@ export interface PixelSpectrum {
   mz: number[]; intensity: number[];
 }
 
-export async function fetchPixelSpectrum(tissue: string, x: number, y: number): Promise<PixelSpectrum> {
-  const r = await fetch(`${BASE}/pixel_spectrum?tissue=${tissue}&x=${x}&y=${y}`);
+export async function fetchPixelSpectrum(tissue: string, x: number, y: number, dataset?: string): Promise<PixelSpectrum> {
+  const q = new URLSearchParams({ tissue, x: String(x), y: String(y) });
+  if (dataset) q.set("dataset", dataset);
+  const r = await fetch(`${BASE}/pixel_spectrum?${q}`);
   if (!r.ok) throw new Error(`API error ${r.status}`);
   return r.json();
 }
@@ -113,12 +118,12 @@ export interface PreprocessChainResult {
 
 export async function fetchPreprocessChain(
   tissue: string, x: number, y: number, source: "raw" | "binned",
-  steps: PreprocessChainStep[],
+  steps: PreprocessChainStep[], dataset?: string,
 ): Promise<PreprocessChainResult> {
   const r = await fetch(`${BASE}/preprocess_chain`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tissue, x, y, source, steps }),
+    body: JSON.stringify({ tissue, x, y, source, steps, dataset }),
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({ detail: `API error ${r.status}` }));
@@ -131,10 +136,11 @@ export interface TissuePixelMap {
   tissue: string; xs: number[]; ys: number[]; values: number[];
 }
 
-export async function fetchTissuePixelMap(tissue: string, mz?: number, tol?: number, globalVmax?: number): Promise<TissuePixelMap> {
+export async function fetchTissuePixelMap(tissue: string, mz?: number, tol?: number, globalVmax?: number, dataset?: string): Promise<TissuePixelMap> {
   const params = new URLSearchParams({ tissue });
   if (mz !== undefined) { params.set("mz", mz.toString()); params.set("tol", (tol ?? 0.3).toString()); }
   if (globalVmax !== undefined && globalVmax > 0) params.set("global_vmax", globalVmax.toString());
+  if (dataset) params.set("dataset", dataset);
   const r = await fetch(`${BASE}/tissue_pixel_map?${params}`);
   if (!r.ok) throw new Error(`API error ${r.status}`);
   return r.json();

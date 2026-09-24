@@ -7,6 +7,10 @@
     workspaces, activeWorkspaceId, createWorkspace, switchWorkspace,
     renameWorkspace, deleteWorkspace, exportWorkspace, importWorkspace,
   } from "$lib/workspace.svelte";
+  import {
+    datasets, activeDatasetId, loadDatasets, datasetsLoaded,
+    createDataset, renameDataset, deleteDataset, activateDataset,
+  } from "$lib/datasets.svelte";
 
   let creating   = $state(false);
   let newName    = $state("");
@@ -79,6 +83,61 @@
     catch (e) { errorMsg = (e as Error).message; busy = false; }
   }
 
+  // ── Zestawy danych ───────────────────────────────────────────────────────
+  let dsCreating      = $state(false);
+  let dsNewName        = $state("");
+  let dsBusy           = $state(false);
+  let dsError          = $state("");
+  let dsRenamingId     = $state<string | null>(null);
+  let dsRenameVal      = $state("");
+  let dsDeleteTarget   = $state<{ id: string; name: string } | null>(null);
+
+  onMount(async () => { if (!datasetsLoaded()) await loadDatasets(); });
+
+  async function dsDoCreate() {
+    if (!dsNewName.trim()) return;
+    dsBusy = true; dsError = "";
+    try { await createDataset(dsNewName.trim(), "empty"); dsNewName = ""; dsCreating = false; }
+    catch (e) { dsError = (e as Error).message; }
+    finally { dsBusy = false; }
+  }
+
+  async function dsDoActivate(id: string) {
+    if (id === activeDatasetId()) return;
+    dsBusy = true; dsError = "";
+    try { await activateDataset(id); }
+    catch (e) { dsError = (e as Error).message; }
+    finally { dsBusy = false; }
+  }
+
+  function dsStartRename(id: string, current: string) {
+    if (id === "original") return;
+    dsRenamingId = id; dsRenameVal = current;
+  }
+
+  async function dsCommitRename() {
+    if (!dsRenamingId || !dsRenameVal.trim()) { dsRenamingId = null; return; }
+    dsBusy = true; dsError = "";
+    try { await renameDataset(dsRenamingId, dsRenameVal.trim()); }
+    catch (e) { dsError = (e as Error).message; }
+    finally { dsRenamingId = null; dsBusy = false; }
+  }
+
+  function dsAskDelete(id: string, name: string) {
+    if (id === "original") return;
+    dsDeleteTarget = { id, name };
+  }
+
+  async function dsConfirmDelete() {
+    if (!dsDeleteTarget) return;
+    const { id } = dsDeleteTarget;
+    dsDeleteTarget = null;
+    dsBusy = true; dsError = "";
+    try { await deleteDataset(id); }
+    catch (e) { dsError = (e as Error).message; }
+    finally { dsBusy = false; }
+  }
+
   // Obsługa natywnego menu Plik → Workspace (Tauri, src-tauri/src/lib.rs)
   onMount(() => {
     const unlisten = listen<string>("workspace-menu", (e) => {
@@ -138,6 +197,56 @@
       {/each}
     </div>
   </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Zestawy danych</span>
+      <div class="header-actions">
+        <button class="btn-primary-sm" onclick={() => (dsCreating = !dsCreating)} disabled={dsBusy}>+ Nowy</button>
+      </div>
+    </div>
+
+    {#if dsCreating}
+      <div class="create-row">
+        <input class="field-input" type="text" placeholder="nazwa zestawu" bind:value={dsNewName}
+               onkeydown={(e) => e.key === "Enter" && dsDoCreate()} />
+        <button class="btn-primary-sm" onclick={dsDoCreate} disabled={dsBusy || !dsNewName.trim()}>Utwórz</button>
+        <button class="btn-secondary" onclick={() => { dsCreating = false; dsNewName = ""; }}>Anuluj</button>
+      </div>
+    {/if}
+
+    {#if dsError}<div class="error-msg">⚠ {dsError}</div>{/if}
+
+    <div class="ws-list">
+      {#each datasets() as d}
+        {@const isActive = d.id === activeDatasetId()}
+        {@const isLocked = d.id === "original"}
+        <div class="ws-row" class:active={isActive}>
+          <span class="ws-dot" class:on={isActive}></span>
+          {#if dsRenamingId === d.id}
+            <input class="field-input rename-input" type="text" bind:value={dsRenameVal}
+                   onkeydown={(e) => e.key === "Enter" && dsCommitRename()}
+                   onblur={dsCommitRename} />
+          {:else if isLocked}
+            <span class="ws-name ws-name-locked" title="Zestaw Oryginalny jest chroniony — nie można go edytować ani usunąć">
+              🔒 {d.name}{#if isActive}<span class="ws-active-badge">aktywny</span>{/if}
+            </span>
+          {:else}
+            <button class="ws-name" onclick={() => dsDoActivate(d.id)} disabled={dsBusy || isActive}>
+              {d.name}{#if isActive}<span class="ws-active-badge">aktywny</span>{/if}
+            </button>
+          {/if}
+          <span class="ws-meta">{d.kind} · zmieniony {fmtDate(d.updatedAt)}</span>
+          <div class="ws-actions">
+            {#if !isLocked}
+              <button class="icon-btn" title="Zmień nazwę" onclick={() => dsStartRename(d.id, d.name)}>✎</button>
+              <button class="icon-btn del" title="Usuń" onclick={() => dsAskDelete(d.id, d.name)}>×</button>
+            {/if}
+          </div>
+        </div>
+      {/each}
+    </div>
+  </div>
 </div>
 
 <ConfirmModal
@@ -150,11 +259,26 @@
   oncancel={() => (deleteTarget = null)}
 />
 
+<ConfirmModal
+  open={dsDeleteTarget !== null}
+  title="Usunąć zestaw danych?"
+  message={dsDeleteTarget ? `Zestaw "${dsDeleteTarget.name}" zostanie trwale usunięty razem z danymi. Tej operacji nie można cofnąć.` : ""}
+  confirmLabel="Usuń"
+  danger={true}
+  onconfirm={dsConfirmDelete}
+  oncancel={() => (dsDeleteTarget = null)}
+/>
+
 <style>
-  .settings-tab { flex: 1; min-height: 0; padding: 16px; overflow-y: auto; }
+  .settings-tab { flex: 1; min-height: 0; padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
   .card {
     background: #222; border: 1px solid rgba(255,255,255,0.07);
     border-radius: 12px; padding: 14px 16px; max-width: 640px;
+  }
+  .ws-name-locked {
+    background: none; border: none; color: rgba(255,255,255,0.5); font-size: 0.78rem;
+    font-weight: 600; font-family: inherit; text-align: left; padding: 0;
+    display: flex; align-items: center; gap: 6px;
   }
   .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
   .card-title {

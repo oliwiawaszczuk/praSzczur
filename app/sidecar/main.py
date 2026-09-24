@@ -49,6 +49,7 @@ def _get_imzml_parser(path: Path):
 _tissues_meta: list[dict] = [] # wykryte tkanki (x_min, x_max, label, is_ref)
 _imzml_path: str = ""          # ostatnio przetworzony plik imzML
 _active_workspace_id: str = "" # aktywny workspace
+_active_dataset_id: str = ""   # aktywny zestaw danych (w ramach workspace'u)
 
 
 # ── Workspace helpers ────────────────────────────────────────────────────────
@@ -78,7 +79,7 @@ def _workspace_dir(wid: str) -> Path:
 
 
 def DATA_DIR() -> Path:
-    return _workspace_dir(_active_workspace_id) / "processed"
+    return _dataset_dir(_active_dataset_id, _active_workspace_id)
 
 
 def _settings_file(wid: str) -> Path:
@@ -91,6 +92,87 @@ def _imzml_path_file(wid: str) -> Path:
 
 def _find_ws(reg: dict, wid: str) -> dict | None:
     return next((w for w in reg["workspaces"] if w["id"] == wid), None)
+
+
+# ── Zestawy danych (Datasets) ───────────────────────────────────────────────
+# Każdy workspace ma własny rejestr zestawów danych (np. "Oryginalny" = surowy
+# binning z Dane, oraz kolejne = wynik pipeline'u preprocessingu z preWidma).
+# Struktura: workspaces/<wid>/datasets/registry.json + datasets/<did>/*.npz
+
+
+def _datasets_root(wid: str) -> Path:
+    return _workspace_dir(wid) / "datasets"
+
+
+def _datasets_registry_file(wid: str) -> Path:
+    return _datasets_root(wid) / "registry.json"
+
+
+def _dataset_dir(did: str, wid: str) -> Path:
+    return _datasets_root(wid) / did
+
+
+def _find_dataset(reg: dict, did: str) -> dict | None:
+    return next((d for d in reg["datasets"] if d["id"] == did), None)
+
+
+def _load_datasets_registry_raw(wid: str) -> dict | None:
+    f = _datasets_registry_file(wid)
+    try:
+        if f.exists():
+            reg = json.loads(f.read_text())
+            if reg.get("datasets"):
+                return reg
+    except Exception:
+        pass
+    return None
+
+
+def _save_datasets_registry(reg: dict, wid: str) -> None:
+    _datasets_root(wid).mkdir(parents=True, exist_ok=True)
+    _datasets_registry_file(wid).write_text(json.dumps(reg, indent=2))
+
+
+def _ensure_datasets_registry(wid: str) -> dict:
+    """Wczytuje rejestr zestawów workspace'u; jeśli brak, migruje starą,
+    jednozestawową strukturę `processed/` do zestawu 'original'. Samo-naprawa:
+    zestaw 'original' jest chroniony (nie da się go usunąć/zmienić przez API),
+    ale gdyby z jakiegoś powodu zniknął z rejestru, odtwarzamy wpis (puste dane,
+    jeśli katalog też przepadł) — 'original' MUSI zawsze istnieć na liście."""
+    reg = _load_datasets_registry_raw(wid)
+    if reg is not None:
+        if not _find_dataset(reg, "original"):
+            now = _now_iso()
+            _datasets_root(wid).joinpath("original").mkdir(parents=True, exist_ok=True)
+            reg["datasets"].insert(0, {
+                "id": "original", "name": "Oryginalny", "kind": "binned",
+                "createdAt": now, "updatedAt": now,
+            })
+            _save_datasets_registry(reg, wid)
+        return reg
+
+    now = _now_iso()
+    root = _datasets_root(wid)
+    root.mkdir(parents=True, exist_ok=True)
+    orig_dir = root / "original"
+    orig_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy = _workspace_dir(wid) / "processed"
+    if legacy.exists():
+        for f in legacy.glob("*.npz"):
+            dest = orig_dir / f.name
+            if not dest.exists():
+                shutil.copy(f, dest)
+
+    reg = {
+        "active_id": "original",
+        "datasets": [{
+            "id": "original", "name": "Oryginalny", "kind": "binned",
+            "createdAt": now, "updatedAt": now,
+        }],
+    }
+    _save_datasets_registry(reg, wid)
+    return reg
 
 
 def _ensure_default_workspace() -> dict:
@@ -161,11 +243,25 @@ def _load_npz_files() -> list[str]:
     return found
 
 
-def _build_tissues_meta(tissue_ids: list[str]) -> list[dict]:
+def _get_dataset_cache(did: str) -> dict:
+    """Zwraca dane zestawu `did` w aktywnym workspace (bez trwałego cache'owania,
+    jeśli to nie jest aktualnie aktywny zestaw). Puste `did` = aktywny zestaw."""
+    if not did or did == _active_dataset_id:
+        return _cache
+    out: dict = {}
+    for path in sorted(_dataset_dir(did, _active_workspace_id).glob("*.npz")):
+        tid = path.stem
+        d = np.load(path)
+        out[tid] = {"spectra": d["spectra"], "coords": d["coords"], "mz_bins": d["mz_bins"]}
+    return out
+
+
+def _build_tissues_meta(tissue_ids: list[str], cache: dict | None = None) -> list[dict]:
     """Buduje metadane tkanek z załadowanych danych."""
+    cache = cache if cache is not None else _cache
     meta = []
     for i, tid in enumerate(tissue_ids):
-        coords = _cache[tid]["coords"]
+        coords = cache[tid]["coords"]
         xs = coords[:, 0].astype(int)
         ys = coords[:, 1].astype(int)
         meta.append({
@@ -245,9 +341,11 @@ def _detect_tissues_from_tic(col_tic: np.ndarray, x_offset: int,
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    global _tissues_meta, _active_workspace_id
+    global _tissues_meta, _active_workspace_id, _active_dataset_id
     reg = _ensure_default_workspace()
     _active_workspace_id = reg["active_id"]
+    dreg = _ensure_datasets_registry(_active_workspace_id)
+    _active_dataset_id = dreg["active_id"]
     ids = _load_npz_files()
     _tissues_meta = _build_tissues_meta(ids)
     yield
@@ -270,9 +368,11 @@ def health() -> dict:
 
 # ── Dataset status ─────────────────────────────────────────────────────────
 @app.get("/dataset_status")
-def dataset_status() -> dict:
+def dataset_status(dataset: str = "") -> dict:
+    data_dir = _dataset_dir(dataset, _active_workspace_id) if dataset else DATA_DIR()
+    cache = _get_dataset_cache(dataset)
     npz_files = []
-    for path in sorted(DATA_DIR().glob("*.npz")):
+    for path in sorted(data_dir.glob("*.npz")):
         stat = path.stat()
         npz_files.append({
             "id":       path.stem,
@@ -281,12 +381,12 @@ def dataset_status() -> dict:
             "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(stat.st_mtime)),
         })
 
-    mz_bins = _cache[list(_cache.keys())[0]]["mz_bins"] if _cache else np.array([])
+    mz_bins = cache[list(cache.keys())[0]]["mz_bins"] if cache else np.array([])
     return {
-        "data_dir":    str(DATA_DIR()),
+        "data_dir":    str(data_dir),
         "npz_files":   npz_files,
-        "tissues":     _tissues_meta,
-        "n_tissues":   len(_cache),
+        "tissues":     _tissues_meta if not dataset or dataset == _active_dataset_id else _build_tissues_meta(list(cache.keys()), cache),
+        "n_tissues":   len(cache),
         "mz_min":      float(mz_bins.min()) if len(mz_bins) else 0,
         "mz_max":      float(mz_bins.max()) if len(mz_bins) else 0,
         "n_bins":      int(len(mz_bins)),
@@ -593,12 +693,13 @@ def spectrum_window(path: str, mz_lo: float, mz_hi: float,
 
 # ── Ion image ──────────────────────────────────────────────────────────────
 @app.get("/ion_image")
-def ion_image(mz: float, tol: float = 0.3) -> dict:
-    if not _cache:
+def ion_image(mz: float, tol: float = 0.3, dataset: str = "") -> dict:
+    cache = _get_dataset_cache(dataset)
+    if not cache:
         raise HTTPException(503, "Dane nie załadowane")
 
     result = {}
-    for tid, d in _cache.items():
+    for tid, d in cache.items():
         mz_bins   = d["mz_bins"]
         spectra   = d["spectra"]
         coords    = d["coords"]
@@ -720,7 +821,10 @@ async def process(body: dict) -> StreamingResponse:
     """
     Uruchamia preprocessing z podanymi parametrami.
     Streamuje postęp jako Server-Sent Events.
-    body: { bin_size, mz_min, mz_max, tissues: [{id, x_min, x_max, label, is_ref}] }
+    body: { bin_size, mz_min, mz_max, tissues: [{id, x_min, x_max, label, is_ref}],
+            dataset_id?, dataset_name? }
+    dataset_id: docelowy zestaw danych (domyślnie aktywny zestaw workspace'u,
+    zwykle "original"); jeśli nie istnieje, zostanie utworzony.
     """
     from src.msi.constants import MZ_MIN, MZ_MAX, BIN_SIZE
 
@@ -729,6 +833,11 @@ async def process(body: dict) -> StreamingResponse:
     mz_min     = float(body.get("mz_min",   MZ_MIN))
     mz_max     = float(body.get("mz_max",   MZ_MAX))
     tissues    = body.get("tissues", _tissues_meta)
+    dataset_id   = body.get("dataset_id") or _active_dataset_id or "original"
+    dataset_name = body.get("dataset_name")
+    target_dir   = _dataset_dir(dataset_id, _active_workspace_id)
+    if dataset_id == "original" and any(target_dir.glob("*.npz")):
+        raise HTTPException(400, "Zestaw 'Oryginalny' jest chroniony — nie można go nadpisać. Utwórz nowy zestaw.")
     imzml_path = Path(body["imzml_path"]) if body.get("imzml_path") else \
                  ROOT / "source" / "FMP10_Rat_brain_breg_084.imzML"
     if not imzml_path.is_absolute():
@@ -815,8 +924,8 @@ async def process(body: dict) -> StreamingResponse:
 
             yield _sse("progress", {"step": "saving", "pct": 92,
                                      "message": "Zapis plików .npz…"})
-            DATA_DIR().mkdir(parents=True, exist_ok=True)
-            for old in DATA_DIR().glob("*.npz"):
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for old in target_dir.glob("*.npz"):
                 old.unlink()
             summary = []
             for t in tissues:
@@ -826,23 +935,41 @@ async def process(body: dict) -> StreamingResponse:
                     continue
                 spectra_arr = np.stack(buf["spectra"])
                 coords_out  = np.array(buf["coords"], dtype=np.int16)
-                out_path = DATA_DIR() / f"{tid}.npz"
+                out_path = target_dir / f"{tid}.npz"
                 np.savez_compressed(out_path, spectra=spectra_arr,
                                     coords=coords_out, mz_bins=bin_centers)
                 summary.append({"id": tid, "n_spectra": len(buf["spectra"])})
                 await asyncio.sleep(0)
 
-            # Przeładuj cache
-            global _imzml_path
+            # Zarejestruj/zaktualizuj zestaw danych i uczyń go aktywnym
+            global _imzml_path, _active_dataset_id
             _imzml_path = str(imzml_path)
             _save_imzml_path(_imzml_path)
+            dreg = _ensure_datasets_registry(_active_workspace_id)
+            ds = _find_dataset(dreg, dataset_id)
+            now = _now_iso()
+            if ds is None:
+                ds = {"id": dataset_id, "name": dataset_name or dataset_id,
+                      "kind": "binned", "createdAt": now}
+                dreg["datasets"].append(ds)
+            elif dataset_name:
+                ds["name"] = dataset_name
+            ds["kind"] = "binned"
+            ds["updatedAt"] = now
+            ds["params"] = {"bin_size": bin_size, "bin_agg": bin_agg,
+                             "mz_min": mz_min, "mz_max": mz_max}
+            dreg["active_id"] = dataset_id
+            _save_datasets_registry(dreg, _active_workspace_id)
+            _active_dataset_id = dataset_id
+
             _cache.clear()
             _tissues_meta.clear()
             ids = _load_npz_files()
             _tissues_meta.extend(_build_tissues_meta(ids))
             _touch_workspace(_active_workspace_id)
 
-            yield _sse("done", {"message": "Preprocessing zakończony", "summary": summary})
+            yield _sse("done", {"message": "Preprocessing zakończony", "summary": summary,
+                                 "dataset_id": dataset_id})
 
         except Exception as exc:
             import traceback
@@ -882,15 +1009,17 @@ def pixel_spectrum_raw(tissue: str, x: int, y: int) -> dict:
         raise HTTPException(500, str(e))
 
 
-def _target_tic(tissue: str) -> float:
+def _target_tic(tissue: str, cache: dict | None = None) -> float:
     """Mediana TIC (całkowitego prądu jonowego) tkanki — referencja dla normalize()."""
-    if tissue in _target_tic_cache:
-        return _target_tic_cache[tissue]
-    if tissue not in _cache:
+    cache = cache if cache is not None else _cache
+    cache_key = tissue if cache is _cache else f"{id(cache)}:{tissue}"
+    if cache_key in _target_tic_cache:
+        return _target_tic_cache[cache_key]
+    if tissue not in cache:
         raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
-    d = _cache[tissue]
+    d = cache[tissue]
     tic = float(np.median(d["spectra"].sum(axis=1)))
-    _target_tic_cache[tissue] = tic
+    _target_tic_cache[cache_key] = tic
     return tic
 
 
@@ -925,7 +1054,7 @@ def preprocess(tissue: str, x: int, y: int, method: str,
             after, baseline = baseline_correction_snip(ints, iterations=iterations)
             info["baseline_max"] = round(float(baseline.max()), 3)
         elif method == "normalize":
-            target = _target_tic(tissue)
+            target = _target_tic(tissue, _cache)
             after, factor = normalize_tic(ints, target_tic=target)
             info["factor"] = round(factor, 4)
         elif method == "peakpick":
@@ -957,6 +1086,7 @@ def preprocess_chain(body: dict) -> dict:
     x = body.get("x")
     y = body.get("y")
     source = body.get("source", "raw")
+    dataset = body.get("dataset", "")
     steps = body.get("steps") or []
     if tissue is None or x is None or y is None:
         raise HTTPException(400, "Brak tissue/x/y")
@@ -966,6 +1096,7 @@ def preprocess_chain(body: dict) -> dict:
     )
 
     try:
+        cache = _cache
         if source == "raw":
             if not _imzml_path:
                 raise HTTPException(503, "Brak ścieżki do pliku imzML — uruchom preprocessing")
@@ -980,9 +1111,10 @@ def preprocess_chain(body: dict) -> dict:
             mz_arr = np.asarray(mz_arr, dtype=float)
             ints = np.asarray(ints, dtype=float)
         elif source == "binned":
-            if tissue not in _cache:
+            cache = _get_dataset_cache(dataset)
+            if tissue not in cache:
                 raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
-            d = _cache[tissue]
+            d = cache[tissue]
             coords = d["coords"]
             mask = (coords[:, 0] == x) & (coords[:, 1] == y)
             idx = np.where(mask)[0]
@@ -1006,7 +1138,7 @@ def preprocess_chain(body: dict) -> dict:
                 cur, baseline = baseline_correction_snip(cur, iterations=int(params.get("iterations", 40)))
                 info["baseline_max"] = round(float(baseline.max()), 3)
             elif method == "normalize":
-                target = _target_tic(tissue)
+                target = _target_tic(tissue, cache)
                 cur, factor = normalize_tic(cur, target_tic=target)
                 info["factor"] = round(factor, 4)
             elif method == "peakpick":
@@ -1030,11 +1162,13 @@ def preprocess_chain(body: dict) -> dict:
 
 
 @app.get("/pixel_spectrum")
-def pixel_spectrum(tissue: str, x: int, y: int) -> dict:
-    """Zwraca pełne widmo binned dla piksela (x, y) w tkance."""
-    if tissue not in _cache:
+def pixel_spectrum(tissue: str, x: int, y: int, dataset: str = "") -> dict:
+    """Zwraca pełne widmo binned dla piksela (x, y) w tkance (opcjonalnie z
+    wybranego zestawu danych — domyślnie aktywny zestaw workspace'u)."""
+    cache = _get_dataset_cache(dataset)
+    if tissue not in cache:
         raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
-    d = _cache[tissue]
+    d = cache[tissue]
     coords = d["coords"]
     mask = (coords[:, 0] == x) & (coords[:, 1] == y)
     idx = np.where(mask)[0]
@@ -1048,13 +1182,14 @@ def pixel_spectrum(tissue: str, x: int, y: int) -> dict:
 # ── Tissue pixel map for Widma tab ────────────────────────────────────────
 @app.get("/tissue_pixel_map")
 def tissue_pixel_map(tissue: str, mz: float = -1.0, tol: float = 0.3,
-                     global_vmax: float = -1.0) -> dict:
+                     global_vmax: float = -1.0, dataset: str = "") -> dict:
     """Zwraca listę pikseli tkanki z opcjonalną intensywnością jonu (mz±tol).
     global_vmax: jeśli > 0, normalizuje przez tę wartość (jak ion_image) zamiast
     lokalnego max — zapewnia spójną skalę kolorów z zakładką m/z."""
-    if tissue not in _cache:
+    cache = _get_dataset_cache(dataset)
+    if tissue not in cache:
         raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
-    d = _cache[tissue]
+    d = cache[tissue]
     coords  = d["coords"]
     mz_bins = d["mz_bins"]
     xs = coords[:, 0].tolist()
@@ -1102,7 +1237,7 @@ def create_workspace(body: dict) -> dict:
     ws = {"id": wid, "name": name, "createdAt": now, "updatedAt": now}
     reg["workspaces"].append(ws)
     _save_registry(reg)
-    (_workspace_dir(wid) / "processed").mkdir(parents=True, exist_ok=True)
+    _ensure_datasets_registry(wid)
     _settings_file(wid).write_text("{}")
     return ws
 
@@ -1137,13 +1272,15 @@ def delete_workspace(wid: str) -> dict:
 
 @app.post("/workspaces/{wid}/activate")
 def activate_workspace(wid: str) -> dict:
-    global _active_workspace_id, _tissues_meta
+    global _active_workspace_id, _active_dataset_id, _tissues_meta
     reg = _load_registry()
     if not _find_ws(reg, wid):
         raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
     reg["active_id"] = wid
     _save_registry(reg)
     _active_workspace_id = wid
+    dreg = _ensure_datasets_registry(wid)
+    _active_dataset_id = dreg["active_id"]
     ids = _load_npz_files()
     _tissues_meta = _build_tissues_meta(ids)
     return {"ok": True, "active_id": wid}
@@ -1201,6 +1338,181 @@ def import_workspace(body: dict) -> dict:
     reg["workspaces"].append({"id": wid, "name": name, "createdAt": now, "updatedAt": now})
     _save_registry(reg)
     return {"id": wid, "name": name, "createdAt": now, "updatedAt": now}
+
+
+# ── Zestawy danych (Datasets) ───────────────────────────────────────────────
+@app.get("/workspaces/{wid}/datasets")
+def list_datasets(wid: str) -> dict:
+    reg = _load_registry()
+    if not _find_ws(reg, wid):
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    dreg = _ensure_datasets_registry(wid)
+    return {"datasets": dreg["datasets"], "active_id": dreg["active_id"]}
+
+
+@app.post("/workspaces/{wid}/datasets")
+def create_dataset(wid: str, body: dict) -> dict:
+    reg = _load_registry()
+    if not _find_ws(reg, wid):
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    dreg = _ensure_datasets_registry(wid)
+    name = (body.get("name") or "Nowy zestaw").strip() or "Nowy zestaw"
+    kind = body.get("kind", "empty")
+    did = uuid.uuid4().hex[:12]
+    now = _now_iso()
+    ds = {"id": did, "name": name, "kind": kind, "createdAt": now, "updatedAt": now}
+    dreg["datasets"].append(ds)
+    _save_datasets_registry(dreg, wid)
+    _dataset_dir(did, wid).mkdir(parents=True, exist_ok=True)
+    return ds
+
+
+@app.put("/workspaces/{wid}/datasets/{did}")
+def rename_dataset(wid: str, did: str, body: dict) -> dict:
+    if did == "original":
+        raise HTTPException(400, "Zestaw 'Oryginalny' jest chroniony — nie można go edytować")
+    dreg = _ensure_datasets_registry(wid)
+    ds = _find_dataset(dreg, did)
+    if not ds:
+        raise HTTPException(404, f"Zestaw '{did}' nie istnieje")
+    if "name" in body and body["name"].strip():
+        ds["name"] = body["name"].strip()
+    ds["updatedAt"] = _now_iso()
+    _save_datasets_registry(dreg, wid)
+    return ds
+
+
+@app.delete("/workspaces/{wid}/datasets/{did}")
+def delete_dataset(wid: str, did: str) -> dict:
+    global _active_dataset_id, _tissues_meta
+    if did == "original":
+        raise HTTPException(400, "Zestaw 'Oryginalny' jest chroniony — nie można go usunąć")
+    dreg = _ensure_datasets_registry(wid)
+    if not _find_dataset(dreg, did):
+        raise HTTPException(404, f"Zestaw '{did}' nie istnieje")
+    if len(dreg["datasets"]) <= 1:
+        raise HTTPException(400, "Nie można usunąć jedynego zestawu danych")
+    was_active = dreg["active_id"] == did
+    dreg["datasets"] = [d for d in dreg["datasets"] if d["id"] != did]
+    if was_active:
+        dreg["active_id"] = dreg["datasets"][0]["id"]
+    _save_datasets_registry(dreg, wid)
+    shutil.rmtree(_dataset_dir(did, wid), ignore_errors=True)
+    if wid == _active_workspace_id and was_active:
+        _active_dataset_id = dreg["active_id"]
+        ids = _load_npz_files()
+        _tissues_meta = _build_tissues_meta(ids)
+    return {"ok": True}
+
+
+@app.post("/workspaces/{wid}/datasets/{did}/activate")
+def activate_dataset(wid: str, did: str) -> dict:
+    global _active_dataset_id, _tissues_meta
+    dreg = _ensure_datasets_registry(wid)
+    if not _find_dataset(dreg, did):
+        raise HTTPException(404, f"Zestaw '{did}' nie istnieje")
+    dreg["active_id"] = did
+    _save_datasets_registry(dreg, wid)
+    if wid == _active_workspace_id:
+        _active_dataset_id = did
+        ids = _load_npz_files()
+        _tissues_meta = _build_tissues_meta(ids)
+    return {"ok": True, "active_id": did}
+
+
+@app.post("/workspaces/{wid}/datasets/{did}/build_pipeline")
+async def build_pipeline_dataset(wid: str, did: str, body: dict) -> StreamingResponse:
+    """Buduje zestaw danych `did`, stosując łańcuch kroków preprocessingu
+    (zbudowany z grafu node'ów w preWidma, node "Wynik") do KAŻDEGO piksela
+    zestawu źródłowego `source_dataset_id` (musi być zestawem zbinowanym —
+    'binned' lub wcześniejszym 'pipeline', nie surowym imzML).
+    Body: { source_dataset_id, steps: [{method, params}] }.
+    """
+    source_id = body.get("source_dataset_id")
+    steps = body.get("steps") or []
+    if not source_id:
+        raise HTTPException(400, "Brak source_dataset_id")
+    if did == "original" and any(_dataset_dir(did, wid).glob("*.npz")):
+        raise HTTPException(400, "Zestaw 'Oryginalny' jest chroniony — nie można go nadpisać. Utwórz nowy zestaw.")
+
+    dreg = _ensure_datasets_registry(wid)
+    if not _find_dataset(dreg, did):
+        raise HTTPException(404, f"Zestaw '{did}' nie istnieje")
+    src_dir = _dataset_dir(source_id, wid)
+    if not src_dir.exists():
+        raise HTTPException(404, f"Zestaw źródłowy '{source_id}' nie istnieje")
+
+    from src.msi.preprocessing import (
+        smooth_savgol, baseline_correction_snip, normalize_tic, peak_pick,
+    )
+
+    async def generate():
+        yield _sse("start", {"message": "Budowanie zestawu z pipeline'u…"})
+        try:
+            files = sorted(src_dir.glob("*.npz"))
+            if not files:
+                yield _sse("error", {"message": f"Zestaw źródłowy '{source_id}' jest pusty"})
+                return
+            out_dir = _dataset_dir(did, wid)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for old in out_dir.glob("*.npz"):
+                old.unlink()
+
+            summary = []
+            for fi, path in enumerate(files):
+                tid = path.stem
+                d = np.load(path)
+                spectra = d["spectra"].astype(np.float64)
+                mz_bins = d["mz_bins"]
+                coords  = d["coords"]
+                n = len(spectra)
+                target_tic = float(np.median(spectra.sum(axis=1))) if n else 0.0
+                out = np.zeros_like(spectra)
+                for i in range(n):
+                    cur = spectra[i]
+                    for step in steps:
+                        method = step.get("method")
+                        params = step.get("params") or {}
+                        if method == "smooth":
+                            cur = smooth_savgol(cur, window=int(params.get("window", 15)))
+                        elif method == "baseline":
+                            cur, _b = baseline_correction_snip(cur, iterations=int(params.get("iterations", 40)))
+                        elif method == "normalize":
+                            cur, _f = normalize_tic(cur, target_tic=target_tic)
+                        elif method == "peakpick":
+                            cur, _n = peak_pick(mz_bins, cur, prominence_frac=float(params.get("prominence_frac", 0.02)))
+                    out[i] = cur
+                    if i % 200 == 0:
+                        pct = int(100 * (fi + i / max(n, 1)) / len(files))
+                        yield _sse("progress", {"step": "processing", "pct": pct,
+                                                 "message": f"{tid}: {i}/{n}"})
+                        await asyncio.sleep(0)
+                np.savez_compressed(out_dir / f"{tid}.npz", spectra=out.astype(np.float32),
+                                    coords=coords, mz_bins=mz_bins)
+                summary.append({"id": tid, "n_spectra": n})
+
+            dreg2 = _ensure_datasets_registry(wid)
+            ds = _find_dataset(dreg2, did)
+            if ds is not None:
+                ds["updatedAt"] = _now_iso()
+                ds["kind"] = "pipeline"
+                ds["source_dataset_id"] = source_id
+                ds["steps"] = steps
+                _save_datasets_registry(dreg2, wid)
+
+            global _active_dataset_id, _tissues_meta
+            if wid == _active_workspace_id and did == _active_dataset_id:
+                ids = _load_npz_files()
+                _tissues_meta = _build_tissues_meta(ids)
+
+            yield _sse("done", {"message": "Zestaw zbudowany", "summary": summary})
+        except Exception as exc:
+            import traceback
+            yield _sse("error", {"message": str(exc), "trace": traceback.format_exc()})
+
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
 
 
 # ── Boards (Tablica) ──────────────────────────────────────────────────────

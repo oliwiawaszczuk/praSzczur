@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { wsGet, wsSet, activeWorkspace } from "$lib/workspace.svelte";
+  import { datasets, loadDatasets, activeDatasetId, createDataset } from "$lib/datasets.svelte";
 
   const BASE = "http://127.0.0.1:7432";
 
@@ -180,8 +181,31 @@
   // ── On mount ─────────────────────────────────────────────────────────────
   // mzMin/mzMax/binSize/imzmlPath są już zainicjalizowane z workspace w
   // deklaracjach $state powyżej — tu tylko ewentualne auto-przywrócenie pliku.
+  // ── Zestawy danych — cel przetwarzania (Krok 4) ─────────────────────────
+  let targetDatasetId  = $state(wsGet<string>("dane_targetDatasetId", ""));
+  let newDatasetName   = $state("");
+  let datasetsError    = $state("");
+  $effect(() => { wsSet("dane_targetDatasetId", targetDatasetId); });
+
+  async function refreshDatasets() {
+    await loadDatasets();
+    if (!targetDatasetId) targetDatasetId = activeDatasetId();
+  }
+
+  async function handleCreateDataset() {
+    const name = newDatasetName.trim();
+    if (!name) return;
+    datasetsError = "";
+    try {
+      const ds = await createDataset(name, "binned");
+      targetDatasetId = ds.id;
+      newDatasetName = "";
+    } catch (e) { datasetsError = (e as Error).message; }
+  }
+
   onMount(async () => {
     await refreshStatus();
+    await refreshDatasets();
     if (imzmlPath) {
       try { await loadFile(true); } catch {}
     }
@@ -355,7 +379,11 @@
       const resp = await fetch(`${BASE}/process`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bin_size: binSize, bin_agg: binAgg, mz_min: mzMin, mz_max: mzMax, tissues: tissues.filter(t => t.enabled !== false), imzml_path: imzmlPath }),
+        body: JSON.stringify({
+          bin_size: binSize, bin_agg: binAgg, mz_min: mzMin, mz_max: mzMax,
+          tissues: tissues.filter(t => t.enabled !== false), imzml_path: imzmlPath,
+          dataset_id: targetDatasetId || undefined,
+        }),
       });
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
@@ -381,6 +409,7 @@
             const summary: {id:string;n_spectra:number}[] = data.summary ?? [];
             processLog = [...processLog, `✓ ${data.message}`, ...summary.map(s => `  ${s.id}: ${s.n_spectra.toLocaleString()} spektrów`)];
             await refreshStatus();
+            await refreshDatasets();
             processedSnapshot = snapshotNow();
             onfileload?.();
           } else if (event === "error") {
@@ -877,6 +906,24 @@
             <span class="badge ok ml-auto">✓ gotowe</span>
           {/if}
         </div>
+
+        <!-- Zestaw danych — cel przetwarzania -->
+        <div class="dataset-target-row">
+          <span class="dataset-target-label">Zestaw docelowy:</span>
+          <select class="ds-select" bind:value={targetDatasetId}>
+            {#each datasets() as d}
+              <option value={d.id}>{d.name}{d.id === activeDatasetId() ? " (aktywny)" : ""}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="dataset-target-row">
+          <input class="dataset-name-input" type="text" placeholder="nazwa nowego zestawu…" bind:value={newDatasetName}
+                 onkeydown={(e) => { if (e.key === "Enter") handleCreateDataset(); }} />
+          <button class="btn-mini" onclick={handleCreateDataset} disabled={!newDatasetName.trim()}>+ Nowy zestaw</button>
+        </div>
+        {#if datasetsError}
+          <div class="error-msg">⚠ {datasetsError}</div>
+        {/if}
 
         <button class="btn-process" onclick={runProcess}
                 disabled={processing || tissues.length === 0}>
@@ -1412,6 +1459,46 @@
   .param-preview {
     font-size: 0.62rem; color: #ffc951; white-space: nowrap; padding-bottom: 5px;
   }
+
+  /* ── Zestawy danych (Krok 4) ─────────────────────────────────────────────── */
+  .dataset-target-row {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+  }
+  .dataset-target-label { font-size: 0.7rem; color: rgba(255,255,255,0.45); flex-shrink: 0; }
+  .dataset-target-row .ds-select { flex: 1; min-width: 0; }
+  .dataset-name-input {
+    flex: 1; min-width: 0; background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
+    color: #e0e0e0; font-size: 0.72rem; font-family: inherit; padding: 4px 7px;
+    box-sizing: border-box;
+  }
+  /* Jednolity styl dropdownów zestawów danych — jak .tissue-select w PixelMapPanel. */
+  .ds-select {
+    appearance: none; -webkit-appearance: none; -moz-appearance: none;
+    background: #1a1a1a
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23ffc951' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>")
+      no-repeat right 8px center;
+    background-size: 9px 6px;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 0.72rem;
+    padding: 4px 22px 4px 8px;
+    font-family: inherit;
+    cursor: pointer;
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .ds-select:hover  { border-color: rgba(255,201,81,0.3); color: #ffc951; }
+  .ds-select option { background: #1a1a1a; color: #e0e0e0; }
+  .btn-mini {
+    background: rgba(255,201,81,0.15); color: #ffc951; border: 1px solid rgba(255,201,81,0.3);
+    border-radius: 6px; font-size: 0.68rem; font-family: inherit; padding: 4px 9px;
+    cursor: pointer; flex-shrink: 0; white-space: nowrap;
+  }
+  .btn-mini:hover:not(:disabled) { background: rgba(255,201,81,0.25); }
+  .btn-mini:disabled { opacity: 0.35; cursor: not-allowed; }
 
   /* ── Process (krok 4) ───────────────────────────────────────────────────── */
   .btn-process {

@@ -1,17 +1,18 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from "svelte";
+  import { onMount, tick } from "svelte";
   import Plotly from "plotly.js-dist-min";
   import { fetchPixelSpectrum, fetchPixelSpectrumRaw } from "./api.js";
   import type { PixelSpectrum } from "./api.js";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
+  import { datasets, loadDatasets, datasetsLoaded, activeDatasetId, RAW_DATASET_ID } from "$lib/datasets.svelte";
   import PixelMapPanel from "$lib/PixelMapPanel.svelte";
 
   const LS_LAYERS    = "widma_layers";
   const LS_NORM      = "widma_norm";
   const LS_TISSUE    = "widma_tissue";
-  const LS_ORIGINAL  = "widma_original";
+  const LS_NEW_DS    = "widma_newLayerDataset";
 
-  interface SavedLayer { tissue: string; x: number; y: number; label: string; color: string; visible: boolean; locked: boolean; }
+  interface SavedLayer { tissue: string; x: number; y: number; label: string; color: string; visible: boolean; locked: boolean; datasetId: string; }
 
   interface Props {
     tissues?: string[];
@@ -23,9 +24,10 @@
     invertColors?: boolean;
     filekey?: number;  // inkrementowany przy każdym nowym pliku → czyści warstwy
     tissueVmax?: Record<string, number>;  // globalny vmax per tkanka z ion_image
+    mapDataset?: string;  // zestaw, z którego liczona jest mapa jonowa w zakładce m/z — mapa pikseli MUSI używać tego samego, inaczej pokazuje inne dane
   }
 
-  let { tissues = [], activeMz = null, activeTol = 0.3, tissueLabels = {}, dispMin = 0, dispMax = 1, invertColors = false, filekey = 0, tissueVmax = {} }: Props = $props();
+  let { tissues = [], activeMz = null, activeTol = 0.3, tissueLabels = {}, dispMin = 0, dispMax = 1, invertColors = false, filekey = 0, tissueVmax = {}, mapDataset = undefined }: Props = $props();
 
   function tLabel(id: string): string { return tissueLabels[id] || id; }
 
@@ -37,8 +39,9 @@
     visible: boolean;
     locked: boolean;
     spectrum: PixelSpectrum;
+    datasetId: string; // zestaw danych źródłowy tej warstwy (lub RAW_DATASET_ID)
     // Zbinowana intensywność tego piksela (ta sama siatka co binMz), niezależna
-    // od trybu wyświetlania (showOriginal) — używana do słupków binów.
+    // od wybranego zestawu — używana do słupków binów.
     binIntensity: number[];
   }
 
@@ -67,7 +70,9 @@
   });
   let layerLoading    = $state(false);
   let normMode        = $state<"none" | "max" | "tic">(wsGet(LS_NORM, "none"));
-  let showOriginal    = $state(wsGet(LS_ORIGINAL, false));
+  // Zestaw danych domyślnie proponowany dla NOWEJ warstwy (każda warstwa ma
+  // też własny dropdown, patrz `changeLayerDataset`).
+  let newLayerDataset = $state(wsGet<string>(LS_NEW_DS, ""));
   let originalError   = $state("");
   let binMz           = $state<number[]>([]);   // centra binów (z binnowanego widma)
   let binIntensity    = $state<number[]>([]);   // intensywności binów (z pierwszej warstwy binnowanej)
@@ -82,33 +87,35 @@
   // Persist (write-only effects — safe in browser)
   $effect(() => { wsSet(LS_TISSUE, selectedTissue); });
   $effect(() => { wsSet(LS_NORM, normMode); });
-  $effect(() => { wsSet(LS_ORIGINAL, showOriginal); });
+  $effect(() => { wsSet(LS_NEW_DS, newLayerDataset); });
   $effect(() => {
     if (layers.length === 0) return;
     const saved: SavedLayer[] = layers.map(l => ({
       tissue: l.spectrum.tissue, x: l.spectrum.x, y: l.spectrum.y,
       label: l.label, color: l.color, visible: l.visible, locked: l.locked,
+      datasetId: l.datasetId,
     }));
     wsSet(LS_LAYERS, saved);
   });
 
-  // Warstwy wymagają fetchu (async) — jedyne co zostaje do zrobienia w onMount.
-  // selectedTissue/normMode/showOriginal są już zainicjalizowane z workspace
-  // bezpośrednio w deklaracjach $state powyżej.
   onMount(async () => {
+    if (!datasetsLoaded()) await loadDatasets();
+    if (!newLayerDataset) newLayerDataset = activeDatasetId();
+
     const saved = wsGet<SavedLayer[]>(LS_LAYERS, []);
     if (saved.length === 0) return;
     layerLoading = true;
     try {
       const restored: Layer[] = [];
       for (const s of saved) {
+        const dsId = s.datasetId ?? activeDatasetId();
         try {
-          const spec = await fetchSpec(s.tissue, s.x, s.y);
-          // binIntensity to zawsze zbinowana intensywność tego piksela —
-          // niezależna od showOriginal, potrzebna do słupków binów.
-          const binnedSpec = showOriginal ? await fetchPixelSpectrum(s.tissue, s.x, s.y) : spec;
+          const spec = await fetchSpec(s.tissue, s.x, s.y, dsId);
+          // binIntensity to zawsze zbinowana intensywność (aktywny zestaw) —
+          // niezależna od zestawu warstwy, potrzebna do słupków binów.
+          const binnedSpec = dsId === RAW_DATASET_ID ? await fetchPixelSpectrum(s.tissue, s.x, s.y) : spec;
           if (binMz.length === 0) { binMz = binnedSpec.mz; binIntensity = binnedSpec.intensity; }
-          restored.push({ id: `${s.tissue}_${s.x}_${s.y}`, label: s.label, color: s.color, visible: s.visible, locked: s.locked, spectrum: spec, binIntensity: binnedSpec.intensity });
+          restored.push({ id: `${s.tissue}_${s.x}_${s.y}`, label: s.label, color: s.color, visible: s.visible, locked: s.locked, spectrum: spec, datasetId: dsId, binIntensity: binnedSpec.intensity });
         } catch {}
       }
       layers = restored;
@@ -120,10 +127,10 @@
   });
 
   // ── Warstwy ───────────────────────────────────────────────────────────────
-  async function fetchSpec(tissue: string, x: number, y: number) {
-    return showOriginal
+  async function fetchSpec(tissue: string, x: number, y: number, datasetId: string) {
+    return datasetId === RAW_DATASET_ID
       ? fetchPixelSpectrumRaw(tissue, x, y)
-      : fetchPixelSpectrum(tissue, x, y);
+      : fetchPixelSpectrum(tissue, x, y, datasetId);
   }
 
   async function addLayer(x: number, y: number) {
@@ -131,10 +138,11 @@
     if (layers.some(l => l.spectrum.x === x && l.spectrum.y === y && l.spectrum.tissue === selectedTissue)) return;
     layerLoading = true;
     try {
-      const spec = await fetchSpec(selectedTissue, x, y);
-      // binIntensity to zawsze zbinowana intensywność tego piksela — niezależna
-      // od trybu wyświetlania (showOriginal), potrzebna do słupków binów.
-      const binnedSpec = showOriginal ? await fetchPixelSpectrum(selectedTissue, x, y) : spec;
+      const dsId = newLayerDataset || activeDatasetId();
+      const spec = await fetchSpec(selectedTissue, x, y, dsId);
+      // binIntensity to zawsze zbinowana intensywność (aktywny zestaw) —
+      // niezależna od zestawu tej warstwy, potrzebna do słupków binów.
+      const binnedSpec = dsId === RAW_DATASET_ID ? await fetchPixelSpectrum(selectedTissue, x, y) : spec;
       if (binMz.length === 0) { binMz = binnedSpec.mz; binIntensity = binnedSpec.intensity; }
       const color = COLORS[layers.length % COLORS.length];
       layers = [...layers, {
@@ -143,6 +151,7 @@
         color,
         visible: true,
         locked:  false,
+        datasetId: dsId,
         binIntensity: binnedSpec.intensity,
         spectrum: spec,
       }];
@@ -150,37 +159,21 @@
     finally { layerLoading = false; }
   }
 
-  // Przeładuj widma gdy zmienia się tryb binned/original (nie na init)
-  $effect(() => {
-    const orig = showOriginal; // śledź tylko to
-    const current = untrack(() => layers);
+  // Zmiana zestawu danych dla JEDNEJ warstwy (dropdown przy warstwie).
+  async function changeLayerDataset(id: string, datasetId: string) {
+    const l = layers.find(l => l.id === id);
+    if (!l) return;
     originalError = "";
-    if (current.length === 0) return;
-    (async () => {
-      layerLoading = true;
-      try {
-        const updated = await Promise.all(current.map(async l => {
-          if (orig) {
-            const r = await fetch(`http://127.0.0.1:7432/pixel_spectrum_raw?tissue=${l.spectrum.tissue}&x=${l.spectrum.x}&y=${l.spectrum.y}`);
-            if (!r.ok) {
-              if (r.status === 503) {
-                originalError = "Brak ścieżki do pliku imzML. Uruchom preprocessing raz aby zapamiętać ścieżkę.";
-              } else {
-                originalError = `Błąd ${r.status} przy pobieraniu oryginalnego widma.`;
-              }
-              return l;
-            }
-            return { ...l, spectrum: await r.json() };
-          } else {
-            try {
-              return { ...l, spectrum: await fetchPixelSpectrum(l.spectrum.tissue, l.spectrum.x, l.spectrum.y) };
-            } catch { return l; }
-          }
-        }));
-        layers = updated;
-      } finally { layerLoading = false; }
-    })();
-  });
+    layerLoading = true;
+    try {
+      const spec = await fetchSpec(l.spectrum.tissue, l.spectrum.x, l.spectrum.y, datasetId);
+      layers = layers.map(x => x.id === id ? { ...x, datasetId, spectrum: spec } : x);
+    } catch (e) {
+      originalError = (e as Error).message.includes("503")
+        ? "Brak ścieżki do pliku imzML. Uruchom preprocessing raz aby zapamiętać ścieżkę."
+        : `Błąd przy pobieraniu widma zestawu: ${(e as Error).message}`;
+    } finally { layerLoading = false; }
+  }
 
   function removeLayer(id: string) {
     const l = layers.find(l => l.id === id);
@@ -246,10 +239,14 @@
     return intensity.map(v => v / ref);
   }
 
+  // Czy jakaś widoczna warstwa pokazuje surowe widmo (raw imzML) — wtedy jej
+  // oś m/z różni się od siatki binów, więc rysujemy referencyjne kreski binów.
+  const anyRaw = $derived(layers.some(l => l.datasetId === RAW_DATASET_ID));
+
   // ── Wykres Plotly ─────────────────────────────────────────────────────────
   $effect(() => {
     if (!plotDiv) return;
-    layers; normMode; activeMz; dispMin; dispMax; showOriginal; binMz; binIntensity; binLevel;
+    layers; normMode; activeMz; dispMin; dispMax; anyRaw; binMz; binIntensity; binLevel;
 
     // Zachowaj aktualny zakres osi (żeby zoom nie ginął po update)
     const existingLayout = (plotDiv as any).layout as Plotly.Layout | undefined;
@@ -261,7 +258,7 @@
     const userZoomedY = savedYRange && yAutoRange !== true;
 
     // Kreska binów — pionowe ticki + linia pozioma na poziomie binLevel gdy showOriginal
-    const binTrace: Plotly.Data[] = (showOriginal && binMz.length > 0) ? [{
+    const binTrace: Plotly.Data[] = (anyRaw && binMz.length > 0) ? [{
       x: binMz,
       y: Array(binMz.length).fill(binLevel),
       type:  "scatter" as const,
@@ -277,7 +274,7 @@
     // (zbinowane) widmo w tym binie — nie średnia surowych punktów w oknie.
     // Przy wielu widocznych warstwach: średnia znormalizowanej intensywności binu
     // po wszystkich widocznych warstwach (dla tego samego bina).
-    const binBarTrace: Plotly.Data[] = (showOriginal && binMz.length > 0) ? (() => {
+    const binBarTrace: Plotly.Data[] = (anyRaw && binMz.length > 0) ? (() => {
       const visLayers = layers.filter(l => l.visible && l.binIntensity?.length === binMz.length);
       if (visLayers.length === 0) return [];
 
@@ -329,7 +326,7 @@
         yref: "paper" as const,
         line: { color: "#ffc951", width: 1, dash: "dot" as const },
       }] : []),
-      ...(showOriginal && binMz.length > 0 ? [{
+      ...(anyRaw && binMz.length > 0 ? [{
         type:  "line" as const,
         x0: 0, x1: 1,
         xref: "paper" as const,
@@ -423,6 +420,7 @@
       {dispMax}
       {invertColors}
       {tissueVmax}
+      dataset={mapDataset}
       markers={mapMarkers}
       loading={layerLoading}
       onselecttissue={(t) => selectedTissue = t}
@@ -466,6 +464,17 @@
                 readonly={layer.locked}
                 onchange={(e) => setLabel(layer.id, (e.target as HTMLInputElement).value)}
               />
+              <select
+                class="ds-select"
+                value={layer.datasetId}
+                onchange={(e) => changeLayerDataset(layer.id, (e.target as HTMLSelectElement).value)}
+                title="Zestaw danych tej warstwy"
+              >
+                <option value={RAW_DATASET_ID}>Oryginalne (raw)</option>
+                {#each datasets() as d}
+                  <option value={d.id}>{d.name}</option>
+                {/each}
+              </select>
               {#if layer.locked}
                 <span class="lock-badge" title="Zablokowana">⊘</span>
               {/if}
@@ -505,16 +514,19 @@
         {/each}
       </div>
 
-      <label class="orig-row">
-        <span class="custom-check" class:checked={showOriginal}>
-          <input type="checkbox" bind:checked={showOriginal} />
-        </span>
-        <span class="orig-label">Oryginalne widmo</span>
-        {#if showOriginal && binMz.length > 1}
+      <div class="orig-row">
+        <span class="new-layer-label">Nowa warstwa z zestawu:</span>
+        <select class="ds-select" bind:value={newLayerDataset} title="Zestaw danych dla nowo dodawanych warstw">
+          <option value={RAW_DATASET_ID}>Oryginalne (raw)</option>
+          {#each datasets() as d}
+            <option value={d.id}>{d.name}</option>
+          {/each}
+        </select>
+        {#if anyRaw && binMz.length > 1}
           <span class="orig-label" style="opacity:.6">(bin size = {(binMz[1] - binMz[0]).toFixed(3)} Da)</span>
         {/if}
-      </label>
-      {#if showOriginal}
+      </div>
+      {#if anyRaw}
         <div class="bin-level-row">
           <span class="orig-label">Poziom kreski</span>
           <input
@@ -664,6 +676,34 @@
     font-family: inherit;
     outline: none;
     min-width: 0;
+  }
+
+  /* Jednolity styl dropdownów zestawów danych — jak .tissue-select w PixelMapPanel. */
+  .ds-select {
+    flex-shrink: 0;
+    max-width: 130px;
+    appearance: none; -webkit-appearance: none; -moz-appearance: none;
+    background: #1a1a1a
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23ffc951' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>")
+      no-repeat right 6px center;
+    background-size: 8px 5px;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 0.68rem;
+    padding: 3px 18px 3px 6px;
+    font-family: inherit;
+    cursor: pointer;
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .ds-select:hover  { border-color: rgba(255,201,81,0.3); color: #ffc951; }
+  .ds-select option { background: #1a1a1a; color: #e0e0e0; }
+
+  .new-layer-label {
+    font-size: 0.72rem;
+    color: rgba(255,255,255,0.4);
   }
 
   .layer-btn {

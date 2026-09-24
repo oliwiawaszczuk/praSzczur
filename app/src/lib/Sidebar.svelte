@@ -4,12 +4,13 @@
   import "@fontsource/jetbrains-mono/600.css";
   import DualRange from "./DualRange.svelte";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
+  import { datasets, loadDatasets, datasetsLoaded, activeDatasetId } from "$lib/datasets.svelte";
 
   const BASE = "http://127.0.0.1:7432";
 
   interface Props {
     loading?: boolean;
-    onquery?: (args: { mz: number; tol: number; raw: boolean }) => void;
+    onquery?: (args: { mz: number; tol: number; raw?: boolean; dataset?: string }) => void;
     dispMin?: number;
     dispMax?: number;
     ondisprange?: (min: number, max: number) => void;
@@ -58,10 +59,13 @@
   $effect(() => { wsSet("sidebar_invertColors", invertColors); });
   onMount(() => { oninvert?.(invertColors); });
 
-  // Oryginalne m/z: mapa jonowa liczona bezpośrednio z pliku imzML (mz ± tol)
-  // zamiast z binowanych danych .npz.
-  let rawMz = $state(wsGet("sidebar_rawMz", false));
-  $effect(() => { wsSet("sidebar_rawMz", rawMz); });
+  // Zestaw danych używany do mapy jonowej (m/z tab).
+  let queryDataset = $state(wsGet<string>("sidebar_queryDataset", ""));
+  $effect(() => { wsSet("sidebar_queryDataset", queryDataset); });
+  onMount(async () => {
+    if (!datasetsLoaded()) await loadDatasets();
+    if (!queryDataset) queryDataset = activeDatasetId();
+  });
 
   // Section collapse state
   let showRange  = $state(true);
@@ -130,7 +134,7 @@
     return mz;
   }
 
-  function submit(raw: boolean = false) {
+  function submit() {
     const mz = validateMz(mzInput);
     if (mz === null) {
       const lo = mzMin > 0 ? mzMin : 0;
@@ -139,14 +143,18 @@
       return;
     }
     mzError = "";
-    onquery?.({ mz, tol, raw });
+    onquery?.({ mz, tol, raw: false, dataset: queryDataset });
+  }
+
+  function onDatasetChange() {
+    if (validateMz(mzInput) !== null) submit();
   }
 
   function selectEntry(i: number) {
     selectedIdx = i;
     mzInput = mzList[i].mz.toString();
     mzError = "";
-    onquery?.({ mz: mzList[i].mz, tol, raw: false });
+    onquery?.({ mz: mzList[i].mz, tol, raw: false, dataset: queryDataset });
   }
 
   function removeEntry(i: number) {
@@ -176,9 +184,16 @@
     <span class="app-name">praSzczur</span>
   </div>
 
-  <!-- ── m/z input ─────────────────────────────────── -->
+  <!-- ── Zestaw danych + m/z input ───────────────────── -->
   <section class="section">
-    <label class="field-label" for="mz-input">m/z [Da]</label>
+    <label class="field-label" for="query-dataset-select">Zestaw danych</label>
+    <select id="query-dataset-select" class="ds-select" bind:value={queryDataset} onchange={onDatasetChange}>
+      {#each datasets() as d}
+        <option value={d.id}>{d.name}{d.id === activeDatasetId() ? " (aktywny)" : ""}</option>
+      {/each}
+    </select>
+
+    <label class="field-label" for="mz-input" style="margin-top:10px">m/z [Da]</label>
     <div class="mz-row">
       <input
         id="mz-input"
@@ -194,10 +209,19 @@
         oninput={onInputChange}
         disabled={loading}
       />
-      <button class="btn-primary btn-inline" onclick={() => submit(false)} disabled={loading || !mzInput}>
-        {#if loading}<span class="spinner"></span>{:else}Wczytaj{/if}
-      </button>
+      <input
+        id="tol-input"
+        class="field-input mz-input-shrink"
+        type="number"
+        min="0.05" max="2" step="0.05"
+        title="Tolerancja ± [Da]"
+        bind:value={tol}
+        disabled={loading}
+      />
     </div>
+    <button class="btn-primary" style="width:100%; margin-top:8px" onclick={() => submit()} disabled={loading || !mzInput}>
+      {#if loading}<span class="spinner"></span>{:else}Wczytaj{/if}
+    </button>
     {#if mzError}<span class="error-msg">{mzError}</span>{/if}
   </section>
 
@@ -286,29 +310,6 @@
         />
         <span class="cb-label">Odwróć kolory</span>
       </label>
-
-      <label class="checkbox-row">
-        <input type="checkbox" class="cb-input" bind:checked={rawMz} />
-        <span class="cb-label">Oryginalne m/z</span>
-      </label>
-      {#if rawMz}
-        <div class="section" style="margin-top:8px">
-          <label class="field-label" for="tol-input">Tolerancja ± [Da]</label>
-          <div class="mz-row">
-            <input
-              id="tol-input"
-              class="field-input mz-input-shrink"
-              type="number"
-              min="0.05" max="2" step="0.05"
-              bind:value={tol}
-              disabled={loading}
-            />
-            <button class="btn-primary btn-inline" onclick={() => submit(true)} disabled={loading || !mzInput}>
-              {#if loading}<span class="spinner"></span>{:else}Załaduj{/if}
-            </button>
-          </div>
-        </div>
-      {/if}
     </div>
   </div>
 
@@ -365,6 +366,28 @@
   }
   .field-input.error { border-color: #ff5555; }
   .error-msg { font-size: 0.68rem; color: #ff7070; }
+
+  /* Jednolity styl dropdownów zestawów danych — jak .tissue-select w PixelMapPanel. */
+  .ds-select {
+    width: 100%;
+    appearance: none; -webkit-appearance: none; -moz-appearance: none;
+    background: #1a1a1a
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23ffc951' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>")
+      no-repeat right 8px center;
+    background-size: 9px 6px;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 0.72rem;
+    padding: 4px 22px 4px 8px;
+    font-family: inherit;
+    cursor: pointer;
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .ds-select:hover  { border-color: rgba(255,201,81,0.3); color: #ffc951; }
+  .ds-select option { background: #1a1a1a; color: #e0e0e0; }
 
   .btn-primary {
     width: 100%; padding: 10px;
