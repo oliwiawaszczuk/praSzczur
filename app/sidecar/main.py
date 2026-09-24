@@ -946,6 +946,89 @@ def preprocess(tissue: str, x: int, y: int, method: str,
         raise HTTPException(500, str(e))
 
 
+@app.post("/preprocess_chain")
+def preprocess_chain(body: dict) -> dict:
+    """Stosuje uporządkowany łańcuch metod preprocessingu (zbudowany z grafu
+    node'ów w zakładce preWidma) do widma piksela i zwraca widmo przed/po.
+
+    Body: {tissue, x, y, source: "raw"|"binned", steps: [{method, params}]}.
+    """
+    tissue = body.get("tissue")
+    x = body.get("x")
+    y = body.get("y")
+    source = body.get("source", "raw")
+    steps = body.get("steps") or []
+    if tissue is None or x is None or y is None:
+        raise HTTPException(400, "Brak tissue/x/y")
+
+    from src.msi.preprocessing import (
+        smooth_savgol, baseline_correction_snip, normalize_tic, peak_pick,
+    )
+
+    try:
+        if source == "raw":
+            if not _imzml_path:
+                raise HTTPException(503, "Brak ścieżki do pliku imzML — uruchom preprocessing")
+            path = Path(_imzml_path)
+            if not path.exists():
+                raise HTTPException(404, f"Plik {path} nie istnieje")
+            p, coords_arr = _get_imzml_parser(path)
+            idx = np.where((coords_arr[:, 0] == x) & (coords_arr[:, 1] == y))[0]
+            if len(idx) == 0:
+                raise HTTPException(404, f"Brak piksela ({x},{y})")
+            mz_arr, ints = p.getspectrum(int(idx[0]))
+            mz_arr = np.asarray(mz_arr, dtype=float)
+            ints = np.asarray(ints, dtype=float)
+        elif source == "binned":
+            if tissue not in _cache:
+                raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
+            d = _cache[tissue]
+            coords = d["coords"]
+            mask = (coords[:, 0] == x) & (coords[:, 1] == y)
+            idx = np.where(mask)[0]
+            if len(idx) == 0:
+                raise HTTPException(404, f"Brak piksela ({x},{y}) w tkance '{tissue}'")
+            mz_arr = np.asarray(d["mz_bins"], dtype=float)
+            ints = np.asarray(d["spectra"][idx[0]], dtype=float)
+        else:
+            raise HTTPException(400, f"Nieznane źródło '{source}'")
+
+        intensity_before = ints.copy()
+        cur = ints.copy()
+        steps_applied = []
+        for step in steps:
+            method = step.get("method")
+            params = step.get("params") or {}
+            info: dict = {}
+            if method == "smooth":
+                cur = smooth_savgol(cur, window=int(params.get("window", 15)))
+            elif method == "baseline":
+                cur, baseline = baseline_correction_snip(cur, iterations=int(params.get("iterations", 40)))
+                info["baseline_max"] = round(float(baseline.max()), 3)
+            elif method == "normalize":
+                target = _target_tic(tissue)
+                cur, factor = normalize_tic(cur, target_tic=target)
+                info["factor"] = round(factor, 4)
+            elif method == "peakpick":
+                cur, n_peaks = peak_pick(mz_arr, cur, prominence_frac=float(params.get("prominence_frac", 0.02)))
+                info["n_peaks"] = n_peaks
+            else:
+                raise HTTPException(400, f"Nieznana metoda '{method}'")
+            steps_applied.append({"method": method, "info": info})
+
+        return {
+            "tissue": tissue, "x": x, "y": y,
+            "mz": [round(float(m), 6) for m in mz_arr],
+            "intensity_before": [float(v) for v in intensity_before],
+            "intensity_after": [float(v) for v in cur],
+            "steps_applied": steps_applied,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.get("/pixel_spectrum")
 def pixel_spectrum(tissue: str, x: int, y: int) -> dict:
     """Zwraca pełne widmo binned dla piksela (x, y) w tkance."""

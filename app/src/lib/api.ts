@@ -95,6 +95,38 @@ export async function fetchPreprocess(
   return r.json();
 }
 
+export interface PreprocessChainStep {
+  method: string;
+  params: Record<string, number>;
+}
+
+export interface PreprocessChainStepInfo {
+  method: string;
+  info: Record<string, number>;
+}
+
+export interface PreprocessChainResult {
+  tissue: string; x: number; y: number;
+  mz: number[]; intensity_before: number[]; intensity_after: number[];
+  steps_applied: PreprocessChainStepInfo[];
+}
+
+export async function fetchPreprocessChain(
+  tissue: string, x: number, y: number, source: "raw" | "binned",
+  steps: PreprocessChainStep[],
+): Promise<PreprocessChainResult> {
+  const r = await fetch(`${BASE}/preprocess_chain`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tissue, x, y, source, steps }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: `API error ${r.status}` }));
+    throw new Error(err.detail ?? `API error ${r.status}`);
+  }
+  return r.json();
+}
+
 export interface TissuePixelMap {
   tissue: string; xs: number[]; ys: number[]; values: number[];
 }

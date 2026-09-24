@@ -1,17 +1,16 @@
 <script lang="ts">
-  import { fetchPixelSpectrumRaw, fetchPreprocess } from "./api.js";
-  import type { PixelSpectrum, PreprocessMethod, PreprocessResult } from "./api.js";
+  import { fetchPixelSpectrumRaw } from "./api.js";
+  import type { PixelSpectrum, PreprocessChainResult } from "./api.js";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
   import PixelMapPanel from "$lib/PixelMapPanel.svelte";
   import SpectrumPlot from "$lib/SpectrumPlot.svelte";
+  import PreNodesEditor from "$lib/PreNodesEditor.svelte";
 
   const LS_TISSUE_L = "prewidma_tissueLeft";
   const LS_TISSUE_R = "prewidma_tissueRight";
   const LS_PIXEL_L  = "prewidma_pixelLeft";
   const LS_PIXEL_R  = "prewidma_pixelRight";
   const LS_SYNCVIEW = "prewidma_syncView";
-  const LS_METHOD   = "prewidma_method";
-  const LS_PARAM    = "prewidma_methodParam";
 
   interface Props {
     tissues?: string[];
@@ -63,86 +62,20 @@
 
   let xRange = $derived<[number, number] | null>(syncView ? sharedXRange : null);
 
-  // ── Preprocessing ──────────────────────────────────────────────
-  interface MethodDef {
-    label: string;
-    desc: string;
-    param: { key: string; label: string; min: number; max: number; step: number; default: number } | null;
-  }
-  const METHOD_DEFS: Record<PreprocessMethod, MethodDef> = {
-    smooth: {
-      label: "smooth() — wygładzanie (Savitzky-Golay)",
-      desc: "Redukuje szum przyrządu filtrem Savitzky-Golay, zachowując kształt i wysokość pików.",
-      param: { key: "window", label: "okno [pkt]", min: 5, max: 51, step: 2, default: 15 },
-    },
-    baseline: {
-      label: "baselineCorrection() — korekcja linii bazowej (SNIP)",
-      desc: "Usuwa powoli zmieniające się tło chemiczne spod pików algorytmem SNIP.",
-      param: { key: "iterations", label: "iteracje", min: 5, max: 100, step: 5, default: 40 },
-    },
-    normalize: {
-      label: "normalize() — normalizacja TIC",
-      desc: "Skaluje widmo do wspólnego poziomu całkowitego prądu jonowego (mediana TIC tkanki) — koryguje różnice czułości między pikselami.",
-      param: null,
-    },
-    peakpick: {
-      label: "peakPick() — redukcja do pików (centroidy)",
-      desc: "Zeruje wszystko poza wykrytymi pikami — czysty obraz sygnału bez szumu tła.",
-      param: { key: "prominence", label: "próg (ułamek max)", min: 0.005, max: 0.2, step: 0.005, default: 0.02 },
-    },
-  };
-  const METHODS = Object.keys(METHOD_DEFS) as PreprocessMethod[];
-
-  const DEFAULT_METHOD: PreprocessMethod = "smooth";
-  const storedMethod = wsGet<PreprocessMethod>(LS_METHOD, DEFAULT_METHOD);
-  let method = $state<PreprocessMethod>(
-    (storedMethod in METHOD_DEFS) ? storedMethod : DEFAULT_METHOD
-  );
-  let currentParam = $derived(METHOD_DEFS[method].param);
-  let paramValue = $state(wsGet<number>(LS_PARAM, METHOD_DEFS[method].param?.default ?? 0));
-  $effect(() => { wsSet(LS_METHOD, method); });
-  $effect(() => { wsSet(LS_PARAM, paramValue); });
-
-  let _prevMethod = method;
-  $effect(() => {
-    if (method !== _prevMethod) {
-      paramValue = METHOD_DEFS[method].param?.default ?? 0;
-      _prevMethod = method;
-      resultLeft = null;
-      resultRight = null;
-    }
-  });
-
-  let resultLeft   = $state<PreprocessResult | null>(null);
-  let resultRight  = $state<PreprocessResult | null>(null);
+  // ── Preprocessing (graf node'ów — PreNodesEditor.svelte) ────────
+  // Kliknięcie "Realizuj" na węźle Wynik w edytorze grafu woła onResult(),
+  // co nadpisuje resultLeft/resultRight — wynik pojawia się jako nakładka
+  // (linia ciągła) na wykresie widma poniżej.
+  let resultLeft   = $state<PreprocessChainResult | null>(null);
+  let resultRight  = $state<PreprocessChainResult | null>(null);
   let applying     = $state(false);
-  let applyError   = $state<string | null>(null);
 
-  async function applyPreprocess() {
-    if (!selectedPixelLeft && !selectedPixelRight) return;
-    applying = true;
-    applyError = null;
-    const def = METHOD_DEFS[method];
-    const params = def.param ? { [def.param.key]: paramValue } : {};
-    try {
-      const [rl, rr] = await Promise.all([
-        selectedPixelLeft
-          ? fetchPreprocess(method, selectedPixelLeft.tissue, selectedPixelLeft.x, selectedPixelLeft.y, params)
-          : Promise.resolve(null),
-        selectedPixelRight
-          ? fetchPreprocess(method, selectedPixelRight.tissue, selectedPixelRight.x, selectedPixelRight.y, params)
-          : Promise.resolve(null),
-      ]);
-      resultLeft = rl;
-      resultRight = rr;
-    } catch (e) {
-      applyError = e instanceof Error ? e.message : String(e);
-    } finally {
-      applying = false;
-    }
+  function handleNodesResult(side: "left" | "right", result: PreprocessChainResult | null) {
+    if (side === "left") resultLeft = result;
+    else resultRight = result;
   }
 
-  function toOverlay(r: PreprocessResult | null): PixelSpectrum | null {
+  function toOverlay(r: PreprocessChainResult | null): PixelSpectrum | null {
     return r ? { tissue: r.tissue, x: r.x, y: r.y, mz: r.mz, intensity: r.intensity_after } : null;
   }
   let overlayLeft  = $derived(toOverlay(resultLeft));
@@ -169,14 +102,6 @@
     );
     return m > 0 ? [0, m * 1.05] : null;
   });
-
-  function infoText(r: PreprocessResult | null): string {
-    if (!r) return "";
-    if (r.method === "normalize") return `czynnik skalowania: ${r.info.factor}`;
-    if (r.method === "peakpick") return `${r.info.n_peaks} wykrytych pików`;
-    if (r.method === "baseline") return `maks. linii bazowej: ${r.info.baseline_max}`;
-    return "";
-  }
 
   $effect(() => {
     if (tissues.length > 0 && !selectedTissueLeft)  selectedTissueLeft  = tissues[0];
@@ -269,41 +194,11 @@
       onselecttissue={(t) => selectedTissueRight = t}
       onpixelclick={onPixelClickRight}
     />
-    <div class="free-box card">
-      <span class="panel-title">Preprocessing</span>
-
-      <label class="field">
-        <span>Metoda</span>
-        <select bind:value={method}>
-          {#each METHODS as m}
-            <option value={m}>{METHOD_DEFS[m].label}</option>
-          {/each}
-        </select>
-      </label>
-
-      {#if currentParam}
-        <label class="field">
-          <span>{currentParam.label}: {paramValue}</span>
-          <input type="range" min={currentParam.min} max={currentParam.max} step={currentParam.step} bind:value={paramValue} />
-        </label>
-      {/if}
-
-      <button class="apply-btn" onclick={applyPreprocess} disabled={applying || (!selectedPixelLeft && !selectedPixelRight)}>
-        {applying ? "Przetwarzam…" : "Zastosuj"}
-      </button>
-
-      {#if applyError}
-        <span class="err-text">{applyError}</span>
-      {/if}
-
-      {#if resultLeft || resultRight}
-        <div class="align-stats">
-          {#if resultLeft}<span>lewa: {infoText(resultLeft)}</span>{/if}
-          {#if resultRight}<span>prawa: {infoText(resultRight)}</span>{/if}
-        </div>
-      {/if}
-
-      <p class="hint-text">{METHOD_DEFS[method].desc}</p>
+    <div class="free-box card nodes-box">
+      <span class="panel-title">Preprocessing — graf node'ów</span>
+      <div class="nodes-editor-wrap">
+        <PreNodesEditor pixelLeft={selectedPixelLeft} pixelRight={selectedPixelRight} onResult={handleNodesResult} />
+      </div>
     </div>
   </div>
 
@@ -387,55 +282,13 @@
     color: rgba(255,255,255,0.38);
   }
 
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    font-size: 0.72rem;
-    color: rgba(255,255,255,0.6);
+  .nodes-box {
+    overflow: hidden;
   }
 
-  .field select {
-    background: #1a1a1a;
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 6px;
-    color: #e0e0e0;
-    font-size: 0.75rem;
-    padding: 4px 6px;
-    font-family: inherit;
-  }
-
-  .apply-btn {
-    background: #ffc951;
-    color: #1a1a1a;
-    border: none;
-    border-radius: 6px;
-    font-weight: 700;
-    font-size: 0.72rem;
-    padding: 6px 10px;
-    cursor: pointer;
-    align-self: flex-start;
-  }
-  .apply-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-  .err-text {
-    color: #ff6b6b;
-    font-size: 0.68rem;
-  }
-
-  .align-stats {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    font-size: 0.68rem;
-    color: rgba(255,255,255,0.5);
-  }
-
-  .hint-text {
-    font-size: 0.65rem;
-    line-height: 1.4;
-    color: rgba(255,255,255,0.3);
-    margin: 0;
+  .nodes-editor-wrap {
+    flex: 1;
+    min-height: 0;
   }
 
   .ops-bar {
