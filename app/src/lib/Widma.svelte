@@ -470,7 +470,7 @@
                 onchange={(e) => changeLayerDataset(layer.id, (e.target as HTMLSelectElement).value)}
                 title="Zestaw danych tej warstwy"
               >
-                <option value={RAW_DATASET_ID}>Oryginalne (raw)</option>
+                <option value={RAW_DATASET_ID}>Dane oryginalne</option>
                 {#each datasets() as d}
                   <option value={d.id}>{d.name}</option>
                 {/each}
@@ -517,7 +517,7 @@
       <div class="orig-row">
         <span class="new-layer-label">Nowa warstwa z zestawu:</span>
         <select class="ds-select" bind:value={newLayerDataset} title="Zestaw danych dla nowo dodawanych warstw">
-          <option value={RAW_DATASET_ID}>Oryginalne (raw)</option>
+          <option value={RAW_DATASET_ID}>Dane oryginalne</option>
           {#each datasets() as d}
             <option value={d.id}>{d.name}</option>
           {/each}

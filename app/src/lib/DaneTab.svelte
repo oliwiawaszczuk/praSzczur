@@ -192,6 +192,32 @@
     if (!targetDatasetId) targetDatasetId = activeDatasetId();
   }
 
+  // Zakres m/z / bin size są teraz zapisywane PER ZESTAW (`ds.steps`, patrz
+  // sidecar), nie jako jedna globalna wartość workspace'u — inaczej zmiana
+  // zakresu dla jednego zestawu nadpisywałaby to, co widać dla innych (był to
+  // pierwotny bug). Przy zmianie "Zestaw docelowy" ładujemy WŁASNY zakres
+  // wybranego zestawu do suwaków, jeśli już jakiś ma zapisany.
+  function loadRangeFromDataset(id: string) {
+    const ds = datasets().find((d) => d.id === id);
+    const steps = ds?.steps;
+    if (!steps) return;
+    const rangeStep = steps.find((s) => s.method === "mz_range");
+    const binStep = steps.find((s) => s.method === "bin_size");
+    if (rangeStep) {
+      if (typeof rangeStep.params.mz_min === "number") mzMin = rangeStep.params.mz_min;
+      if (typeof rangeStep.params.mz_max === "number") mzMax = rangeStep.params.mz_max;
+    }
+    if (binStep) {
+      if (typeof binStep.params.bin_size === "number") binSize = binStep.params.bin_size;
+      if (typeof binStep.params.bin_agg === "string") binAgg = binStep.params.bin_agg as "sum" | "mean" | "peak_apex";
+    }
+  }
+
+  function onTargetDatasetChange(id: string) {
+    targetDatasetId = id;
+    loadRangeFromDataset(id);
+  }
+
   async function handleCreateDataset() {
     const name = newDatasetName.trim();
     if (!name) return;
@@ -206,6 +232,7 @@
   onMount(async () => {
     await refreshStatus();
     await refreshDatasets();
+    if (targetDatasetId) loadRangeFromDataset(targetDatasetId);
     if (imzmlPath) {
       try { await loadFile(true); } catch {}
     }
@@ -910,7 +937,8 @@
         <!-- Zestaw danych — cel przetwarzania -->
         <div class="dataset-target-row">
           <span class="dataset-target-label">Zestaw docelowy:</span>
-          <select class="ds-select" bind:value={targetDatasetId}>
+          <select class="ds-select" value={targetDatasetId}
+                  onchange={(e) => onTargetDatasetChange((e.target as HTMLSelectElement).value)}>
             {#each datasets() as d}
               <option value={d.id}>{d.name}{d.id === activeDatasetId() ? " (aktywny)" : ""}</option>
             {/each}

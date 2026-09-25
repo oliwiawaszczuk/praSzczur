@@ -23,9 +23,10 @@
     filekey?: number;
     tissueVmax?: Record<string, number>;
     mapDataset?: string;  // zestaw, z którego liczona jest mapa jonowa w zakładce m/z — mapa pikseli MUSI używać tego samego, inaczej pokazuje inne dane
+    visible?: boolean;
   }
 
-  let { tissues = [], activeMz = null, activeTol = 0.3, tissueLabels = {}, dispMin = 0, dispMax = 1, invertColors = false, filekey = 0, tissueVmax = {}, mapDataset = undefined }: Props = $props();
+  let { tissues = [], activeMz = null, activeTol = 0.3, tissueLabels = {}, dispMin = 0, dispMax = 1, invertColors = false, filekey = 0, tissueVmax = {}, mapDataset = undefined, visible = true }: Props = $props();
 
   interface Pixel { tissue: string; x: number; y: number; }
 
@@ -200,7 +201,7 @@
     <div class="free-box card nodes-box">
       <span class="panel-title">Preprocessing — graf node'ów</span>
       <div class="nodes-editor-wrap">
-        <PreNodesEditor pixelLeft={selectedPixelLeft} pixelRight={selectedPixelRight} onResult={handleNodesResult} />
+        <PreNodesEditor pixelLeft={selectedPixelLeft} pixelRight={selectedPixelRight} onResult={handleNodesResult} {visible} />
       </div>
     </div>
   </div>

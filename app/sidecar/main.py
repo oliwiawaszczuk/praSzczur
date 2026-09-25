@@ -51,6 +51,8 @@ _imzml_path: str = ""          # ostatnio przetworzony plik imzML
 _active_workspace_id: str = "" # aktywny workspace
 _active_dataset_id: str = ""   # aktywny zestaw danych (w ramach workspace'u)
 
+RAW_DATASET_ID = "__raw__"     # pseudo-zestaw: surowy plik imzML jako źródło łańcucha
+
 
 # ── Workspace helpers ────────────────────────────────────────────────────────
 _REGISTRY_FILE = WORKSPACES_DIR / "registry.json"
@@ -141,6 +143,7 @@ def _ensure_datasets_registry(wid: str) -> dict:
     jeśli katalog też przepadł) — 'original' MUSI zawsze istnieć na liście."""
     reg = _load_datasets_registry_raw(wid)
     if reg is not None:
+        changed = False
         if not _find_dataset(reg, "original"):
             now = _now_iso()
             _datasets_root(wid).joinpath("original").mkdir(parents=True, exist_ok=True)
@@ -148,6 +151,21 @@ def _ensure_datasets_registry(wid: str) -> dict:
                 "id": "original", "name": "Oryginalny", "kind": "binned",
                 "createdAt": now, "updatedAt": now,
             })
+            changed = True
+        # Migracja: stare wpisy 'binned' z płaskim `params` -> ujednolicone `steps`
+        # zaczynające się od mz_range/bin_size z surowego imzML.
+        for ds in reg["datasets"]:
+            if ds.get("kind") == "binned" and "params" in ds and "steps" not in ds:
+                p = ds.pop("params") or {}
+                ds["source_dataset_id"] = RAW_DATASET_ID
+                ds["steps"] = [
+                    {"method": "mz_range", "params": {
+                        "mz_min": p.get("mz_min"), "mz_max": p.get("mz_max")}},
+                    {"method": "bin_size", "params": {
+                        "bin_size": p.get("bin_size"), "bin_agg": p.get("bin_agg", "sum")}},
+                ]
+                changed = True
+        if changed:
             _save_datasets_registry(reg, wid)
         return reg
 
@@ -556,6 +574,26 @@ def detect_from_imzml(path: str, threshold_pct: float = 5.0) -> dict:
     }
 
 
+@app.get("/imzml_native_range")
+def imzml_native_range(path: str = "") -> dict:
+    """Zwraca natywny zakres m/z (min/max) pliku imzML. Dataset jest w trybie
+    "continuous" (wspólna oś m/z dla wszystkich pikseli — patrz docs/dataset.md),
+    więc wystarczy odczytać pierwsze widmo, żeby poznać cały natywny zakres.
+    Używane do ograniczenia suwaków node'a "Zakres m/z" do realnych granic pliku,
+    zamiast dowolnych, twardo zakodowanych wartości."""
+    imzml_path = Path(path) if path else Path(_imzml_path)
+    if not imzml_path.is_absolute():
+        imzml_path = ROOT / imzml_path
+    if not str(imzml_path) or not imzml_path.exists():
+        raise HTTPException(404, f"Brak pliku: {imzml_path}")
+    p, _coords = _get_imzml_parser(imzml_path)
+    mz_arr, _ints = p.getspectrum(0)
+    mz_arr = np.asarray(mz_arr, dtype=np.float64)
+    if len(mz_arr) == 0:
+        raise HTTPException(422, "Puste widmo — brak natywnej osi m/z")
+    return {"mz_min": float(mz_arr.min()), "mz_max": float(mz_arr.max()), "n_points": int(len(mz_arr))}
+
+
 # ── Sample spectrum (szybki podgląd widma z imzML) ─────────────────────────
 @app.get("/sample_spectrum")
 def sample_spectrum(path: str, n_samples: int = 300, x_min: int = -1, x_max: int = -1) -> dict:
@@ -815,16 +853,216 @@ def mz_profile(mz: float, tol: float = 0.3, n: int = 7) -> dict:
     return {"points": points, "bin_size": round(bin_size, 4)}
 
 
+# ── Binning ze źródła surowego (współdzielone przez /process i build_pipeline) ─
+async def _bin_from_imzml(imzml_path: Path, tissues: list[dict], mz_min: float,
+                           mz_max: float, bin_size: float, bin_agg: str,
+                           target_dir: Path, result: dict):
+    """Parsuje surowy plik imzML i binuje widma każdego piksela do zadanego
+    zakresu/bin_size, zapisując jeden .npz per tkanka do `target_dir`.
+    Generator SSE-progress; wynik (`summary` albo `error`) zwracany przez
+    mutację słownika `result`, bo async-generator nie może mieć `return value`."""
+    from pyimzml.ImzMLParser import ImzMLParser
+
+    if not imzml_path.exists():
+        result["error"] = f"Brak pliku: {imzml_path.name}"
+        yield _sse("error", {"message": result["error"]})
+        return
+
+    ibd_candidates = [f for f in imzml_path.parent.glob("*")
+                      if f.suffix.lower() == ".ibd"]
+    matching_ibd = [f for f in ibd_candidates if f.stem.lower() == imzml_path.stem.lower()]
+    if not matching_ibd:
+        names = ", ".join(f.name for f in ibd_candidates) or "brak"
+        result["error"] = (
+            f"Brak pasującego pliku .ibd dla '{imzml_path.name}'. "
+            f"Znalezione pliki .ibd: {names}. "
+            f"Plik .ibd musi mieć tę samą nazwę co .imzML.")
+        yield _sse("error", {"message": result["error"]})
+        return
+
+    yield _sse("progress", {"step": "loading", "pct": 5,
+                             "message": "Wczytywanie imzML…"})
+    p = ImzMLParser(str(imzml_path))
+    coords_arr = np.array(p.coordinates)
+
+    bin_centers = np.arange(mz_min + bin_size/2, mz_max, bin_size)
+    n_bins = len(bin_centers)
+    yield _sse("progress", {"step": "binning", "pct": 10,
+                             "message": f"Binning: {n_bins} binów po {bin_size} Da"})
+
+    buffers = {t["id"]: {"spectra": [], "coords": []} for t in tissues}
+    n_total = len(p.coordinates)
+
+    # Buduj listę tkanek z zakresami (x,y) — obsługuje siatki 2D
+    def find_tissue(x: int, y: int) -> dict | None:
+        for t in tissues:
+            if (t["x_min"] <= x <= t["x_max"] and
+                    t.get("y_min", -10**9) <= y <= t.get("y_max", 10**9)):
+                return t
+        return None
+
+    half = bin_size / 2.0
+    for i in range(n_total):
+        x, y = int(coords_arr[i, 0]), int(coords_arr[i, 1])
+        t = find_tissue(x, y)
+        if t is None:
+            continue
+        try:
+            mz_arr, ints = p.getspectrum(i)
+            mz_arr = np.asarray(mz_arr, dtype=np.float64)
+            ints   = np.asarray(ints,   dtype=np.float32)
+        except Exception:
+            continue
+        binned = np.zeros(n_bins, dtype=np.float32)
+        idx = np.searchsorted(bin_centers, mz_arr - half, side="right")
+        in_range = (idx < n_bins) & (
+            np.abs(mz_arr - bin_centers[np.clip(idx, 0, n_bins-1)]) <= half
+        )
+        if bin_agg == "mean":
+            counts = np.zeros(n_bins, dtype=np.int32)
+            np.add.at(binned, idx[in_range], ints[in_range])
+            np.add.at(counts, idx[in_range], 1)
+            np.divide(binned, counts, out=binned, where=counts > 0)
+        elif bin_agg == "peak_apex":
+            # bierze maksimum surowych punktów w oknie bina (bez sumowania/uśredniania)
+            np.maximum.at(binned, idx[in_range], ints[in_range])
+        else:
+            np.add.at(binned, idx[in_range], ints[in_range])
+        buffers[t["id"]]["spectra"].append(binned)
+        buffers[t["id"]]["coords"].append([x, y])
+
+        if i % 500 == 0:
+            pct = 10 + int(80 * i / n_total)
+            yield _sse("progress", {"step": "processing", "pct": pct,
+                                     "message": f"Spektrum {i}/{n_total}"})
+            await asyncio.sleep(0)  # yield kontroli
+
+    yield _sse("progress", {"step": "saving", "pct": 92,
+                             "message": "Zapis plików .npz…"})
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for old in target_dir.glob("*.npz"):
+        old.unlink()
+    summary = []
+    for t in tissues:
+        tid  = t["id"]
+        buf  = buffers[tid]
+        if not buf["spectra"]:
+            continue
+        spectra_arr = np.stack(buf["spectra"])
+        coords_out  = np.array(buf["coords"], dtype=np.int16)
+        out_path = target_dir / f"{tid}.npz"
+        np.savez_compressed(out_path, spectra=spectra_arr,
+                            coords=coords_out, mz_bins=bin_centers)
+        summary.append({"id": tid, "n_spectra": len(buf["spectra"])})
+        await asyncio.sleep(0)
+
+    result["summary"] = summary
+
+
+async def _materialize_raw_native(imzml_path: Path, tissues: list[dict], target_dir: Path, result: dict):
+    """Jak `_bin_from_imzml`, ale bez binningu — zapisuje widma piksela z ich
+    natywną, wspólną osią m/z (tryb continuous, patrz docs/dataset.md), bez
+    żadnej zmiany zakresu/rozdzielczości. Materializuje "Dane oryginalne"
+    (surowy plik imzML) 1:1 jako zestaw danych — bo w trybie continuous surowe
+    dane to już poprawna, jednolita tablica per piksel i binning nie jest do
+    tego strukturalnie potrzebny (mz_range/bin_size to opcjonalne kroki, które
+    użytkownik może, ale nie musi, dodać do łańcucha)."""
+    from pyimzml.ImzMLParser import ImzMLParser
+
+    if not imzml_path.exists():
+        result["error"] = f"Brak pliku: {imzml_path.name}"
+        yield _sse("error", {"message": result["error"]})
+        return
+
+    ibd_candidates = [f for f in imzml_path.parent.glob("*")
+                      if f.suffix.lower() == ".ibd"]
+    matching_ibd = [f for f in ibd_candidates if f.stem.lower() == imzml_path.stem.lower()]
+    if not matching_ibd:
+        names = ", ".join(f.name for f in ibd_candidates) or "brak"
+        result["error"] = (
+            f"Brak pasującego pliku .ibd dla '{imzml_path.name}'. "
+            f"Znalezione pliki .ibd: {names}. "
+            f"Plik .ibd musi mieć tę samą nazwę co .imzML.")
+        yield _sse("error", {"message": result["error"]})
+        return
+
+    yield _sse("progress", {"step": "loading", "pct": 5,
+                             "message": "Wczytywanie imzML…"})
+    p = ImzMLParser(str(imzml_path))
+    coords_arr = np.array(p.coordinates)
+    n_total = len(p.coordinates)
+
+    def find_tissue(x: int, y: int) -> dict | None:
+        for t in tissues:
+            if (t["x_min"] <= x <= t["x_max"] and
+                    t.get("y_min", -10**9) <= y <= t.get("y_max", 10**9)):
+                return t
+        return None
+
+    native_mz: np.ndarray | None = None
+    buffers = {t["id"]: {"spectra": [], "coords": []} for t in tissues}
+
+    for i in range(n_total):
+        x, y = int(coords_arr[i, 0]), int(coords_arr[i, 1])
+        t = find_tissue(x, y)
+        if t is None:
+            continue
+        try:
+            mz_arr, ints = p.getspectrum(i)
+            ints = np.asarray(ints, dtype=np.float32)
+        except Exception:
+            continue
+        if native_mz is None:
+            native_mz = np.asarray(mz_arr, dtype=np.float64)
+        buffers[t["id"]]["spectra"].append(ints)
+        buffers[t["id"]]["coords"].append([x, y])
+
+        if i % 500 == 0:
+            pct = 5 + int(85 * i / n_total)
+            yield _sse("progress", {"step": "processing", "pct": pct,
+                                     "message": f"Spektrum {i}/{n_total}"})
+            await asyncio.sleep(0)
+
+    if native_mz is None:
+        result["error"] = "Brak spektrów w wybranych tkankach"
+        yield _sse("error", {"message": result["error"]})
+        return
+
+    yield _sse("progress", {"step": "saving", "pct": 92,
+                             "message": "Zapis plików .npz…"})
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for old in target_dir.glob("*.npz"):
+        old.unlink()
+    summary = []
+    for t in tissues:
+        tid = t["id"]
+        buf = buffers[tid]
+        if not buf["spectra"]:
+            continue
+        spectra_arr = np.stack(buf["spectra"])
+        coords_out = np.array(buf["coords"], dtype=np.int16)
+        np.savez_compressed(target_dir / f"{tid}.npz", spectra=spectra_arr,
+                            coords=coords_out, mz_bins=native_mz)
+        summary.append({"id": tid, "n_spectra": len(buf["spectra"])})
+        await asyncio.sleep(0)
+
+    result["summary"] = summary
+
+
 # ── Preprocess (SSE stream) ────────────────────────────────────────────────
 @app.post("/process")
 async def process(body: dict) -> StreamingResponse:
     """
-    Uruchamia preprocessing z podanymi parametrami.
-    Streamuje postęp jako Server-Sent Events.
-    body: { bin_size, mz_min, mz_max, tissues: [{id, x_min, x_max, label, is_ref}],
+    Uruchamia binning z podanymi parametrami (zakres m/z + bin size/agregacja)
+    wprost z surowego imzML. Streamuje postęp jako Server-Sent Events.
+    body: { bin_size, bin_agg, mz_min, mz_max, tissues: [{id, x_min, x_max, label, is_ref}],
             dataset_id?, dataset_name? }
     dataset_id: docelowy zestaw danych (domyślnie aktywny zestaw workspace'u,
     zwykle "original"); jeśli nie istnieje, zostanie utworzony.
+
+    Utrzymywane dla wstecznej kompatybilności — docelowa ścieżka to
+    `/workspaces/{wid}/datasets/{did}/build_pipeline` z `source_dataset_id="__raw__"`
+    i krokami `mz_range`/`bin_size` (zob. zakładka "Zestaw danych").
     """
     from src.msi.constants import MZ_MIN, MZ_MAX, BIN_SIZE
 
@@ -845,103 +1083,17 @@ async def process(body: dict) -> StreamingResponse:
 
     async def generate():
         yield _sse("start", {"message": "Uruchamianie preprocessingu…"})
-
         try:
-            from pyimzml.ImzMLParser import ImzMLParser
-
-            if not imzml_path.exists():
-                yield _sse("error", {"message": f"Brak pliku: {imzml_path.name}"})
+            result: dict = {}
+            async for ev in _bin_from_imzml(imzml_path, tissues, mz_min, mz_max,
+                                             bin_size, bin_agg, target_dir, result):
+                yield ev
+            if result.get("error"):
                 return
+            summary = result["summary"]
 
-            # Szukaj .ibd/.IBD z tą samą nazwą (case-insensitive)
-            ibd_candidates = [f for f in imzml_path.parent.glob("*")
-                              if f.suffix.lower() == ".ibd"]
-            matching_ibd = [f for f in ibd_candidates if f.stem.lower() == imzml_path.stem.lower()]
-            if not matching_ibd:
-                names = ", ".join(f.name for f in ibd_candidates) or "brak"
-                yield _sse("error", {"message":
-                    f"Brak pasującego pliku .ibd dla '{imzml_path.name}'. "
-                    f"Znalezione pliki .ibd: {names}. "
-                    f"Plik .ibd musi mieć tę samą nazwę co .imzML."})
-                return
-
-            yield _sse("progress", {"step": "loading", "pct": 5,
-                                     "message": "Wczytywanie imzML…"})
-            p = ImzMLParser(str(imzml_path))
-            coords_arr = np.array(p.coordinates)
-
-            bin_centers = np.arange(mz_min + bin_size/2, mz_max, bin_size)
-            n_bins = len(bin_centers)
-            yield _sse("progress", {"step": "binning", "pct": 10,
-                                     "message": f"Binning: {n_bins} binów po {bin_size} Da"})
-
-            buffers = {t["id"]: {"spectra": [], "coords": []} for t in tissues}
-            n_total = len(p.coordinates)
-
-            # Buduj listę tkanek z zakresami (x,y) — obsługuje siatki 2D
-            def find_tissue(x: int, y: int) -> dict | None:
-                for t in tissues:
-                    if (t["x_min"] <= x <= t["x_max"] and
-                            t.get("y_min", -10**9) <= y <= t.get("y_max", 10**9)):
-                        return t
-                return None
-
-            half = bin_size / 2.0
-            for i in range(n_total):
-                x, y = int(coords_arr[i, 0]), int(coords_arr[i, 1])
-                t = find_tissue(x, y)
-                if t is None:
-                    continue
-                try:
-                    mz_arr, ints = p.getspectrum(i)
-                    mz_arr = np.asarray(mz_arr, dtype=np.float64)
-                    ints   = np.asarray(ints,   dtype=np.float32)
-                except Exception:
-                    continue
-                binned = np.zeros(n_bins, dtype=np.float32)
-                idx = np.searchsorted(bin_centers, mz_arr - half, side="right")
-                in_range = (idx < n_bins) & (
-                    np.abs(mz_arr - bin_centers[np.clip(idx, 0, n_bins-1)]) <= half
-                )
-                if bin_agg == "mean":
-                    counts = np.zeros(n_bins, dtype=np.int32)
-                    np.add.at(binned, idx[in_range], ints[in_range])
-                    np.add.at(counts, idx[in_range], 1)
-                    np.divide(binned, counts, out=binned, where=counts > 0)
-                elif bin_agg == "peak_apex":
-                    # bierze maksimum surowych punktów w oknie bina (bez sumowania/uśredniania)
-                    np.maximum.at(binned, idx[in_range], ints[in_range])
-                else:
-                    np.add.at(binned, idx[in_range], ints[in_range])
-                buffers[t["id"]]["spectra"].append(binned)
-                buffers[t["id"]]["coords"].append([x, y])
-
-                if i % 500 == 0:
-                    pct = 10 + int(80 * i / n_total)
-                    yield _sse("progress", {"step": "processing", "pct": pct,
-                                             "message": f"Spektrum {i}/{n_total}"})
-                    await asyncio.sleep(0)  # yield kontroli
-
-            yield _sse("progress", {"step": "saving", "pct": 92,
-                                     "message": "Zapis plików .npz…"})
-            target_dir.mkdir(parents=True, exist_ok=True)
-            for old in target_dir.glob("*.npz"):
-                old.unlink()
-            summary = []
-            for t in tissues:
-                tid  = t["id"]
-                buf  = buffers[tid]
-                if not buf["spectra"]:
-                    continue
-                spectra_arr = np.stack(buf["spectra"])
-                coords_out  = np.array(buf["coords"], dtype=np.int16)
-                out_path = target_dir / f"{tid}.npz"
-                np.savez_compressed(out_path, spectra=spectra_arr,
-                                    coords=coords_out, mz_bins=bin_centers)
-                summary.append({"id": tid, "n_spectra": len(buf["spectra"])})
-                await asyncio.sleep(0)
-
-            # Zarejestruj/zaktualizuj zestaw danych i uczyń go aktywnym
+            # Zarejestruj/zaktualizuj zestaw danych (ujednolicony format `steps`)
+            # i uczyń go aktywnym.
             global _imzml_path, _active_dataset_id
             _imzml_path = str(imzml_path)
             _save_imzml_path(_imzml_path)
@@ -956,8 +1108,16 @@ async def process(body: dict) -> StreamingResponse:
                 ds["name"] = dataset_name
             ds["kind"] = "binned"
             ds["updatedAt"] = now
-            ds["params"] = {"bin_size": bin_size, "bin_agg": bin_agg,
-                             "mz_min": mz_min, "mz_max": mz_max}
+            # "original" jest chroniony i traktowany jako sam surowy imzML (bez
+            # zapamiętanych kroków budowy) — patrz get_dataset_graph, które dla
+            # "original" zawsze zwraca stały graf źródło→wynik.
+            if dataset_id != "original":
+                ds["source_dataset_id"] = RAW_DATASET_ID
+                ds["steps"] = [
+                    {"method": "mz_range", "params": {"mz_min": mz_min, "mz_max": mz_max}},
+                    {"method": "bin_size", "params": {"bin_size": bin_size, "bin_agg": bin_agg}},
+                ]
+            ds.pop("params", None)
             dreg["active_id"] = dataset_id
             _save_datasets_registry(dreg, _active_workspace_id)
             _active_dataset_id = dataset_id
@@ -1144,6 +1304,35 @@ def preprocess_chain(body: dict) -> dict:
             elif method == "peakpick":
                 cur, n_peaks = peak_pick(mz_arr, cur, prominence_frac=float(params.get("prominence_frac", 0.02)))
                 info["n_peaks"] = n_peaks
+            elif method == "mz_range":
+                mz_lo = float(params.get("mz_min", mz_arr.min() if len(mz_arr) else 0))
+                mz_hi = float(params.get("mz_max", mz_arr.max() if len(mz_arr) else 0))
+                mask = (mz_arr >= mz_lo) & (mz_arr <= mz_hi)
+                mz_arr = mz_arr[mask]
+                cur = cur[mask]
+                info["n_points"] = int(mask.sum())
+            elif method == "bin_size":
+                bs = float(params.get("bin_size", 0.3))
+                agg = str(params.get("bin_agg", "sum"))
+                if bs > 0 and len(mz_arr) > 1:
+                    centers = np.arange(mz_arr.min() + bs / 2, mz_arr.max(), bs)
+                    nb = len(centers)
+                    half = bs / 2
+                    binned = np.zeros(nb, dtype=np.float64)
+                    idx = np.searchsorted(centers, mz_arr - half, side="right")
+                    in_range = (idx < nb) & (np.abs(mz_arr - centers[np.clip(idx, 0, nb-1)]) <= half)
+                    if agg == "mean":
+                        counts = np.zeros(nb, dtype=np.int32)
+                        np.add.at(binned, idx[in_range], cur[in_range])
+                        np.add.at(counts, idx[in_range], 1)
+                        np.divide(binned, counts, out=binned, where=counts > 0)
+                    elif agg == "peak_apex":
+                        np.maximum.at(binned, idx[in_range], cur[in_range])
+                    else:
+                        np.add.at(binned, idx[in_range], cur[in_range])
+                    mz_arr = centers
+                    cur = binned
+                info["n_bins"] = len(mz_arr)
             else:
                 raise HTTPException(400, f"Nieznana metoda '{method}'")
             steps_applied.append({"method": method, "info": info})
@@ -1422,90 +1611,180 @@ def activate_dataset(wid: str, did: str) -> dict:
 
 @app.post("/workspaces/{wid}/datasets/{did}/build_pipeline")
 async def build_pipeline_dataset(wid: str, did: str, body: dict) -> StreamingResponse:
-    """Buduje zestaw danych `did`, stosując łańcuch kroków preprocessingu
-    (zbudowany z grafu node'ów w preWidma, node "Wynik") do KAŻDEGO piksela
-    zestawu źródłowego `source_dataset_id` (musi być zestawem zbinowanym —
-    'binned' lub wcześniejszym 'pipeline', nie surowym imzML).
-    Body: { source_dataset_id, steps: [{method, params}] }.
+    """Buduje/przebudowuje zestaw danych `did` z łańcucha kroków (graf node'ów
+    w edytorze "Zestaw danych"/preWidma). Body: { source_dataset_id, steps }.
+
+    `source_dataset_id` to albo `"__raw__"` (surowy imzML — w trybie continuous
+    to już poprawna, jednolita tablica per piksel, więc `steps` mogą być puste,
+    zawierać dowolną kombinację/kolejność kroków — `mz_range`/`bin_size` NIE są
+    wymagane), albo id innego, już istniejącego zestawu (`binned`/`pipeline`).
     """
     source_id = body.get("source_dataset_id")
     steps = body.get("steps") or []
     if not source_id:
         raise HTTPException(400, "Brak source_dataset_id")
-    if did == "original" and any(_dataset_dir(did, wid).glob("*.npz")):
+    if did == "original":
         raise HTTPException(400, "Zestaw 'Oryginalny' jest chroniony — nie można go nadpisać. Utwórz nowy zestaw.")
 
     dreg = _ensure_datasets_registry(wid)
     if not _find_dataset(dreg, did):
         raise HTTPException(404, f"Zestaw '{did}' nie istnieje")
-    src_dir = _dataset_dir(source_id, wid)
-    if not src_dir.exists():
-        raise HTTPException(404, f"Zestaw źródłowy '{source_id}' nie istnieje")
+
+    is_raw_source = source_id == RAW_DATASET_ID
+    if not is_raw_source:
+        src_dir = _dataset_dir(source_id, wid)
+        if not src_dir.exists():
+            raise HTTPException(404, f"Zestaw źródłowy '{source_id}' nie istnieje")
 
     from src.msi.preprocessing import (
         smooth_savgol, baseline_correction_snip, normalize_tic, peak_pick,
     )
 
     async def generate():
-        yield _sse("start", {"message": "Budowanie zestawu z pipeline'u…"})
+        global _imzml_path, _active_dataset_id, _tissues_meta
+        yield _sse("start", {"message": "Budowanie zestawu…"})
         try:
-            files = sorted(src_dir.glob("*.npz"))
-            if not files:
-                yield _sse("error", {"message": f"Zestaw źródłowy '{source_id}' jest pusty"})
-                return
             out_dir = _dataset_dir(did, wid)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            for old in out_dir.glob("*.npz"):
-                old.unlink()
+            summary: list[dict] = []
+            per_pixel_steps = steps
+            src_files: list[Path]
 
-            summary = []
-            for fi, path in enumerate(files):
-                tid = path.stem
-                d = np.load(path)
-                spectra = d["spectra"].astype(np.float64)
-                mz_bins = d["mz_bins"]
-                coords  = d["coords"]
-                n = len(spectra)
-                target_tic = float(np.median(spectra.sum(axis=1))) if n else 0.0
-                out = np.zeros_like(spectra)
-                for i in range(n):
-                    cur = spectra[i]
-                    for step in steps:
+            if is_raw_source:
+                imzml_path = Path(body.get("imzml_path") or _imzml_path or "")
+                if not imzml_path or not imzml_path.is_absolute():
+                    imzml_path = ROOT / imzml_path if imzml_path.parts else imzml_path
+                if not str(imzml_path) or not imzml_path.exists():
+                    yield _sse("error", {"message": "Brak ścieżki do pliku imzML"})
+                    return
+                tissues = body.get("tissues") or _tissues_meta
+
+                result: dict = {}
+                async for ev in _materialize_raw_native(imzml_path, tissues, out_dir, result):
+                    yield ev
+                if result.get("error"):
+                    return
+                summary = result["summary"]
+                src_files = sorted(out_dir.glob("*.npz"))
+
+                _imzml_path = str(imzml_path)
+                _save_imzml_path(_imzml_path)
+            else:
+                src_dir = _dataset_dir(source_id, wid)
+                src_files = sorted(src_dir.glob("*.npz"))
+                if not src_files:
+                    yield _sse("error", {"message": f"Zestaw źródłowy '{source_id}' jest pusty"})
+                    return
+                out_dir.mkdir(parents=True, exist_ok=True)
+                if out_dir.resolve() != src_dir.resolve():
+                    for old in out_dir.glob("*.npz"):
+                        old.unlink()
+
+            if per_pixel_steps:
+                summary = []
+                for fi, path in enumerate(src_files):
+                    tid = path.stem
+                    d = np.load(path)
+                    spectra = d["spectra"].astype(np.float64)
+                    mz_bins = d["mz_bins"]
+                    coords  = d["coords"]
+                    n = len(spectra)
+                    target_tic = float(np.median(spectra.sum(axis=1))) if n else 0.0
+
+                    # `mz_range`/`bin_size` zmieniają oś m/z (nie tylko intensywności)
+                    # — ale robią to identycznie dla każdego piksela (ta sama oś
+                    # wejściowa, te same parametry), więc finalną oś liczymy raz z
+                    # góry, żeby od razu przygotować bufor wyjściowy o właściwym
+                    # kształcie zamiast zakładać, że wynik ma tyle samo punktów co
+                    # wejście (`np.zeros_like(spectra)` byłoby błędne dla tych kroków).
+                    final_mz = mz_bins
+                    for step in per_pixel_steps:
                         method = step.get("method")
                         params = step.get("params") or {}
-                        if method == "smooth":
-                            cur = smooth_savgol(cur, window=int(params.get("window", 15)))
-                        elif method == "baseline":
-                            cur, _b = baseline_correction_snip(cur, iterations=int(params.get("iterations", 40)))
-                        elif method == "normalize":
-                            cur, _f = normalize_tic(cur, target_tic=target_tic)
-                        elif method == "peakpick":
-                            cur, _n = peak_pick(mz_bins, cur, prominence_frac=float(params.get("prominence_frac", 0.02)))
-                    out[i] = cur
-                    if i % 200 == 0:
-                        pct = int(100 * (fi + i / max(n, 1)) / len(files))
-                        yield _sse("progress", {"step": "processing", "pct": pct,
-                                                 "message": f"{tid}: {i}/{n}"})
-                        await asyncio.sleep(0)
-                np.savez_compressed(out_dir / f"{tid}.npz", spectra=out.astype(np.float32),
-                                    coords=coords, mz_bins=mz_bins)
-                summary.append({"id": tid, "n_spectra": n})
+                        if method == "mz_range":
+                            mz_lo = float(params.get("mz_min", final_mz.min() if len(final_mz) else 0))
+                            mz_hi = float(params.get("mz_max", final_mz.max() if len(final_mz) else 0))
+                            final_mz = final_mz[(final_mz >= mz_lo) & (final_mz <= mz_hi)]
+                        elif method == "bin_size":
+                            bs = float(params.get("bin_size", 0.3))
+                            if bs > 0 and len(final_mz) > 1:
+                                final_mz = np.arange(final_mz.min() + bs / 2, final_mz.max(), bs)
+                    out = np.zeros((n, len(final_mz)), dtype=np.float32)
+
+                    for i in range(n):
+                        cur = spectra[i]
+                        cur_mz = mz_bins
+                        for step in per_pixel_steps:
+                            method = step.get("method")
+                            params = step.get("params") or {}
+                            if method == "smooth":
+                                cur = smooth_savgol(cur, window=int(params.get("window", 15)))
+                            elif method == "baseline":
+                                cur, _b = baseline_correction_snip(cur, iterations=int(params.get("iterations", 40)))
+                            elif method == "normalize":
+                                cur, _f = normalize_tic(cur, target_tic=target_tic)
+                            elif method == "peakpick":
+                                cur, _n = peak_pick(cur_mz, cur, prominence_frac=float(params.get("prominence_frac", 0.02)))
+                            elif method == "mz_range":
+                                mz_lo = float(params.get("mz_min", cur_mz.min() if len(cur_mz) else 0))
+                                mz_hi = float(params.get("mz_max", cur_mz.max() if len(cur_mz) else 0))
+                                mask = (cur_mz >= mz_lo) & (cur_mz <= mz_hi)
+                                cur_mz = cur_mz[mask]
+                                cur = cur[mask]
+                            elif method == "bin_size":
+                                bs = float(params.get("bin_size", 0.3))
+                                agg = str(params.get("bin_agg", "sum"))
+                                if bs > 0 and len(cur_mz) > 1:
+                                    centers = np.arange(cur_mz.min() + bs / 2, cur_mz.max(), bs)
+                                    nb = len(centers)
+                                    half = bs / 2
+                                    binned = np.zeros(nb, dtype=np.float64)
+                                    idx = np.searchsorted(centers, cur_mz - half, side="right")
+                                    in_range = (idx < nb) & (np.abs(cur_mz - centers[np.clip(idx, 0, nb - 1)]) <= half)
+                                    if agg == "mean":
+                                        counts = np.zeros(nb, dtype=np.int32)
+                                        np.add.at(binned, idx[in_range], cur[in_range])
+                                        np.add.at(counts, idx[in_range], 1)
+                                        np.divide(binned, counts, out=binned, where=counts > 0)
+                                    elif agg == "peak_apex":
+                                        np.maximum.at(binned, idx[in_range], cur[in_range])
+                                    else:
+                                        np.add.at(binned, idx[in_range], cur[in_range])
+                                    cur_mz = centers
+                                    cur = binned
+                        out[i] = cur
+                        if i % 200 == 0:
+                            pct = int(100 * (fi + i / max(n, 1)) / len(src_files))
+                            yield _sse("progress", {"step": "processing", "pct": pct,
+                                                     "message": f"{tid}: {i}/{n}"})
+                            await asyncio.sleep(0)
+                    np.savez_compressed(out_dir / f"{tid}.npz", spectra=out.astype(np.float32),
+                                        coords=coords, mz_bins=final_mz)
+                    summary.append({"id": tid, "n_spectra": n})
+            elif not is_raw_source:
+                # Brak kroków per-pixel — po prostu skopiuj dane źródłowe do zestawu.
+                summary = []
+                for path in src_files:
+                    if out_dir.resolve() != path.parent.resolve():
+                        shutil.copy(path, out_dir / path.name)
+                    d = np.load(path)
+                    summary.append({"id": path.stem, "n_spectra": len(d["spectra"])})
 
             dreg2 = _ensure_datasets_registry(wid)
             ds = _find_dataset(dreg2, did)
             if ds is not None:
                 ds["updatedAt"] = _now_iso()
-                ds["kind"] = "pipeline"
+                ds["kind"] = "binned" if is_raw_source else "pipeline"
                 ds["source_dataset_id"] = source_id
                 ds["steps"] = steps
+                ds.pop("params", None)
                 _save_datasets_registry(dreg2, wid)
 
-            global _active_dataset_id, _tissues_meta
             if wid == _active_workspace_id and did == _active_dataset_id:
                 ids = _load_npz_files()
                 _tissues_meta = _build_tissues_meta(ids)
+            _touch_workspace(wid)
 
-            yield _sse("done", {"message": "Zestaw zbudowany", "summary": summary})
+            yield _sse("done", {"message": "Zestaw zbudowany", "summary": summary, "dataset_id": did})
         except Exception as exc:
             import traceback
             yield _sse("error", {"message": str(exc), "trace": traceback.format_exc()})
@@ -1513,6 +1792,41 @@ async def build_pipeline_dataset(wid: str, did: str, body: dict) -> StreamingRes
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
+
+
+@app.get("/workspaces/{wid}/datasets/{did}/graph")
+def get_dataset_graph(wid: str, did: str) -> dict:
+    """Zwraca zapisany graf node'ów (edycja przetwarzania) dla zestawu `did`,
+    albo pusty obiekt jeśli zestaw nie ma jeszcze zapisanego grafu.
+
+    "original" jest chroniony i zawsze traktowany jako bezpośrednio surowy
+    imzML — niezależnie od tego, co ewentualnie zostało w nim kiedyś zapisane,
+    zawsze zwracamy pusty graf (frontend renderuje dla niego stały,
+    tylko-do-odczytu widok źródło→wynik)."""
+    if did == "original":
+        return {}
+    dreg = _ensure_datasets_registry(wid)
+    ds = _find_dataset(dreg, did)
+    if not ds:
+        raise HTTPException(404, f"Zestaw '{did}' nie istnieje")
+    return ds.get("graph") or {}
+
+
+@app.put("/workspaces/{wid}/datasets/{did}/graph")
+def put_dataset_graph(wid: str, did: str, body: dict) -> dict:
+    """Zapisuje graf node'ów (nodes/edges/viewport) dla zestawu `did` — to
+    reprezentacja do edycji/podglądu; wykonywalny łańcuch (`steps`) zapisuje
+    się osobno przy `build_pipeline`."""
+    if did == "original":
+        raise HTTPException(400, "Zestaw 'Oryginalny' jest chroniony — nie można edytować jego grafu")
+    dreg = _ensure_datasets_registry(wid)
+    ds = _find_dataset(dreg, did)
+    if not ds:
+        raise HTTPException(404, f"Zestaw '{did}' nie istnieje")
+    ds["graph"] = body
+    ds["updatedAt"] = _now_iso()
+    _save_datasets_registry(dreg, wid)
+    return {"ok": True}
 
 
 # ── Boards (Tablica) ──────────────────────────────────────────────────────

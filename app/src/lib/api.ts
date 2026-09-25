@@ -62,6 +62,23 @@ export async function fetchDatasetStatus(dataset?: string): Promise<DatasetStatu
   }
 }
 
+export interface ImzmlNativeRange { mz_min: number; mz_max: number; n_points: number; }
+
+/** Natywny (rzeczywisty) zakres m/z pliku imzML — używany do ograniczenia
+ * suwaków node'a "Zakres m/z" do granic faktycznie obecnych w pliku, zamiast
+ * dowolnych, twardo zakodowanych wartości. `path` opcjonalna — bez niej sidecar
+ * używa ostatnio przetworzonego pliku. */
+export async function fetchImzmlNativeRange(path?: string): Promise<ImzmlNativeRange | null> {
+  try {
+    const q = path ? `?path=${encodeURIComponent(path)}` : "";
+    const r = await fetch(`${BASE}/imzml_native_range${q}`);
+    if (!r.ok) return null;
+    return r.json();
+  } catch {
+    return null;
+  }
+}
+
 export interface PixelSpectrum {
   tissue: string; x: number; y: number;
   mz: number[]; intensity: number[];
@@ -102,7 +119,7 @@ export async function fetchPreprocess(
 
 export interface PreprocessChainStep {
   method: string;
-  params: Record<string, number>;
+  params: Record<string, number | string>;
 }
 
 export interface PreprocessChainStepInfo {

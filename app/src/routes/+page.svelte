@@ -6,6 +6,7 @@
   import IonGrid from "$lib/IonGrid.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import DaneTab from "$lib/DaneTab.svelte";
+  import ZestawDanych from "$lib/ZestawDanych.svelte";
   import Widma from "$lib/Widma.svelte";
   import PreWidma from "$lib/PreWidma.svelte";
   import WorkspaceSettings from "$lib/WorkspaceSettings.svelte";
@@ -15,10 +16,11 @@
   import "@fontsource/jetbrains-mono/600.css";
 
   type AppState = "booting" | "ready" | "error";
-  type Tab = "dane" | "mz" | "preprocessing" | "widma" | "prewidma" | "segmentacja" | "tablica" | "settings";
+  type Tab = "dane" | "zestawDanych" | "mz" | "preprocessing" | "widma" | "prewidma" | "segmentacja" | "tablica" | "settings";
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "dane",          label: "Dane" },
+    { key: "zestawDanych",  label: "Zestaw danych" },
     { key: "mz",            label: "m/z" },
     { key: "widma",         label: "Widma" },
     { key: "prewidma",      label: "preWidma" },
@@ -207,6 +209,9 @@
           onfileload={handleFileLoad}
         />
       </main>
+      <main class="content" class:hidden={activeTab !== "zestawDanych"}>
+        <ZestawDanych visible={activeTab === "zestawDanych"} />
+      </main>
       <main class="content content-mz" class:hidden={activeTab !== "mz"}>
         <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} error={queryError} {tissueLabels} {tissueColors} {invertColors} />
         <div class="sidebar-panel">
@@ -236,7 +241,7 @@
         <Widma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {invertColors} {filekey} {tissueVmax} mapDataset={lastDataset} />
       </main>
       <main class="content" class:hidden={activeTab !== "prewidma"}>
-        <PreWidma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {invertColors} {filekey} {tissueVmax} mapDataset={lastDataset} />
+        <PreWidma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {invertColors} {filekey} {tissueVmax} mapDataset={lastDataset} visible={activeTab === "prewidma"} />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "segmentacja"}>
         <div class="tab-placeholder">

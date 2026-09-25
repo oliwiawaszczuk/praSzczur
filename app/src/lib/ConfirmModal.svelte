@@ -25,14 +25,19 @@
   function confirm() { onconfirm?.(); }
 
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") cancel();
-    if (e.key === "Enter") confirm();
+    if (e.key === "Escape") { e.preventDefault(); cancel(); }
+    if (e.key === "Enter") { e.preventDefault(); confirm(); }
   }
+
+  let modalBox = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    if (open) modalBox?.focus();
+  });
 </script>
 
 {#if open}
-  <div class="modal-backdrop" onclick={cancel} onkeydown={onKeydown} role="presentation">
-    <div class="modal-box" class:danger onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
+  <div class="modal-backdrop" onclick={cancel} role="presentation">
+    <div bind:this={modalBox} class="modal-box" class:danger onclick={(e) => e.stopPropagation()} onkeydown={onKeydown} role="dialog" aria-modal="true" tabindex="-1">
       <div class="modal-title">{title}</div>
       {#if message}<div class="modal-message">{message}</div>{/if}
       <div class="modal-actions">

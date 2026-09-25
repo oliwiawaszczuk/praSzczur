@@ -2,12 +2,16 @@
   import { onMount } from "svelte";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
   import ConfirmModal from "$lib/ConfirmModal.svelte";
-  import { fetchPreprocessChain, type PreprocessChainResult } from "./api";
+  import { fetchPreprocessChain, fetchImzmlNativeRange, type PreprocessChainResult } from "./api";
   import {
-    NODE_TYPE_LIST, NODE_TYPES, CATEGORY_ORDER, CATEGORY_LABELS, defaultGraph, defaultParams, makeId, buildChain,
+    NODE_TYPE_LIST, NODE_TYPES, CATEGORY_ORDER, CATEGORY_LABELS, defaultGraph, defaultDatasetGraph,
+    originalDatasetGraph, graphFromSteps, defaultParams, makeId, buildChain,
     type PreGraph, type PreNode, type PreEdge, type PreViewport,
   } from "$lib/prenodes";
-  import { datasets, loadDatasets, datasetsLoaded, activeDatasetId, createDataset, buildPipelineDataset } from "$lib/datasets.svelte";
+  import {
+    datasets, loadDatasets, datasetsLoaded, activeDatasetId, createDataset, buildPipelineDataset,
+    fetchDatasetGraph, saveDatasetGraph, RAW_DATASET_ID, type DatasetMeta,
+  } from "$lib/datasets.svelte";
 
   interface Pixel { tissue: string; x: number; y: number; }
 
@@ -15,12 +19,58 @@
     pixelLeft?: Pixel | null;
     pixelRight?: Pixel | null;
     onResult?: (side: "left" | "right", result: PreprocessChainResult | null) => void;
+    /** Gdy podane: edytor pokazuje/edytuje graf TEGO zestawu danych (zapisywany
+     * per-dataset w rejestrze sidecara), a węzeł "Wynik" służy do przebudowy
+     * właśnie tego zestawu. Gdy pominięte (użycie w zakładce preWidma jako
+     * podgląd łańcucha na 1-2 pikselach): graf jest globalnym scratchpadem
+     * per-workspace jak dotychczas, a "Zapisz" tworzy/nadpisuje DOWOLNY inny
+     * zestaw wskazany w dropdownie. */
+    datasetId?: string;
+    /** Czy ten edytor jest aktualnie widoczny (aktywna zakładka). Gdy `datasetId`
+     * jest ustawione, przejście z niewidocznego na widoczny powoduje ponowne
+     * pobranie grafu z sidecara — tak żeby zmiany zapisane w INNEJ instancji
+     * edytora (np. w drugiej zakładce, dla tego samego zestawu) nie były
+     * pokazywane jako nieaktualne po przełączeniu zakładki. */
+    visible?: boolean;
   }
-  let { pixelLeft = null, pixelRight = null, onResult }: Props = $props();
+  let { pixelLeft = null, pixelRight = null, onResult, datasetId, visible = true }: Props = $props();
+
+  // Zestaw "original" jest chroniony — pokazujemy jego graf (stały: źródło→wynik)
+  // wyłącznie do podglądu, bez możliwości edycji/przebudowy.
+  let readonly = $derived(datasetId === "original");
 
   onMount(async () => { if (!datasetsLoaded()) await loadDatasets(); });
 
+  // Rzeczywisty (natywny) zakres m/z pliku imzML — ogranicza suwaki node'a
+  // "Zakres m/z" do granic faktycznie obecnych w danych, zamiast dowolnych,
+  // twardo zakodowanych wartości (np. nie da się ustawić 100–300, gdy plik
+  // faktycznie zaczyna się od 300). `null` dopóki nie odpowie sidecar —
+  // wtedy renderowanie korzysta ze statycznych domyślnych granic z prenodes.ts.
+  let nativeMzRange = $state<{ mz_min: number; mz_max: number } | null>(null);
+  onMount(async () => {
+    const r = await fetchImzmlNativeRange(wsGet<string>("dane_imzmlPath", "") || undefined);
+    if (r) nativeMzRange = r;
+  });
+
+  // Efektywne min/max dla parametru node'a — dla mz_range podmienia statyczne
+  // wartości z prenodes.ts na realne granice pliku, gdy są już znane.
+  function effectiveMin(nodeType: string, p: { key: string; min?: number }): number | undefined {
+    if (nodeType === "mz_range" && nativeMzRange) {
+      if (p.key === "mz_min") return nativeMzRange.mz_min;
+      if (p.key === "mz_max") return nativeMzRange.mz_min;
+    }
+    return p.min;
+  }
+  function effectiveMax(nodeType: string, p: { key: string; max?: number }): number | undefined {
+    if (nodeType === "mz_range" && nativeMzRange) {
+      if (p.key === "mz_min") return nativeMzRange.mz_max;
+      if (p.key === "mz_max") return nativeMzRange.mz_max;
+    }
+    return p.max;
+  }
+
   function setNodeDataset(node: PreNode, datasetId: string) {
+    if (readonly) return;
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
     graph.nodes[idx] = { ...graph.nodes[idx], datasetId };
@@ -30,6 +80,7 @@
   // Wygaszenie node'a preprocessingu (oczko) — dane przechodzą przez niego
   // bez zmian, patrz buildChain() w prenodes.ts.
   function toggleNodeEnabled(node: PreNode) {
+    if (readonly) return;
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
     const enabled = graph.nodes[idx].enabled === false; // był false → włącz, inaczej wygaś
@@ -37,22 +88,96 @@
     persist();
   }
 
-  // Actual bin size (per-workspace, set in the "Dane" tab) — shown as the
-  // "Dane przetworzone" source node's dynamic subtitle.
-  let binSizeDisplay = $derived(wsGet<number>("dane_binSize", 0.3));
-
   const LS_GRAPH = "prenodes_graph";
 
-  let graph = $state<PreGraph>(wsGet<PreGraph>(LS_GRAPH, defaultGraph()));
-  // Guard: an older/corrupt stored graph could be missing nodes/edges/viewport.
-  if (!graph.nodes) graph.nodes = [];
-  if (!graph.edges) graph.edges = [];
-  if (!graph.viewport) graph.viewport = { x: 0, y: 0, zoom: 1 };
+  function sanitize(g: PreGraph): PreGraph {
+    if (!g.nodes) g.nodes = [];
+    if (!g.edges) g.edges = [];
+    if (!g.viewport) g.viewport = { x: 0, y: 0, zoom: 1 };
+    return g;
+  }
+
+  let graph = $state<PreGraph>(
+    sanitize(datasetId ? defaultDatasetGraph() : wsGet<PreGraph>(LS_GRAPH, defaultGraph())),
+  );
+  let loadedDatasetId = $state(""); // dataset id whose graph is currently loaded into `graph`
+  let wasVisible = $state(visible);
+
+  // Gdy zestaw nie ma jeszcze zapisanego grafu (edycji wizualnej) — bo powstał
+  // starszą ścieżką (legacy `params`/`steps`, albo /process) — odtwarzamy graf
+  // wprost z jego rzeczywistego, zapisanego łańcucha (`source_dataset_id` +
+  // `steps`), zamiast pokazywać mylący pusty/domyślny graf.
+  function fallbackGraphFor(id: string): PreGraph {
+    if (id === "original") return originalDatasetGraph();
+    const meta: DatasetMeta | undefined = datasets().find((d) => d.id === id);
+    if (meta?.steps?.length) {
+      return graphFromSteps(meta.source_dataset_id ?? RAW_DATASET_ID, meta.steps);
+    }
+    return defaultDatasetGraph();
+  }
+
+  // Sprawdza, czy zapisany graf (`remote`) wciąż odzwierciedla rzeczywisty,
+  // aktualny łańcuch zestawu (`meta.source_dataset_id` + `meta.steps`) — np.
+  // po tym, jak zestaw został ponownie przetworzony w zakładce "Dane" (inny
+  // zakres m/z / bin size), co zmienia `steps` w rejestrze, ale NIE dotyka
+  // wcześniej zapisanego wizualnego grafu. Bez tej kontroli edytor pokazywałby
+  // w nieskończoność zamrożony, nieaktualny graf z pierwszego otwarcia zestawu
+  // (bo samo otwarcie — przez auto-fit widoku — potrafi zapisać graf, patrz
+  // `fitAllSilent` niżej).
+  function graphMatchesSteps(g: PreGraph, meta: DatasetMeta | undefined): boolean {
+    if (!meta) return true; // brak metadanych — nie ma z czym porównać, ufaj grafowi
+    const outNode = g.nodes.find((n) => n.type === "output");
+    if (!outNode) return false;
+    const chain = buildChain(g, outNode.id);
+    if (!chain) return false;
+    const expectedSource = meta.source_dataset_id ?? RAW_DATASET_ID;
+    const actualSource = chain.source === "raw" ? RAW_DATASET_ID : (chain.datasetId ?? "");
+    if (expectedSource !== actualSource) return false;
+    const expectedSteps = meta.steps ?? [];
+    if (chain.steps.length !== expectedSteps.length) return false;
+    return chain.steps.every((s, i) =>
+      s.method === expectedSteps[i].method &&
+      JSON.stringify(s.params) === JSON.stringify(expectedSteps[i].params)
+    );
+  }
+
+  async function loadGraphFor(id: string) {
+    if (!datasetsLoaded()) await loadDatasets();
+    const meta = datasets().find((d) => d.id === id);
+    const remote = id === "original" ? null : (await fetchDatasetGraph(id) as PreGraph | null);
+    const useRemote = remote && graphMatchesSteps(remote, meta);
+    graph = sanitize(useRemote ? remote! : fallbackGraphFor(id));
+    loadedDatasetId = id;
+    // Zawsze wyśrodkuj/dopasuj widok przy wejściu na zestaw — nie przywracamy
+    // starego zapisanego viewportu, który mógł być poza ekranem dla innego grafu.
+    queueFitAll();
+  }
+
+  // Gdy edytor jest związany z konkretnym zestawem (`datasetId`), graf jest
+  // ładowany/zapisywany per-dataset w rejestrze sidecara zamiast globalnego
+  // per-workspace scratchpada. Reaguje na zmianę `datasetId` (np. wybór innego
+  // zestawu w liście w zakładce "Zestaw danych") ORAZ na przejście z
+  // niewidocznego na widoczny (np. powrót na zakładkę po tym, jak graf tego
+  // zestawu mógł zostać zmieniony gdzie indziej), żeby nigdy nie pokazywać
+  // nieaktualnej kopii.
+  $effect(() => {
+    const id = datasetId;
+    const becameVisible = visible && !wasVisible;
+    wasVisible = visible;
+    if (!id) return;
+    if (id === loadedDatasetId && !becameVisible) return;
+    if (!visible) return; // nie odświeżaj w tle niewidocznej zakładki
+    loadGraphFor(id);
+  });
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   function persist() {
+    if (readonly) return;
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => wsSet(LS_GRAPH, graph), 300);
+    saveTimer = setTimeout(() => {
+      if (datasetId) saveDatasetGraph(datasetId, graph);
+      else wsSet(LS_GRAPH, graph);
+    }, 300);
   }
 
   let container = $state<HTMLDivElement | null>(null);
@@ -61,6 +186,14 @@
   function setViewport(v: PreViewport) {
     graph = { ...graph, viewport: v };
     persist();
+  }
+
+  // Jak setViewport, ale bez zapisu — używane przez auto-dopasowanie widoku
+  // przy wejściu na zestaw (fitAll), żeby samo OTWARCIE zestawu nie zamrażało
+  // na stałe aktualnego (zrekonstruowanego z steps) grafu w rejestrze, zanim
+  // użytkownik faktycznie coś zmieni.
+  function setViewportSilent(v: PreViewport) {
+    graph = { ...graph, viewport: v };
   }
 
   function screenToWorld(p: { x: number; y: number }): { x: number; y: number } {
@@ -104,7 +237,7 @@
     const def = NODE_TYPES[node.type];
     if (!def) return 60;
     let h = 30 + 20; // header + body padding
-    if (def.detail || node.type === "source_binned") h += 22; // subtitle row
+    if (def.detail) h += 22; // subtitle row
     h += def.params.length * 40;
     if (node.type === "output") h += 110; // "Realizuj" + zapis jako zestaw + wyniki
     if (node.type === "source_binned") h += 40; // dropdown zestawu danych
@@ -129,29 +262,44 @@
     const zoom = Math.max(0.2, Math.min(2, Math.min(availW / contentW, availH / contentH)));
     // Bias slightly left so the leftmost (source) nodes stay clearly visible
     // rather than perfectly centered, per the desired default framing.
-    setViewport({
+    // Silent: auto-fit-on-open must not persist a graph snapshot on its own —
+    // only real user edits (drag/connect/param/manual pan-zoom) should.
+    setViewportSilent({
       zoom,
       x: pad - minX * zoom,
       y: (rect.height - contentH * zoom) / 2 - minY * zoom,
     });
   }
 
-  onMount(() => {
-    if (!container) return;
-    // The panel can still be at 0×0 right when this component mounts (e.g.
-    // the tab was just switched to and layout hasn't settled yet), so a
-    // plain call here can fit against a zero-size box. Wait for the first
-    // real layout via ResizeObserver instead.
-    let didInitialFit = false;
-    const ro = new ResizeObserver((entries) => {
-      const r = entries[0]?.contentRect;
-      if (!didInitialFit && r && r.width > 0 && r.height > 0) {
-        didInitialFit = true;
+  // The panel can be at 0×0 right when we want to fit (e.g. the tab was just
+  // switched to / a different dataset just got bound and layout hasn't
+  // settled yet, or the tab is currently hidden via CSS). Retry on the next
+  // frame until the container actually has a real size, instead of fitting
+  // against a zero-size box (which would produce a bogus zoom/pan).
+  let fitPending = false;
+  function queueFitAll() {
+    fitPending = true;
+    let attempts = 0;
+    const tryFit = () => {
+      if (!fitPending) return;
+      attempts += 1;
+      const rect = container?.getBoundingClientRect();
+      if (rect && rect.width > 0 && rect.height > 0) {
+        fitPending = false;
         fitAll();
+      } else if (attempts < 120) {
+        // Stays hidden (e.g. this tab isn't the active one) — give up polling;
+        // becoming visible later re-triggers this via the datasetId/visible effect.
+        requestAnimationFrame(tryFit);
+      } else {
+        fitPending = false;
       }
-    });
-    ro.observe(container);
-    return () => ro.disconnect();
+    };
+    requestAnimationFrame(tryFit);
+  }
+
+  onMount(() => {
+    queueFitAll();
   });
 
   // ── Node dragging ──────────────────────────────────────────────────
@@ -160,6 +308,7 @@
   let dragNodeOrigin = { x: 0, y: 0 };
 
   function onNodeHeaderPointerDown(e: PointerEvent, node: PreNode) {
+    if (readonly) return;
     if ((e.target as HTMLElement).closest(".node-info, .node-menu-trigger")) return;
     e.stopPropagation();
     dragNodeId = node.id;
@@ -196,6 +345,7 @@
   }
 
   function onPortPointerDown(e: PointerEvent, node: PreNode, port: "in" | "out") {
+    if (readonly) return;
     e.stopPropagation();
     if (port === "in") {
       // Blender-style: chwytanie za końcówkę JUŻ podłączonego wejścia odłącza
@@ -228,10 +378,15 @@
   // once zoomed. Instead, resolve the nearest compatible port to the cursor
   // in world space within a generous radius, regardless of what DOM element
   // the pointerup actually fired on.
-  const CONNECT_RADIUS = 26;
+  // Radius is expressed in SCREEN pixels, then converted to world units by
+  // dividing by zoom — otherwise, after the graph auto-fits to view (which
+  // can zoom out well below 1x for larger chains), a fixed world-unit radius
+  // shrinks to a few screen pixels and connecting/re-detecting an edge
+  // becomes nearly impossible even though the ports look close together.
+  const CONNECT_RADIUS_SCREEN = 26;
   function findNearestPort(pos: { x: number; y: number }, wantPort: "in" | "out", excludeNodeId: string) {
     let best: PreNode | null = null;
-    let bestDist = CONNECT_RADIUS;
+    let bestDist = CONNECT_RADIUS_SCREEN / viewport.zoom;
     for (const n of graph.nodes) {
       if (n.id === excludeNodeId) continue;
       const def = NODE_TYPES[n.type];
@@ -305,6 +460,7 @@
 
   function onCanvasContextMenu(e: MouseEvent) {
     e.preventDefault();
+    if (readonly) return;
     closeMenus();
     const rect = container?.getBoundingClientRect();
     const screenY = e.clientY - (rect?.top ?? 0);
@@ -319,6 +475,7 @@
   function onNodeContextMenu(e: MouseEvent, node: PreNode) {
     e.preventDefault();
     e.stopPropagation();
+    if (readonly) return;
     closeMenus();
     const rect = container?.getBoundingClientRect();
     nodeMenuPos = { x: e.clientX - (rect?.left ?? 0), y: e.clientY - (rect?.top ?? 0) };
@@ -339,6 +496,14 @@
       y: palettePos.world.y,
       params: defaultParams(typeId),
     };
+    if (typeId === "source_binned") {
+      // Bez zestawu wybranego domyślnie dropdown wyglądałby na pusty — wybierz
+      // pierwszy dostępny (nie ma tu już niejawnej opcji "aktywny").
+      node.datasetId = datasets().find((d) => d.id !== "original")?.id;
+    }
+    if (typeId === "mz_range" && nativeMzRange) {
+      node.params = { ...node.params, mz_min: nativeMzRange.mz_min, mz_max: nativeMzRange.mz_max };
+    }
     graph.nodes.push(node);
     persist();
     closeMenus();
@@ -374,7 +539,7 @@
       e.preventDefault();
       fitAll();
     }
-    if (!typing && (e.key === "Delete" || e.key === "Backspace") && hoveredNodeId) {
+    if (!typing && (e.key === "Delete" || e.key === "Backspace") && hoveredNodeId && !readonly) {
       e.preventDefault();
       nodeMenuTarget = hoveredNodeId;
       confirmDeleteOpen = true;
@@ -391,7 +556,8 @@
     })
   );
 
-  function updateParam(node: PreNode, key: string, value: number) {
+  function updateParam(node: PreNode, key: string, value: number | string) {
+    if (readonly) return;
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
     graph.nodes[idx] = { ...graph.nodes[idx], params: { ...graph.nodes[idx].params, [key]: value } };
@@ -442,22 +608,64 @@
 
   // ── Zapisz jako zestaw danych — buduje pełny zestaw (WSZYSTKIE piksele
   // źródłowego zestawu, nie tylko podglądane 1-2), stosując łańcuch kroków
-  // z tego node'a "Wynik". Wymaga source_binned (bulk build nie parsuje
-  // surowego imzML per piksel — patrz build_pipeline w sidecarze).
+  // z tego node'a "Wynik". Dwa tryby (patrz `datasetId` prop):
+  //  - datasetId ustawione (zakładka "Zestaw danych"): "Przebuduj zestaw"
+  //    nadpisuje TEN SAM zestaw, od surowego imzML jeśli łańcuch zaczyna się
+  //    od mz_range/bin_size, albo od innego istniejącego zestawu.
+  //  - brak datasetId (podgląd w preWidma): stary tryb — zapis do nowego lub
+  //    wskazanego zestawu, wymaga źródła "Dane przetworzone" (binned).
   let savingDataset = $state<string | null>(null);
   let saveDatasetName = $state<Record<string, string>>({});
   // "" = nowy zestaw (z saveDatasetName); w przeciwnym razie id istniejącego
   // zestawu do NADPISANIA (wybrany z dropdowna).
   let saveDatasetTarget = $state<Record<string, string>>({});
   let saveProgress = $state<Record<string, string>>({});
+  let confirmRebuildNode = $state<PreNode | null>(null);
+
+  function requestRebuildDataset(node: PreNode) {
+    if (readonly) return;
+    confirmRebuildNode = node;
+  }
+  function cancelRebuildDataset() {
+    confirmRebuildNode = null;
+  }
+  async function confirmRebuildDataset() {
+    const node = confirmRebuildNode;
+    confirmRebuildNode = null;
+    if (node) await rebuildDataset(node);
+  }
+
+  async function rebuildDataset(node: PreNode) {
+    if (!datasetId) return;
+    const chain = buildChain(graph, node.id);
+    if (!chain) {
+      saveProgress = { ...saveProgress, [node.id]: "podłącz węzły aż do źródła danych" };
+      return;
+    }
+    const sourceId = chain.source === "raw" ? RAW_DATASET_ID : (chain.datasetId || activeDatasetId());
+    const imzmlPath = chain.source === "raw" ? wsGet<string>("dane_imzmlPath", "") : undefined;
+    savingDataset = node.id;
+    saveProgress = { ...saveProgress, [node.id]: "budowanie…" };
+    try {
+      await buildPipelineDataset(datasetId, sourceId, chain.steps, (pct, msg) => {
+        saveProgress = { ...saveProgress, [node.id]: `${pct}% ${msg}` };
+      }, imzmlPath);
+      saveProgress = { ...saveProgress, [node.id]: "✓ zestaw przebudowany" };
+    } catch (e) {
+      saveProgress = { ...saveProgress, [node.id]: e instanceof Error ? e.message : String(e) };
+    } finally {
+      savingDataset = null;
+    }
+  }
 
   async function saveOutputAsDataset(node: PreNode) {
     const chain = buildChain(graph, node.id);
-    if (!chain || chain.source !== "binned") {
-      saveProgress = { ...saveProgress, [node.id]: "wymagane źródło: Dane przetworzone" };
+    if (!chain) {
+      saveProgress = { ...saveProgress, [node.id]: "podłącz węzły aż do źródła danych" };
       return;
     }
-    const sourceId = chain.datasetId || activeDatasetId();
+    const sourceId = chain.source === "raw" ? RAW_DATASET_ID : (chain.datasetId || activeDatasetId());
+    const imzmlPath = chain.source === "raw" ? wsGet<string>("dane_imzmlPath", "") : undefined;
     const overwriteId = saveDatasetTarget[node.id] || "";
     savingDataset = node.id;
     saveProgress = { ...saveProgress, [node.id]: "budowanie…" };
@@ -473,7 +681,7 @@
       }
       await buildPipelineDataset(targetId, sourceId, chain.steps, (pct, msg) => {
         saveProgress = { ...saveProgress, [node.id]: `${pct}% ${msg}` };
-      });
+      }, imzmlPath);
       saveProgress = { ...saveProgress, [node.id]: `✓ zapisano jako "${targetName}"` };
       saveDatasetName = { ...saveDatasetName, [node.id]: "" };
     } catch (e) {
@@ -546,10 +754,8 @@
             </span>
           </div>
 
-          {#if def.detail || node.type === "source_binned"}
-            <div class="pnode-subtitle">
-              {node.type === "source_binned" ? `bin size = ${binSizeDisplay} Da` : def.detail}
-            </div>
+          {#if def.detail}
+            <div class="pnode-subtitle">{def.detail}</div>
           {/if}
 
           <div class="pnode-body">
@@ -560,8 +766,7 @@
                         value={node.datasetId ?? ""}
                         onpointerdown={(e) => e.stopPropagation()}
                         onchange={(e) => setNodeDataset(node, (e.target as HTMLSelectElement).value)}>
-                  <option value="">(aktywny — {activeDatasetId()})</option>
-                  {#each datasets() as d}
+                  {#each datasets().filter((d) => d.id !== "original") as d}
                     <option value={d.id}>{d.name}</option>
                   {/each}
                 </select>
@@ -569,11 +774,46 @@
             {/if}
             {#each def.params as p (p.key)}
               <label class="field">
-                <span>{p.label}: {node.params[p.key] ?? p.default}</span>
-                <input type="range" min={p.min} max={p.max} step={p.step}
-                       value={node.params[p.key] ?? p.default}
-                       onpointerdown={(e) => e.stopPropagation()}
-                       oninput={(e) => updateParam(node, p.key, Number((e.target as HTMLInputElement).value))} />
+                {#if p.options}
+                  <span>{p.label}</span>
+                  <select class="ds-select"
+                          value={node.params[p.key] ?? p.default}
+                          onpointerdown={(e) => e.stopPropagation()}
+                          onchange={(e) => updateParam(node, p.key, (e.target as HTMLSelectElement).value)}>
+                    {#each p.options as opt}
+                      <option value={opt}>{opt}</option>
+                    {/each}
+                  </select>
+                {:else}
+                  {@const pMin = effectiveMin(node.type, p)}
+                  {@const pMax = effectiveMax(node.type, p)}
+                  <span class="field-head">
+                    <input type="text" inputmode="decimal" class="param-value-input"
+                           value={node.params[p.key] ?? p.default}
+                           readonly={readonly}
+                           onpointerdown={(e) => e.stopPropagation()}
+                           onchange={(e) => {
+                             const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                             if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default); return; }
+                             const clamped = Math.min(pMax ?? raw, Math.max(pMin ?? raw, raw));
+                             updateParam(node, p.key, clamped);
+                             (e.target as HTMLInputElement).value = String(clamped);
+                           }}
+                           onkeydown={(e) => {
+                             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                             if (e.key === "Escape") {
+                               (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default);
+                               (e.target as HTMLInputElement).blur();
+                             }
+                           }} />
+                    <span>{p.label}</span>
+                  </span>
+                  <input type="range" min={pMin} max={pMax} step={p.step}
+                         value={node.params[p.key] ?? p.default}
+                         disabled={readonly}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         oninput={(e) => updateParam(node, p.key, Number((e.target as HTMLInputElement).value))} />
+                {/if}
               </label>
             {/each}
 
@@ -593,31 +833,48 @@
 
                 <!-- Zapisz — cała tkanka, wszystkie piksele, bez wymogu wybranego piksela -->
                 <div class="output-col" onpointerdown={(e) => e.stopPropagation()}>
-                  <span class="output-col-title">Zapisz</span>
-                  <select class="ds-select"
-                          value={saveDatasetTarget[node.id] ?? ""}
-                          onchange={(e) => saveDatasetTarget = { ...saveDatasetTarget, [node.id]: (e.target as HTMLSelectElement).value }}>
-                    <option value="">+ nowy zestaw…</option>
-                    {#each datasets().filter((d) => d.id !== "original") as d}
-                      <option value={d.id}>nadpisz: {d.name}</option>
-                    {/each}
-                  </select>
-                  {#if !saveDatasetTarget[node.id]}
-                    <input class="save-dataset-input" type="text" placeholder="nazwa nowego zestawu…"
-                           value={saveDatasetName[node.id] ?? ""}
-                           oninput={(e) => saveDatasetName = { ...saveDatasetName, [node.id]: (e.target as HTMLInputElement).value }} />
+                  {#if readonly}
+                    <span class="output-col-title">Przebuduj zestaw</span>
+                    <span class="preview-result">Zestaw "Oryginalny" jest chroniony — nie można go nadpisać.</span>
+                  {:else if datasetId}
+                    <span class="output-col-title">Przebuduj zestaw</span>
+                    <span class="save-warning">⚠ nadpisze dane bieżącego zestawu</span>
+                    <button class="run-btn save-btn"
+                            disabled={savingDataset === node.id}
+                            onclick={() => requestRebuildDataset(node)}>
+                      {#if savingDataset === node.id}
+                        <span class="spin"></span> Przebudowywanie…
+                      {:else}
+                        Przebuduj (cała tkanka)
+                      {/if}
+                    </button>
                   {:else}
-                    <span class="save-warning">⚠ nadpisze zestaw "{datasets().find((d) => d.id === saveDatasetTarget[node.id])?.name}"</span>
-                  {/if}
-                  <button class="run-btn save-btn"
-                          disabled={savingDataset === node.id || (!saveDatasetTarget[node.id] && !(saveDatasetName[node.id] ?? "").trim())}
-                          onclick={() => saveOutputAsDataset(node)}>
-                    {#if savingDataset === node.id}
-                      <span class="spin"></span> Zapisywanie…
+                    <span class="output-col-title">Zapisz</span>
+                    <select class="ds-select"
+                            value={saveDatasetTarget[node.id] ?? ""}
+                            onchange={(e) => saveDatasetTarget = { ...saveDatasetTarget, [node.id]: (e.target as HTMLSelectElement).value }}>
+                      <option value="">+ nowy zestaw…</option>
+                      {#each datasets().filter((d) => d.id !== "original") as d}
+                        <option value={d.id}>nadpisz: {d.name}</option>
+                      {/each}
+                    </select>
+                    {#if !saveDatasetTarget[node.id]}
+                      <input class="save-dataset-input" type="text" placeholder="nazwa nowego zestawu…"
+                             value={saveDatasetName[node.id] ?? ""}
+                             oninput={(e) => saveDatasetName = { ...saveDatasetName, [node.id]: (e.target as HTMLInputElement).value }} />
                     {:else}
-                      Zapisz (cała tkanka)
+                      <span class="save-warning">⚠ nadpisze zestaw "{datasets().find((d) => d.id === saveDatasetTarget[node.id])?.name}"</span>
                     {/if}
-                  </button>
+                    <button class="run-btn save-btn"
+                            disabled={savingDataset === node.id || (!saveDatasetTarget[node.id] && !(saveDatasetName[node.id] ?? "").trim())}
+                            onclick={() => saveOutputAsDataset(node)}>
+                      {#if savingDataset === node.id}
+                        <span class="spin"></span> Zapisywanie…
+                      {:else}
+                        Zapisz (cała tkanka)
+                      {/if}
+                    </button>
+                  {/if}
                   {#if saveProgress[node.id]}
                     <span class="preview-result">{saveProgress[node.id]}</span>
                   {/if}
@@ -682,6 +939,16 @@
   danger
   onconfirm={confirmDeleteNode}
   oncancel={cancelDeleteNode}
+/>
+
+<ConfirmModal
+  open={confirmRebuildNode !== null}
+  title="Przebuduj zestaw"
+  message="Przebudowanie nadpisze dane bieżącego zestawu (wszystkie piksele, wszystkie tkanki) — tej operacji nie da się cofnąć."
+  confirmLabel="Przebuduj"
+  danger
+  onconfirm={confirmRebuildDataset}
+  oncancel={cancelRebuildDataset}
 />
 
 <style>
@@ -843,6 +1110,31 @@
     font-size: 0.68rem;
     color: rgba(255,255,255,0.6);
   }
+
+  .field-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .param-value-input {
+    width: 44px;
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: #e0e0e0;
+    font-size: 0.66rem;
+    font-family: inherit;
+    padding: 2px 5px;
+    text-align: left;
+    transition: background 0.12s, border-color 0.12s;
+    box-sizing: border-box;
+  }
+  .param-value-input:hover:not([readonly]) { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.12); }
+  .param-value-input:focus { background: rgba(255,255,255,0.05); border-color: rgba(255,201,81,0.4); outline: none; }
+  .param-value-input[readonly] { opacity: 0.6; cursor: default; }
 
   .output-columns {
     display: flex;

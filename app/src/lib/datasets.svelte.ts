@@ -15,7 +15,8 @@ export interface DatasetMeta {
   updatedAt: string;
   params?: Record<string, unknown>;
   source_dataset_id?: string;
-  steps?: { method: string; params: Record<string, number> }[];
+  steps?: { method: string; params: Record<string, number | string> }[];
+  graph?: unknown;
 }
 
 export const RAW_DATASET_ID = "__raw__"; // pseudo-zestaw: surowe widmo z imzML
@@ -37,8 +38,24 @@ export function datasetsLoaded(): boolean {
 }
 
 export function datasetLabel(id: string): string {
-  if (id === RAW_DATASET_ID) return "Oryginalne (raw imzML)";
+  if (id === RAW_DATASET_ID) return "Dane oryginalne";
   return _list.find((d) => d.id === id)?.name ?? id;
+}
+
+// Zestaw do zaznaczenia po przejściu na zakładkę "Zestaw danych" (np. z
+// DaneTab po utworzeniu nowego zestawu z ROI tkanek) — proste przekazanie
+// intencji między zakładkami, bez potrzeby osobnego routera/eventu.
+let _pendingSelectId = $state<string>("");
+export function pendingSelectDatasetId(): string {
+  return _pendingSelectId;
+}
+export function setPendingSelectDataset(id: string): void {
+  _pendingSelectId = id;
+}
+export function consumePendingSelectDataset(): string {
+  const id = _pendingSelectId;
+  _pendingSelectId = "";
+  return id;
 }
 
 export async function loadDatasets(): Promise<DatasetMeta[]> {
@@ -116,19 +133,22 @@ async function* streamSse(r: Response): AsyncGenerator<SseEvent> {
   }
 }
 
-/** Buduje zestaw `datasetId` stosując łańcuch kroków preprocessingu (z grafu
- * preWidma) do każdego piksela zestawu źródłowego. Zwraca strumień zdarzeń SSE. */
+/** Buduje/przebudowuje zestaw `datasetId` stosując łańcuch kroków (z grafu
+ * node'ów) do każdego piksela zestawu źródłowego — albo, gdy `sourceDatasetId
+ * === RAW_DATASET_ID`, wprost z surowego imzML (łańcuch musi wtedy zaczynać
+ * się od kroków "mz_range"/"bin_size"). Zwraca strumień zdarzeń SSE. */
 export async function buildPipelineDataset(
   datasetId: string,
   sourceDatasetId: string,
-  steps: { method: string; params: Record<string, number> }[],
+  steps: { method: string; params: Record<string, number | string> }[],
   onProgress?: (pct: number, message: string) => void,
+  imzmlPath?: string,
 ): Promise<void> {
   const wid = activeWorkspaceId();
   const r = await fetch(`${BASE}/workspaces/${wid}/datasets/${datasetId}/build_pipeline`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source_dataset_id: sourceDatasetId, steps }),
+    body: JSON.stringify({ source_dataset_id: sourceDatasetId, steps, imzml_path: imzmlPath }),
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({ detail: `API error ${r.status}` }));
@@ -139,4 +159,26 @@ export async function buildPipelineDataset(
     if (ev.event === "error") throw new Error(ev.data.message ?? "Błąd budowania zestawu");
   }
   await loadDatasets();
+}
+
+/** Odczytuje zapisany graf node'ów zestawu (edycja/podgląd budowy). Pusty
+ * obiekt jeśli zestaw nie ma jeszcze zapisanego grafu. */
+export async function fetchDatasetGraph(datasetId: string): Promise<unknown> {
+  const wid = activeWorkspaceId();
+  const r = await fetch(`${BASE}/workspaces/${wid}/datasets/${datasetId}/graph`);
+  if (!r.ok) return null;
+  const d = await r.json();
+  return d && Object.keys(d).length > 0 ? d : null;
+}
+
+/** Zapisuje graf node'ów (nodes/edges/viewport) zestawu — reprezentacja do
+ * edycji/podglądu, niezależna od wykonywalnych `steps` zapisywanych przy
+ * `buildPipelineDataset`. */
+export async function saveDatasetGraph(datasetId: string, graph: unknown): Promise<void> {
+  const wid = activeWorkspaceId();
+  await fetch(`${BASE}/workspaces/${wid}/datasets/${datasetId}/graph`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(graph),
+  });
 }
