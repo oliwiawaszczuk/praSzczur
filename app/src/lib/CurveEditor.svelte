@@ -5,16 +5,16 @@
   // Dwuklik na tle: dodaj punkt. Przeciągnij punkt: przesuń go (krańce mają
   // zablokowane X — da się przesuwać tylko ich Y). Prawy klik na punkcie
   // (poza krańcami): usuń go.
-  import { DEFAULT_CURVE_POINTS, type MzCurvePoint } from "$lib/mzgraphnodes";
+  import { DEFAULT_CURVE_POINTS, type CurvePoint } from "$lib/nodegraph";
 
   interface Props {
-    points?: MzCurvePoint[];
+    points?: CurvePoint[];
     histogram?: number[];
-    onchange?: (points: MzCurvePoint[]) => void;
+    onchange?: (points: CurvePoint[]) => void;
   }
   let { points = DEFAULT_CURVE_POINTS, histogram = [], onchange }: Props = $props();
 
-  let localPoints = $state<MzCurvePoint[]>(points.map((p) => ({ ...p })));
+  let localPoints = $state<CurvePoint[]>(points.map((p) => ({ ...p })));
   let wrapEl = $state<HTMLDivElement | null>(null);
   let draggingIdx = $state<number | null>(null);
 
@@ -44,7 +44,7 @@
     const isLeftEnd = draggingIdx === 0;
     const isRightEnd = draggingIdx === localPoints.length - 1;
     const next = [...localPoints];
-    const p: MzCurvePoint = { ...next[draggingIdx] };
+    const p: CurvePoint = { ...next[draggingIdx] };
     p.y = Math.round(y);
     if (isLeftEnd) p.x = 0;
     else if (isRightEnd) p.x = 100;

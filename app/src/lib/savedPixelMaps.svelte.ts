@@ -15,11 +15,11 @@ export interface SavedPixelMapSource {
   datasetLabel: string; // snapshot nazwy w momencie zapisu
 }
 
-/** CombineMode rozszerzony o tryby node'a "Łączenie" w grafie m/z (subtract/
- * mask_*, patrz CombineModeExt w mzgraphnodes.ts) oraz o "segment" — mapa
- * wyeksportowana z zakładki Segmentacja (Segm Mapy Pikseli → node "Zapis").
+/** CombineMode rozszerzony o tryby node'a "Łączenie" w grafie node'ów (subtract/
+ * mask_*, patrz CombineModeExt w nodegraph.mapa.ts) oraz o "segment" — mapa
+ * wyeksportowana z domeny Segmentacja (węzeł "Wybór segmentów" → "Zapis").
  * Zdublowane literały zamiast importu CombineModeExt, żeby uniknąć cyklu
- * (mzgraphnodes.ts importuje typy z tego pliku). */
+ * (nodegraph.ts importuje typy z tego pliku). */
 export type SavedPixelMapMode = CombineMode | "single" | "subtract" | "mask_exclude" | "mask_keep" | "segment";
 
 export interface SavedPixelMapMeta {

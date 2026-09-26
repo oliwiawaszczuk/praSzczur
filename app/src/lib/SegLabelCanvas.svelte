@@ -2,7 +2,7 @@
   // Renderuje mapę etykiet k-means (0..k-1 per piksel) kategoryczną paletą
   // (SEG_PALETTE) zamiast ciągłego LUT-u z colormap.ts — to nie jest
   // intensywność, tylko przynależność do klasy.
-  import { SEG_PALETTE } from "./segnodes";
+  import { SEG_PALETTE } from "./nodegraph.segmentacja";
 
   interface Props {
     labels: number[][];
@@ -31,7 +31,7 @@
         const lbl = labels[y][x];
         const idx = (y * w + x) * 4;
         // Sentinel -1 = tło (piksel wykluczony z k-means, patrz runKmeans w
-        // segnodes.ts) — w pełni przezroczyste, nie jest to prawdziwa klasa.
+        // nodegraph.segmentacja.ts) — w pełni przezroczyste, nie jest to prawdziwa klasa.
         if (lbl < 0) {
           img.data[idx + 3] = 0;
           continue;

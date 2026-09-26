@@ -12,8 +12,7 @@
   import WieleMz from "$lib/WieleMz.svelte";
   import MzMergeSubtab from "$lib/MzMergeSubtab.svelte";
   import MzSavedMapsSubtab from "$lib/MzSavedMapsSubtab.svelte";
-  import MzGraphSubtab from "$lib/MzGraphSubtab.svelte";
-  import SegGraphSubtab from "$lib/SegGraphSubtab.svelte";
+  import NodeGraphTab from "$lib/NodeGraphTab.svelte";
   import PreWidma from "$lib/PreWidma.svelte";
   import WorkspaceSettings from "$lib/WorkspaceSettings.svelte";
   import Tablica from "$lib/Tablica.svelte";
@@ -22,9 +21,8 @@
   import "@fontsource/jetbrains-mono/600.css";
 
   type AppState = "booting" | "ready" | "error";
-  type Tab = "dane" | "zestawDanych" | "mz" | "preprocessing" | "widma" | "prewidma" | "segmentacja" | "tablica" | "settings";
-  type MzSubTab = "mz" | "grupy" | "laczenie" | "zapisane" | "graf";
-  type SegSubTab = "mapyPikseli";
+  type Tab = "dane" | "zestawDanych" | "mz" | "preprocessing" | "widma" | "prewidma" | "nodegraph" | "tablica" | "settings";
+  type MzSubTab = "mz" | "grupy" | "laczenie" | "zapisane";
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "dane",          label: "Dane" },
@@ -33,7 +31,7 @@
     { key: "widma",         label: "Widma" },
     { key: "prewidma",      label: "preWidma" },
     { key: "preprocessing", label: "Preprocessing" },
-    { key: "segmentacja",   label: "Segmentacja" },
+    { key: "nodegraph",     label: "Node Graph" },
     { key: "tablica",       label: "Tablica" },
     { key: "settings",   label: "Ustawienia" },
   ];
@@ -43,11 +41,6 @@
     { key: "grupy",    label: "Grupy" },
     { key: "laczenie", label: "Łączenie" },
     { key: "zapisane", label: "Zapisane" },
-    { key: "graf",     label: "Mapa Node Graph" },
-  ];
-
-  const SEG_SUBTABS: { key: SegSubTab; label: string }[] = [
-    { key: "mapyPikseli", label: "Segm Mapy Pikseli" },
   ];
 
   let state:       AppState = $state("booting");
@@ -60,7 +53,6 @@
   let dispMax      = $state(1);
   let activeTab: Tab   = $state("dane");
   let mzSubTab: MzSubTab = $state("mz");
-  let segSubTab: SegSubTab = $state("mapyPikseli");
   let mzMin            = $state(0);
   let mzMax            = $state(Infinity);
   let tissueIds        = $state<string[]>([]);
@@ -85,7 +77,6 @@
   // Persist to workspace (only write, browser-only)
   $effect(() => { if (restored) wsSet("app_activeTab", activeTab); });
   $effect(() => { if (restored) wsSet("app_mzSubTab", mzSubTab); });
-  $effect(() => { if (restored) wsSet("app_segSubTab", segSubTab); });
   $effect(() => { if (restored && lastMz !== null) wsSet("app_lastMz", lastMz); });
   $effect(() => { if (restored) wsSet("app_lastTol", lastTol); });
   $effect(() => { if (restored) wsSet("app_dispMin", dispMin); });
@@ -102,7 +93,6 @@
       // Load all persisted state — dopiero po wczytaniu workspace
       activeTab    = wsGet<Tab>("app_activeTab", "dane");
       mzSubTab     = wsGet<MzSubTab>("app_mzSubTab", "mz");
-      segSubTab    = wsGet<SegSubTab>("app_segSubTab", "mapyPikseli");
       tissueLabels = wsGet("dane_tissueLabels", {});
       lastMz       = wsGet("app_lastMz", null);
       dispMin      = wsGet("app_dispMin", 0);
@@ -247,21 +237,6 @@
         </div>
       {/if}
 
-      <!-- Podzakładki zakładki Segmentacja (na razie tylko "Segm Mapy Pikseli") -->
-      {#if activeTab === "segmentacja"}
-        <div class="subtabbar">
-          {#each SEG_SUBTABS as st}
-            <button
-              class="subtab"
-              class:active={segSubTab === st.key}
-              onclick={() => { segSubTab = st.key; }}
-            >
-              {st.label}
-            </button>
-          {/each}
-        </div>
-      {/if}
-
       <!-- Content zakładki — zawsze zamontowane, ukrywane przez CSS -->
       <main class="content" class:hidden={activeTab !== "dane"}>
         <DaneTab
@@ -300,9 +275,6 @@
       <main class="content" class:hidden={!(activeTab === "mz" && mzSubTab === "zapisane")}>
         <MzSavedMapsSubtab />
       </main>
-      <main class="content" class:hidden={!(activeTab === "mz" && mzSubTab === "graf")}>
-        <MzGraphSubtab visible={activeTab === "mz" && mzSubTab === "graf"} />
-      </main>
       <main class="content full-tab" class:hidden={activeTab !== "preprocessing"}>
         <div class="tab-placeholder">
           <div class="tp-icon">⚗</div>
@@ -316,8 +288,8 @@
       <main class="content" class:hidden={activeTab !== "prewidma"}>
         <PreWidma tissues={tissueIds} activeMz={lastMz} activeTol={lastTol} {tissueLabels} {dispMin} {dispMax} {invertColors} {filekey} {tissueVmax} mapDataset={lastDataset} visible={activeTab === "prewidma"} />
       </main>
-      <main class="content" class:hidden={!(activeTab === "segmentacja" && segSubTab === "mapyPikseli")}>
-        <SegGraphSubtab visible={activeTab === "segmentacja" && segSubTab === "mapyPikseli"} />
+      <main class="content" class:hidden={activeTab !== "nodegraph"}>
+        <NodeGraphTab visible={activeTab === "nodegraph"} />
       </main>
       <main class="content" class:hidden={activeTab !== "tablica"}>
         <Tablica />
