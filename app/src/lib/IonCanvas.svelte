@@ -9,8 +9,10 @@
     dispMax?: number;
     accentColor?: string;
     invertColors?: boolean;
+    showColorbar?: boolean;
+    showVmax?: boolean;
   }
-  let { tissue = null, loading = false, dispMin = 0, dispMax = 1, accentColor = "", invertColors = false }: Props = $props();
+  let { tissue = null, loading = false, dispMin = 0, dispMax = 1, accentColor = "", invertColors = false, showColorbar = true, showVmax = true }: Props = $props();
 
   let ionCanvas: HTMLCanvasElement | undefined = $state();
   let barCanvas:  HTMLCanvasElement | undefined = $state();
@@ -72,16 +74,20 @@
     <div class="image-area">
       <canvas bind:this={ionCanvas} class="ion-canvas"></canvas>
 
-      <div class="colorbar-wrap">
-        <span class="cb-tick" style="top:0">100%</span>
-        <span class="cb-tick" style="top:25%">75%</span>
-        <span class="cb-tick" style="top:50%">50%</span>
-        <span class="cb-tick" style="top:75%">25%</span>
-        <span class="cb-tick" style="bottom:0">0%</span>
-        <canvas bind:this={barCanvas} class="colorbar" width="14" height="200"></canvas>
-      </div>
+      {#if showColorbar}
+        <div class="colorbar-wrap">
+          <span class="cb-tick" style="top:0">100%</span>
+          <span class="cb-tick" style="top:25%">75%</span>
+          <span class="cb-tick" style="top:50%">50%</span>
+          <span class="cb-tick" style="top:75%">25%</span>
+          <span class="cb-tick" style="bottom:0">0%</span>
+          <canvas bind:this={barCanvas} class="colorbar" width="14" height="200"></canvas>
+        </div>
+      {/if}
     </div>
-    <div class="vmax-badge">max: {tissue.vmax.toExponential(2)}</div>
+    {#if showVmax}
+      <div class="vmax-badge">max: {tissue.vmax.toExponential(2)}</div>
+    {/if}
   {:else}
     <div class="placeholder">Wpisz m/z i kliknij Wczytaj</div>
   {/if}

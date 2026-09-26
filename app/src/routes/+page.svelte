@@ -9,6 +9,7 @@
   import DaneTab from "$lib/DaneTab.svelte";
   import ZestawDanych from "$lib/ZestawDanych.svelte";
   import Widma from "$lib/Widma.svelte";
+  import WieleMz from "$lib/WieleMz.svelte";
   import PreWidma from "$lib/PreWidma.svelte";
   import WorkspaceSettings from "$lib/WorkspaceSettings.svelte";
   import Tablica from "$lib/Tablica.svelte";
@@ -17,12 +18,13 @@
   import "@fontsource/jetbrains-mono/600.css";
 
   type AppState = "booting" | "ready" | "error";
-  type Tab = "dane" | "zestawDanych" | "mz" | "preprocessing" | "widma" | "prewidma" | "segmentacja" | "tablica" | "settings";
+  type Tab = "dane" | "zestawDanych" | "mz" | "wieleMz" | "preprocessing" | "widma" | "prewidma" | "segmentacja" | "tablica" | "settings";
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "dane",          label: "Dane" },
     { key: "zestawDanych",  label: "Zestaw danych" },
     { key: "mz",            label: "m/z" },
+    { key: "wieleMz",       label: "Wiele m/z" },
     { key: "widma",         label: "Widma" },
     { key: "prewidma",      label: "preWidma" },
     { key: "preprocessing", label: "Preprocessing" },
@@ -235,6 +237,9 @@
             currentTol={lastTol}
           />
         </div>
+      </main>
+      <main class="content" class:hidden={activeTab !== "wieleMz"}>
+        <WieleMz {mzMin} {mzMax} tolDefault={defaultTol} {tissueIds} {tissueLabels} {tissueColors} />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "preprocessing"}>
         <div class="tab-placeholder">
