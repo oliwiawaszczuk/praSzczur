@@ -38,6 +38,11 @@ export interface SavedPixelMapMeta {
 
 export interface SavedPixelMap extends SavedPixelMapMeta {
   data: number[][];
+  /** Maska "prawdziwych" pikseli (0/1, ten sam kształt co `data`) — 0 = poza
+   * faktycznym skanem tkanki w imzML (tło), patrz TissueImage.mask w api.ts i
+   * mask w /ion_image (sidecar). Opcjonalna: mapy zapisane przed wprowadzeniem
+   * maski (albo bez propagowanej maski przez cały łańcuch) jej nie mają. */
+  mask?: number[][];
 }
 
 let _list = $state<SavedPixelMapMeta[]>([]);

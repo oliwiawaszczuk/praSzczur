@@ -6,7 +6,7 @@
 // logika ewaluacji grafu, oddzielona od renderowania (MzGraphSubtab.svelte).
 
 import type { CombineMode } from "./tissueMerge";
-import { windowValue } from "./tissueMerge";
+import { windowValue, combineMasks } from "./tissueMerge";
 import type { SavedPixelMap, SavedPixelMapSource } from "./savedPixelMaps.svelte";
 
 export interface MzNodeParamDef {
@@ -185,6 +185,10 @@ export interface MzEvalResult {
   width: number;
   height: number;
   data: number[][];
+  /** Maska "prawdziwych" pikseli (0/1, ten sam kształt co `data`) — 0 = poza
+   * faktycznym skanem tkanki w imzML (tło), patrz TissueImage.mask w api.ts.
+   * Opcjonalna: mapy zapisane przed wprowadzeniem maski jej nie mają. */
+  mask?: number[][];
   /** "segment" = wczytana mapa pochodzi z zakładki Segmentacja (wyeksportowany
    * segment) — nie jest to tryb "Łączenia", tylko odziedziczona etykieta
    * z SavedPixelMapMode, przechodząca przez graf bez zmian. */
@@ -241,12 +245,17 @@ export function applyCurve(v: number, points: MzCurvePoint[]): number {
 
 /** Histogram wartości mapy (do podglądu w edytorze krzywej) — `bins` koszyków
  * równomiernie rozłożonych na 0–100%, wartości poza zakresem [0,100] lądują
- * w skrajnym koszyku (np. suma/iloczyn może dać >100%). */
-export function computeHistogram(data: number[][], bins = 40): number[] {
+ * w skrajnym koszyku (np. suma/iloczyn może dać >100%). Piksele tła
+ * (mask[y][x] === 0) są pomijane — inaczej duży, sztuczny region tła zdominowałby
+ * koszyk 0% i histogram nie odzwierciedlałby realnego rozkładu sygnału tkanki. */
+export function computeHistogram(data: number[][], bins = 40, mask?: number[][]): number[] {
   const counts = new Array(bins).fill(0);
-  for (const row of data) {
-    for (const v of row) {
-      const pct = v * 100;
+  for (let y = 0; y < data.length; y++) {
+    const row = data[y];
+    const maskRow = mask?.[y];
+    for (let x = 0; x < row.length; x++) {
+      if (maskRow && maskRow[x] === 0) continue;
+      const pct = row[x] * 100;
       let idx = Math.floor((pct / 100) * bins);
       if (idx < 0) idx = 0;
       if (idx >= bins) idx = bins - 1;
@@ -318,6 +327,7 @@ function evaluateInner(
         width: full.width,
         height: full.height,
         data: full.data,
+        mask: full.mask,
         mode: full.mode === "single" ? "single" : full.mode,
         sources: full.sources,
       },
@@ -365,6 +375,7 @@ function evaluateInner(
     }
     const mode = (node.params.mode as CombineModeExt) ?? "mean";
     const data = results.length === 1 ? results[0].data : combineArrays(results.map((r) => r.data), mode);
+    const mask = results.length === 1 ? results[0].mask : combineMasks(results.map((r) => r.mask), height, width);
     return {
       ok: true,
       value: {
@@ -373,6 +384,7 @@ function evaluateInner(
         width,
         height,
         data,
+        mask,
         mode: results.length === 1 ? results[0].mode : mode,
         sources: dedupeSources(results.flatMap((r) => r.sources)),
       },

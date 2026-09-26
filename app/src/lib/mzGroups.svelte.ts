@@ -185,6 +185,7 @@ export interface MergedTissueResult {
   width: number;
   height: number;
   data: number[][];
+  mask?: number[][];
   vmax: number;
   mode: CombineMode;
   sources: { groupId: string; groupIndex: number; mz: number; tol: number; dataset: string }[];
@@ -197,7 +198,7 @@ export interface MergedTissueResult {
 export function mergedResults(): MergedTissueResult[] {
   return selectedSlots().flatMap((slot) => {
     const merged = mergeTissueMaps(
-      slot.sources.map((s) => ({ data: s.image.data, dispMin: s.dispMin, dispMax: s.dispMax, invert: s.invert })),
+      slot.sources.map((s) => ({ data: s.image.data, dispMin: s.dispMin, dispMax: s.dispMax, invert: s.invert, mask: s.image.mask })),
       combineMode,
     );
     if (!merged) return [];
@@ -206,8 +207,9 @@ export function mergedResults(): MergedTissueResult[] {
       label: slot.sources[0].image.label,
       width: slot.sources[0].image.width,
       height: slot.sources[0].image.height,
-      data: merged,
-      vmax: maxOf(merged),
+      data: merged.data,
+      mask: merged.mask,
+      vmax: maxOf(merged.data),
       mode: combineMode,
       sources: slot.sources.map((s) => ({ groupId: s.groupId, groupIndex: s.groupIndex, mz: s.mz, tol: s.tol, dataset: s.dataset })),
     }];

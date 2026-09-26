@@ -28,8 +28,15 @@
     const img = ctx.createImageData(w, h);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
-        const [r, g, b] = RGB[labels[y][x] % RGB.length];
+        const lbl = labels[y][x];
         const idx = (y * w + x) * 4;
+        // Sentinel -1 = tło (piksel wykluczony z k-means, patrz runKmeans w
+        // segnodes.ts) — w pełni przezroczyste, nie jest to prawdziwa klasa.
+        if (lbl < 0) {
+          img.data[idx + 3] = 0;
+          continue;
+        }
+        const [r, g, b] = RGB[lbl % RGB.length];
         img.data[idx] = r; img.data[idx + 1] = g; img.data[idx + 2] = b; img.data[idx + 3] = 255;
       }
     }

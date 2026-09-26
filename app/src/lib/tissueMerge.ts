@@ -19,13 +19,35 @@ export interface MergeSource {
   dispMin: number;
   dispMax: number;
   invert: boolean;
+  /** Maska "prawdziwych" pikseli (0/1) — patrz TissueImage.mask w api.ts.
+   * Opcjonalna: źródło bez maski jest traktowane jak "wszędzie ważne". */
+  mask?: number[][];
+}
+
+/** AND masek wielu źródeł — piksel jest ważny tylko, jeśli jest ważny we
+ * WSZYSTKICH źródłach, które w ogóle mają maskę (źródło bez maski nie psuje
+ * wyniku — traktowane jako "wszędzie ważne", dla wstecznej kompatybilności ze
+ * starymi zapisanymi mapami sprzed wprowadzenia maski). Zwraca `undefined`,
+ * jeśli ŻADNE źródło nie niesie informacji o tle. */
+export function combineMasks(masks: (number[][] | undefined)[], h: number, w: number): number[][] | undefined {
+  if (masks.every((m) => !m)) return undefined;
+  const out: number[][] = Array.from({ length: h }, () => new Array(w).fill(1));
+  for (const m of masks) {
+    if (!m) continue;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (m[y]?.[x] === 0) out[y][x] = 0;
+      }
+    }
+  }
+  return out;
 }
 
 /** Łączy N źródeł (ten sam slot tkanki, różne m/z) per piksel, na
  * znormalizowanych (windowValue) wartościach. Zwraca null przy niezgodnych
  * wymiarach (nie powinno się zdarzyć w obrębie jednego workspace/imzML, ale
  * zabezpieczamy się zamiast crashować). */
-export function mergeTissueMaps(sources: MergeSource[], mode: CombineMode): number[][] | null {
+export function mergeTissueMaps(sources: MergeSource[], mode: CombineMode): { data: number[][]; mask?: number[][] } | null {
   if (sources.length === 0) return null;
   const h = sources[0].data.length;
   const w = sources[0].data[0]?.length ?? 0;
@@ -43,7 +65,7 @@ export function mergeTissueMaps(sources: MergeSource[], mode: CombineMode): numb
       out[y][x] = v;
     }
   }
-  return out;
+  return { data: out, mask: combineMasks(sources.map((s) => s.mask), h, w) };
 }
 
 export function maxOf(data: number[][]): number {

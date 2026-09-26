@@ -13,6 +13,7 @@
 // przypadek — patrz CombineModeExt w mzgraphnodes.ts).
 
 import type { SavedPixelMap, SavedPixelMapSource } from "./savedPixelMaps.svelte";
+import { combineMasks } from "./tissueMerge";
 
 export interface SegNodeParamDef {
   key: string;
@@ -63,6 +64,12 @@ export interface SegKmeansResult {
   labels: number[][];
   legend: { label: number; count: number }[];
   sources: SavedPixelMapSource[];
+  /** Maska "prawdziwych" pikseli (AND masek wszystkich podłączonych map) użyta
+   * przy uruchomieniu k-means — piksele tła (mask=0) są WYKLUCZONE z
+   * klasteryzacji (nie zanieczyszczają klas realną segmentacją) i dostają
+   * etykietę sentinel -1 w `labels` (poza 0..k-1, niewybieralną w "Wybór
+   * segmentów" i przezroczystą w podglądzie — patrz SegLabelCanvas.svelte). */
+  mask?: number[][];
 }
 
 export interface SegGraphNode {
@@ -249,14 +256,31 @@ function mulberry32(seed: number): () => number {
  * (liczność pikseli per klasa). Klasy są ponumerowane rosnąco wg średniej
  * intensywności pierwszego kanału, żeby numeracja była stabilna między
  * kolejnymi uruchomieniami na tych samych danych (inaczej losowa
- * inicjalizacja centroidów dawałaby za każdym razem inną kolejność etykiet). */
-export function runKmeans(channels: number[][][], k: number, restarts = 5): { labels: number[][]; legend: { label: number; count: number }[] } {
+ * inicjalizacja centroidów dawałaby za każdym razem inną kolejność etykiet).
+ *
+ * `validMask` (0/1, opcjonalna) — piksele tła (mask=0, poza faktycznym skanem
+ * tkanki w imzML) są CAŁKOWICIE wykluczone z klasteryzacji: nie wchodzą do
+ * `points`, nie wpływają na centroidy ani na inercję, i dostają w `labels`
+ * sentinel -1 (poza 0..k-1) zamiast być siłą przypisane do jakiejś klasy. Bez
+ * tego tło (duży, jednolity region zer) zdominowałoby k-means i albo
+ * pochłonęłoby całą jedną klasę, albo zniekształciło pozostałe. */
+export function runKmeans(
+  channels: number[][][], k: number, validMask?: number[][], restarts = 5,
+): { labels: number[][]; legend: { label: number; count: number }[] } {
   const h = channels[0].length;
   const w = channels[0][0].length;
   const points: number[][] = [];
+  const pointCoords: Array<[number, number]> = [];
   for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) points.push(channels.map((ch) => ch[y][x]));
+    for (let x = 0; x < w; x++) {
+      if (validMask && validMask[y][x] === 0) continue;
+      points.push(channels.map((ch) => ch[y][x]));
+      pointCoords.push([y, x]);
+    }
   }
+
+  const labels: number[][] = Array.from({ length: h }, () => new Array(w).fill(-1));
+  if (points.length === 0) return { labels, legend: [] };
 
   let best: { labels: number[]; centers: number[][]; inertia: number } | null = null;
   for (let r = 0; r < restarts; r++) {
@@ -272,16 +296,12 @@ export function runKmeans(channels: number[][][], k: number, restarts = 5): { la
   const remap = new Array(k);
   order.forEach((origIdx, newIdx) => { remap[origIdx] = newIdx; });
 
-  const labels: number[][] = Array.from({ length: h }, () => new Array(w).fill(0));
   const counts = new Array(k).fill(0);
-  let p = 0;
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const lbl = remap[best!.labels[p]];
-      labels[y][x] = lbl;
-      counts[lbl]++;
-      p++;
-    }
+  for (let i = 0; i < points.length; i++) {
+    const [y, x] = pointCoords[i];
+    const lbl = remap[best!.labels[i]];
+    labels[y][x] = lbl;
+    counts[lbl]++;
   }
   return { labels, legend: counts.map((count, label) => ({ label, count })) };
 }
@@ -295,6 +315,9 @@ export interface SegMapValue {
   width: number;
   height: number;
   data: number[][];
+  /** Maska "prawdziwych" pikseli (0/1) — patrz TissueImage.mask w api.ts.
+   * Opcjonalna: mapy zapisane przed wprowadzeniem maski jej nie mają. */
+  mask?: number[][];
   sources: SavedPixelMapSource[];
 }
 
@@ -305,8 +328,11 @@ export interface SegLabelValue {
   width: number;
   height: number;
   k: number;
+  /** Etykiety klas 0..k-1, albo -1 (sentinel "tło" — piksel wykluczony z
+   * klasteryzacji, patrz SegKmeansResult.mask). */
   labels: number[][];
   legend: { label: number; count: number }[];
+  mask?: number[][];
   sources: SavedPixelMapSource[];
 }
 
@@ -367,6 +393,7 @@ function evaluateInner(
         width: full.width,
         height: full.height,
         data: full.data,
+        mask: full.mask,
         sources: full.sources,
       },
     };
@@ -405,6 +432,7 @@ function evaluateInner(
         k: cur.k,
         labels: cur.labels,
         legend: cur.legend,
+        mask: cur.mask,
         sources: cur.sources,
       },
     };
@@ -419,12 +447,14 @@ function evaluateInner(
     const selected = node.selectedLabels ?? [];
     if (selected.length === 0) return { ok: false, error: "zaznacz przynajmniej jedną klasę" };
     const { width, height, labels } = src.value;
+    // Sentinel -1 (tło, wykluczone z k-means) nigdy nie pasuje do zaznaczonych
+    // etykiet 0..k-1, więc wychodzi tu jako 0 bez dodatkowego warunku.
     const data: number[][] = Array.from({ length: height }, (_, y) =>
       Array.from({ length: width }, (_, x) => (selected.includes(labels[y][x]) ? 1 : 0)),
     );
     return {
       ok: true,
-      value: { kind: "mapa", tissueId: src.value.tissueId, tissueLabel: src.value.tissueLabel, width, height, data, sources: src.value.sources },
+      value: { kind: "mapa", tissueId: src.value.tissueId, tissueLabel: src.value.tissueLabel, width, height, data, mask: src.value.mask, sources: src.value.sources },
     };
   }
 

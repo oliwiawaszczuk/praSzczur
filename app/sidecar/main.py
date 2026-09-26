@@ -787,12 +787,21 @@ def ion_image(mz: float, tol: float = 0.3, dataset: str = "") -> dict:
         x0, y0 = xs.min(), ys.min()
         img = np.zeros((ys.max()-y0+1, xs.max()-x0+1), dtype=np.float64)
         img[ys-y0, xs-x0] = intensities
+        # Maska "prawdziwych" pikseli — dokładnie te (x,y), dla których w imzML
+        # istnieje realne widmo (ten sam zestaw co presence_image w
+        # /detect_from_imzml). Prostokąt tkanki poza faktycznym skanem (tło)
+        # zostaje w `img` na 0.0 — bez tej maski nieodróżnialne od realnego
+        # zera intensywności, więc renderuje się jako czarne zamiast przezroczyste
+        # (patrz colormap.ts/renderToCanvas) i zanieczyszcza segmentację k-means.
+        present = np.zeros(img.shape, dtype=np.uint8)
+        present[ys-y0, xs-x0] = 1
 
         vmax_local = float(img.max())
         meta = next((m for m in _tissues_meta if m["id"] == tid), {})
         result[tid] = {
             "label":  meta.get("label", tid),
             "_img":   img,
+            "mask":   present.tolist(),
             "width":  int(xs.max()-x0+1),
             "height": int(ys.max()-y0+1),
             "vmax":   vmax_local,
@@ -833,10 +842,12 @@ def ion_image_raw(mz: float, tol: float = 0.3) -> dict:
         xs, ys = coords[:, 0].astype(int), coords[:, 1].astype(int)
         x0, y0 = xs.min(), ys.min()
         img = np.zeros((ys.max()-y0+1, xs.max()-x0+1), dtype=np.float64)
+        present = np.zeros(img.shape, dtype=np.uint8)
         for x, y in zip(xs, ys):
             idx = coord_to_idx.get((int(x), int(y)))
             if idx is None:
                 continue
+            present[y-y0, x-x0] = 1
             mz_arr, ints = p.getspectrum(idx)
             mz_arr = np.asarray(mz_arr, dtype=np.float64)
             ints   = np.asarray(ints,   dtype=np.float64)
@@ -848,6 +859,7 @@ def ion_image_raw(mz: float, tol: float = 0.3) -> dict:
         result[tid] = {
             "label":  meta.get("label", tid),
             "_img":   img,
+            "mask":   present.tolist(),
             "width":  int(xs.max()-x0+1),
             "height": int(ys.max()-y0+1),
             "vmax":   vmax_local,
@@ -1922,7 +1934,10 @@ def create_pixel_map(wid: str, body: dict) -> dict:
     }
     preg["maps"].append(meta)
     _save_pixel_maps_registry(preg, wid)
-    full = {**meta, "data": body.get("data", [])}
+    # "mask" (0/1, jak "data") — piksele bez realnego widma w imzML (tło poza
+    # skanem tkanki), patrz mask w /ion_image. Opcjonalne: starsze zapisane mapy
+    # i mapy wynikowe z operacji, które nie propagują maski, jej nie mają.
+    full = {**meta, "data": body.get("data", []), "mask": body.get("mask")}
     _pixel_maps_root(wid).mkdir(parents=True, exist_ok=True)
     _pixel_map_data_file(pmid, wid).write_text(json.dumps(full))
     return meta

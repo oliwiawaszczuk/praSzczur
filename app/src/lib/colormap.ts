@@ -49,10 +49,17 @@ export const BRUKER_LUT: Uint8ClampedArray = (() => {
  * Renderuje macierz 2D (wartości 0–1) na canvas używając BRUKER_LUT.
  * @param ctx     Kontekst 2D canvasu
  * @param matrix  Wiersze × kolumny, wartości 0–1
+ * @param mask    Opcjonalna maska "prawdziwych" pikseli (0/1, ten sam kształt co
+ *                `matrix`) — piksele z mask[y][x] === 0 (tło poza faktycznym
+ *                skanem tkanki, patrz mask w /ion_image) są w pełni przezroczyste
+ *                zamiast czarne, żeby tło nie wyglądało jak dane o zerowej
+ *                intensywności. Brak maski = wszystkie piksele nieprzezroczyste
+ *                (zachowanie sprzed wprowadzenia maski).
  */
 export function renderToCanvas(
   ctx: CanvasRenderingContext2D,
   matrix: number[][],
+  mask?: number[][] | null,
 ): void {
   const h = matrix.length;
   const w = matrix[0]?.length ?? 0;
@@ -66,13 +73,14 @@ export function renderToCanvas(
 
   for (let y = 0; y < h; y++) {
     const row = matrix[y];
+    const maskRow = mask?.[y];
     for (let x = 0; x < w; x++) {
       const idx  = (y * w + x) * 4;
       const lutI = Math.round(Math.min(Math.max(row[x], 0), 1) * 255) * 4;
       px[idx]     = BRUKER_LUT[lutI];
       px[idx + 1] = BRUKER_LUT[lutI + 1];
       px[idx + 2] = BRUKER_LUT[lutI + 2];
-      px[idx + 3] = 255;
+      px[idx + 3] = maskRow && maskRow[x] === 0 ? 0 : 255;
     }
   }
 

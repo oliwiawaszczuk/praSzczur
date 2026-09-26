@@ -6,7 +6,7 @@
   import PixelMapZoomModal from "$lib/PixelMapZoomModal.svelte";
   import SegLabelCanvas from "$lib/SegLabelCanvas.svelte";
   import type { TissueImage } from "$lib/api.js";
-  import { maxOf } from "$lib/tissueMerge";
+  import { maxOf, combineMasks } from "$lib/tissueMerge";
   import { COMBINE_MODE_LABELS } from "$lib/mzgraphnodes";
   import {
     savedMapsList, loadSavedMaps, savedMapsLoaded, fetchSavedMapData, savePixelMap,
@@ -80,7 +80,7 @@
   }
 
   function resultTissue(r: SegMapValue): TissueImage {
-    return { label: r.tissueLabel || r.tissueId, data: r.data, width: r.width, height: r.height, vmax: maxOf(r.data) };
+    return { label: r.tissueLabel || r.tissueId, data: r.data, mask: r.mask, width: r.width, height: r.height, vmax: maxOf(r.data) };
   }
 
   let zoomTissue = $state<TissueImage | null>(null);
@@ -542,19 +542,23 @@
       return;
     }
     const k = Math.round(Number(node.params.k ?? 3));
+    // AND masek wszystkich podłączonych map — piksele tła (poza faktycznym
+    // skanem tkanki w imzML) muszą być wykluczone z k-means niezależnie od
+    // tego, z ilu kanałów/map budujemy wektor cech.
+    const validMask = combineMasks(inputs.map((r) => r.mask), height, width);
     runningNodeId = node.id;
     kmeansStatus = { ...kmeansStatus, [node.id]: "" };
     // setTimeout, żeby przycisk zdążył pokazać "Przetwarzanie…" przed ciężkim,
     // synchronicznym liczeniem k-means (patrz runKmeans w segnodes.ts).
     setTimeout(() => {
       try {
-        const { labels, legend } = runKmeans(inputs.map((r) => r.data), k);
+        const { labels, legend } = runKmeans(inputs.map((r) => r.data), k, validMask);
         const idx = graph.nodes.findIndex((n) => n.id === node.id);
         if (idx !== -1) {
           graph.nodes[idx] = {
             ...graph.nodes[idx],
             kmeansResult: {
-              k, width, height, tissueId, tissueLabel, labels, legend,
+              k, width, height, tissueId, tissueLabel, labels, legend, mask: validMask,
               sources: dedupeMapSources(inputs.flatMap((r) => r.sources)),
             },
           };
@@ -603,6 +607,7 @@
         mode: "segment",
         sources: r.sources,
         data: r.data,
+        mask: r.mask,
       });
       saveStatus = { ...saveStatus, [node.id]: `✓ zapisano jako "${name}"` };
     } catch (e) {
@@ -731,6 +736,7 @@
               {@const inOutcome = inEdge ? evalNode(inEdge.from) : null}
               <div class="seg-checklist" onpointerdown={(e) => e.stopPropagation()}>
                 {#if inOutcome?.ok && inOutcome.value.kind === "segmentacja"}
+                  {@const bgCount = inOutcome.value.width * inOutcome.value.height - inOutcome.value.legend.reduce((a, l) => a + l.count, 0)}
                   {#each inOutcome.value.legend as l (l.label)}
                     <label class="seg-check-item">
                       <input type="checkbox"
@@ -740,6 +746,12 @@
                       <span>klasa {l.label} ({l.count}px)</span>
                     </label>
                   {/each}
+                  {#if bgCount > 0}
+                    <div class="seg-check-bg" title="Piksele poza faktycznym skanem tkanki — wykluczone z k-means, nigdy niewybieralne">
+                      <span class="seg-swatch seg-swatch-bg"></span>
+                      <span>tło ({bgCount}px, wykluczone)</span>
+                    </div>
+                  {/if}
                 {:else}
                   <div class="combine-list-empty">podłącz wynik k-means</div>
                 {/if}
@@ -1090,6 +1102,18 @@
     border-radius: 2px;
     display: inline-block;
     flex-shrink: 0;
+  }
+  .seg-check-bg {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.62rem;
+    color: rgba(255,255,255,0.35);
+    padding-left: 20px;
+  }
+  .seg-swatch-bg {
+    background: repeating-linear-gradient(45deg, rgba(255,255,255,0.15) 0 2px, transparent 2px 4px);
+    border: 1px solid rgba(255,255,255,0.2);
   }
 
   .mz-name-input {

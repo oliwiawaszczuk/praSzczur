@@ -43,6 +43,7 @@
         mode: r.mode,
         sources: r.sources.map((s) => ({ groupIndex: s.groupIndex, mz: s.mz, tol: s.tol, datasetId: s.dataset, datasetLabel: datasetLabel(s.dataset) })),
         data: r.data,
+        mask: r.mask,
       });
       savedFlash = new Set(savedFlash).add(r.tissueId);
       setTimeout(() => { const next = new Set(savedFlash); next.delete(r.tissueId); savedFlash = next; }, 1000);
@@ -101,7 +102,7 @@
           </div>
           <div class="merge-canvas">
             <IonCanvas
-              tissue={{ label: labelFor(r.tissueId), data: r.data, width: r.width, height: r.height, vmax: r.vmax }}
+              tissue={{ label: labelFor(r.tissueId), data: r.data, mask: r.mask, width: r.width, height: r.height, vmax: r.vmax }}
               dispMin={0}
               dispMax={1}
               invertColors={false}
@@ -118,7 +119,7 @@
 
 {#if zoomedResult}
   <PixelMapZoomModal
-    tissue={{ label: labelFor(zoomedResult.tissueId), data: zoomedResult.data, width: zoomedResult.width, height: zoomedResult.height, vmax: zoomedResult.vmax }}
+    tissue={{ label: labelFor(zoomedResult.tissueId), data: zoomedResult.data, mask: zoomedResult.mask, width: zoomedResult.width, height: zoomedResult.height, vmax: zoomedResult.vmax }}
     dispMin={0}
     dispMax={1}
     invertColors={false}

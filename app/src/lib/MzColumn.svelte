@@ -111,6 +111,7 @@
         mode: "single",
         sources: [{ groupIndex, mz: group.mz, tol: group.tol, datasetId: group.dataset, datasetLabel: datasetLabel(group.dataset) }],
         data,
+        mask: img.mask,
       });
       savedFlash = new Set(savedFlash).add(tid);
       setTimeout(() => { const next = new Set(savedFlash); next.delete(tid); savedFlash = next; }, 1000);

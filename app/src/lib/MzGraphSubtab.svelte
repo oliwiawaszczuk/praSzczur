@@ -81,7 +81,7 @@
   }
 
   function resultTissue(r: MzEvalResult): TissueImage {
-    return { label: r.tissueLabel || r.tissueId, data: r.data, width: r.width, height: r.height, vmax: maxOf(r.data) };
+    return { label: r.tissueLabel || r.tissueId, data: r.data, mask: r.mask, width: r.width, height: r.height, vmax: maxOf(r.data) };
   }
 
   let zoomTissue = $state<TissueImage | null>(null);
@@ -540,6 +540,7 @@
         mode: r.mode,
         sources: r.sources,
         data: r.data,
+        mask: r.mask,
       });
       saveStatus = { ...saveStatus, [node.id]: `✓ zapisano jako "${name}"` };
     } catch (e) {
@@ -648,7 +649,7 @@
             {:else if node.type === "curve"}
               {@const inEdge = graph.edges.find((e) => e.to === node.id)}
               {@const inOutcome = inEdge ? evalNode(inEdge.from) : null}
-              {@const histogram = inOutcome?.ok ? computeHistogram(inOutcome.value.data) : []}
+              {@const histogram = inOutcome?.ok ? computeHistogram(inOutcome.value.data, 40, inOutcome.value.mask) : []}
               <div class="field" onpointerdown={(e) => e.stopPropagation()}>
                 <CurveEditor
                   points={node.curvePoints ?? DEFAULT_CURVE_POINTS}

@@ -35,7 +35,7 @@
         return invertColors ? 1 - t : t;
       })
     );
-    renderToCanvas(ctx, remapped);
+    renderToCanvas(ctx, remapped, tissue.mask);
   });
 
   // Renderuje pionowy colorbar z zaznaczonym oknem zakresu

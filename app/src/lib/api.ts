@@ -19,6 +19,10 @@ export async function waitForSidecar(): Promise<void> {
 export interface TissueImage {
   label: string;
   data: number[][];
+  /** Maska "prawdziwych" pikseli (0/1) — 0 = poza faktycznym skanem tkanki w
+   * imzML (tło), a nie realne zero intensywności. Opcjonalna: nie każde źródło
+   * (np. stare zapisane mapy) ją ma — patrz renderToCanvas w colormap.ts. */
+  mask?: number[][];
   width: number;
   height: number;
   vmax: number;

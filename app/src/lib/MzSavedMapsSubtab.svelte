@@ -95,7 +95,7 @@
           <div class="saved-canvas">
             {#if mapData[m.id]}
               <IonCanvas
-                tissue={{ label: m.tissueLabel || m.tissueId, data: mapData[m.id].data, width: m.width, height: m.height, vmax: m.vmax }}
+                tissue={{ label: m.tissueLabel || m.tissueId, data: mapData[m.id].data, mask: mapData[m.id].mask, width: m.width, height: m.height, vmax: m.vmax }}
                 dispMin={0}
                 dispMax={1}
                 invertColors={false}
@@ -115,7 +115,7 @@
 
 {#if zoomedMeta && mapData[zoomedMeta.id]}
   <PixelMapZoomModal
-    tissue={{ label: zoomedMeta.tissueLabel || zoomedMeta.tissueId, data: mapData[zoomedMeta.id].data, width: zoomedMeta.width, height: zoomedMeta.height, vmax: zoomedMeta.vmax }}
+    tissue={{ label: zoomedMeta.tissueLabel || zoomedMeta.tissueId, data: mapData[zoomedMeta.id].data, mask: mapData[zoomedMeta.id].mask, width: zoomedMeta.width, height: zoomedMeta.height, vmax: zoomedMeta.vmax }}
     dispMin={0}
     dispMax={1}
     invertColors={false}
