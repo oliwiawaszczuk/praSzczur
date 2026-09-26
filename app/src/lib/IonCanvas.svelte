@@ -11,8 +11,9 @@
     invertColors?: boolean;
     showColorbar?: boolean;
     showVmax?: boolean;
+    compact?: boolean;
   }
-  let { tissue = null, loading = false, dispMin = 0, dispMax = 1, accentColor = "", invertColors = false, showColorbar = true, showVmax = true }: Props = $props();
+  let { tissue = null, loading = false, dispMin = 0, dispMax = 1, accentColor = "", invertColors = false, showColorbar = true, showVmax = true, compact = false }: Props = $props();
 
   let ionCanvas: HTMLCanvasElement | undefined = $state();
   let barCanvas:  HTMLCanvasElement | undefined = $state();
@@ -71,7 +72,7 @@
   {#if loading}
     <div class="shimmer"></div>
   {:else if tissue}
-    <div class="image-area">
+    <div class="image-area" class:compact>
       <canvas bind:this={ionCanvas} class="ion-canvas"></canvas>
 
       {#if showColorbar}
@@ -130,6 +131,10 @@
     align-items: stretch;
     overflow: hidden;
     padding: 28px 6px 22px 6px;
+  }
+
+  .image-area.compact {
+    padding: 2px;
   }
 
   .ion-canvas {

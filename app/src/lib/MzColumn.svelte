@@ -2,11 +2,14 @@
   import IonCanvas from "./IonCanvas.svelte";
   import DualRange from "./DualRange.svelte";
   import type { TissueImage } from "./api.js";
-  import { datasets, activeDatasetId, sanitizeDatasetId, RAW_DATASET_ID } from "$lib/datasets.svelte";
+  import { datasets, activeDatasetId, sanitizeDatasetId, datasetLabel, RAW_DATASET_ID } from "$lib/datasets.svelte";
   import { type MzGroup, updateGroup, runGroupQuery, resultFor, toggleSelected, isSelected } from "./mzGroups.svelte";
+  import { savePixelMap } from "./savedPixelMaps.svelte";
+  import PixelMapZoomModal from "./PixelMapZoomModal.svelte";
 
   interface Props {
     group: MzGroup;
+    groupIndex?: number;
     mzMin?: number;
     mzMax?: number;
     tissueIds?: string[];
@@ -16,6 +19,7 @@
 
   let {
     group,
+    groupIndex = 0,
     mzMin = 0,
     mzMax = Infinity,
     tissueIds = [],
@@ -82,6 +86,38 @@
     const custom = tissueLabels[tid];
     return custom ? { ...t, label: custom } : t;
   }
+
+  let savedFlash = $state<Set<string>>(new Set());
+
+  async function onSave(e: MouseEvent, tid: string) {
+    e.stopPropagation();
+    const img = tissues?.[tid];
+    if (!img || group.mz === null) return;
+    const label = tissueLabels[tid] ?? img.label;
+    try {
+      await savePixelMap({
+        name: `${label} · ${new Date().toLocaleString("pl-PL")}`,
+        tissueId: tid,
+        tissueLabel: label,
+        width: img.width,
+        height: img.height,
+        vmax: img.vmax,
+        mode: "single",
+        sources: [{ groupIndex, mz: group.mz, tol: group.tol, datasetId: group.dataset, datasetLabel: datasetLabel(group.dataset) }],
+        data: img.data,
+      });
+      savedFlash = new Set(savedFlash).add(tid);
+      setTimeout(() => { const next = new Set(savedFlash); next.delete(tid); savedFlash = next; }, 1000);
+    } catch {
+      // cichy błąd — przycisk po prostu nie pokaże ✓
+    }
+  }
+
+  let zoomedTid = $state<string | null>(null);
+  function onZoom(e: MouseEvent, tid: string) {
+    e.stopPropagation();
+    zoomedTid = tid;
+  }
 </script>
 
 <div class="col-body">
@@ -145,6 +181,17 @@
           onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSelected(group.id, tid); } }}
           title="Kliknij, aby zaznaczyć/odznaczyć tkankę do łączenia"
         >
+          {#if isSelected(group.id, tid)}
+            <span class="selected-badge">✓ zaznaczona</span>
+          {/if}
+          {#if tissues?.[tid]}
+            <div class="card-actions">
+              <button class="card-icon-btn" onclick={(e) => onZoom(e, tid)} title="Powiększ">⤢</button>
+              <button class="card-icon-btn" onclick={(e) => onSave(e, tid)} title="Zapisz tę mapę pikseli">
+                {savedFlash.has(tid) ? "✓" : "💾"}
+              </button>
+            </div>
+          {/if}
           <IonCanvas
             tissue={withLabel(tid, tissues?.[tid] ?? null)}
             {loading}
@@ -154,12 +201,23 @@
             invertColors={invert}
             showColorbar={false}
             showVmax={false}
+            compact
           />
         </div>
       {/each}
     {/if}
   </div>
 </div>
+
+{#if zoomedTid}
+  <PixelMapZoomModal
+    tissue={withLabel(zoomedTid, tissues?.[zoomedTid] ?? null)}
+    {dispMin}
+    {dispMax}
+    invertColors={invert}
+    onclose={() => (zoomedTid = null)}
+  />
+{/if}
 
 <style>
   .col-body {
@@ -280,6 +338,7 @@
   }
 
   .tissue-card {
+    position: relative;
     height: 230px;
     flex-shrink: 0;
     display: flex;
@@ -290,8 +349,53 @@
     transition: box-shadow 0.15s;
   }
   .tissue-card:hover { box-shadow: 0 0 0 2px rgba(255,201,81,0.25); }
-  .tissue-card.selected { box-shadow: 0 0 0 2px #ffc951, 0 0 16px rgba(255,201,81,0.25); }
+  .tissue-card.selected {
+    box-shadow: 0 0 0 3px #ffc951, 0 0 28px rgba(255,201,81,0.55);
+    background: rgba(255,201,81,0.1);
+  }
   .tissue-card :global(.card) { flex: 1; min-height: 0; }
+
+  .selected-badge {
+    position: absolute;
+    top: 6px;
+    left: 8px;
+    z-index: 3;
+    background: #ffc951;
+    color: #1a1a1a;
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 3px 7px;
+    border-radius: 5px;
+    box-shadow: 0 2px 8px rgba(255,201,81,0.4);
+  }
+
+  .card-actions {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    z-index: 3;
+    display: flex;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .tissue-card:hover .card-actions { opacity: 1; }
+
+  .card-icon-btn {
+    background: rgba(0,0,0,0.5);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 6px;
+    color: #f0f0f0;
+    font-size: 0.78rem;
+    line-height: 1;
+    padding: 4px 6px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .card-icon-btn:hover { border-color: rgba(255,201,81,0.5); background: rgba(0,0,0,0.7); }
 
   .col-notice {
     color: rgba(255,255,255,0.28);

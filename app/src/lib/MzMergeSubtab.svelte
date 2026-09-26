@@ -1,14 +1,15 @@
 <script lang="ts">
   import IonCanvas from "./IonCanvas.svelte";
-  import { mergedResults, currentCombineMode, setCombineMode } from "./mzGroups.svelte";
+  import PixelMapZoomModal from "./PixelMapZoomModal.svelte";
+  import { mergedResults, currentCombineMode, setCombineMode, type MergedTissueResult } from "./mzGroups.svelte";
   import { datasetLabel } from "$lib/datasets.svelte";
+  import { savePixelMap } from "./savedPixelMaps.svelte";
   import type { CombineMode } from "./tissueMerge";
 
   interface Props {
-    onback?: () => void;
     tissueLabels?: Record<string, string>;
   }
-  let { onback, tissueLabels = {} }: Props = $props();
+  let { tissueLabels = {} }: Props = $props();
 
   const MODES: { key: CombineMode; label: string }[] = [
     { key: "mean",     label: "Średnia" },
@@ -22,11 +23,40 @@
   function labelFor(tissueId: string): string {
     return tissueLabels[tissueId] ?? tissueId;
   }
+
+  let nameDrafts = $state<Record<string, string>>({});
+  function nameFor(r: MergedTissueResult): string {
+    return nameDrafts[r.tissueId] ?? labelFor(r.tissueId);
+  }
+
+  let savedFlash = $state<Set<string>>(new Set());
+
+  async function onSave(r: MergedTissueResult) {
+    try {
+      await savePixelMap({
+        name: nameFor(r),
+        tissueId: r.tissueId,
+        tissueLabel: labelFor(r.tissueId),
+        width: r.width,
+        height: r.height,
+        vmax: r.vmax,
+        mode: r.mode,
+        sources: r.sources.map((s) => ({ groupIndex: s.groupIndex, mz: s.mz, tol: s.tol, datasetId: s.dataset, datasetLabel: datasetLabel(s.dataset) })),
+        data: r.data,
+      });
+      savedFlash = new Set(savedFlash).add(r.tissueId);
+      setTimeout(() => { const next = new Set(savedFlash); next.delete(r.tissueId); savedFlash = next; }, 1000);
+    } catch {
+      // cichy błąd — przycisk po prostu nie pokaże ✓
+    }
+  }
+
+  let zoomedId = $state<string | null>(null);
+  const zoomedResult = $derived(results.find((r) => r.tissueId === zoomedId) ?? null);
 </script>
 
 <div class="merge-wrap">
   <div class="merge-toolbar">
-    <button class="btn-back" onclick={() => onback?.()}>← Wróć do grup</button>
     <div class="mode-field">
       <label class="field-label" for="combine-mode-select">Sposób łączenia</label>
       <select id="combine-mode-select" class="ds-select" value={currentCombineMode()} onchange={(e) => setCombineMode((e.target as HTMLSelectElement).value as CombineMode)}>
@@ -47,16 +77,26 @@
       {#each results as r (r.tissueId)}
         <div class="merge-card">
           <div class="merge-card-head">
-            <span class="merge-tissue-name">{labelFor(r.tissueId)}</span>
-            {#if r.sources.length === 1}
-              <span class="merge-single-badge">pojedyncza, niepołączona</span>
-            {:else}
-              <span class="merge-count-badge">{r.sources.length} źródła</span>
-            {/if}
+            <input
+              class="merge-name-input"
+              value={nameFor(r)}
+              oninput={(e) => (nameDrafts = { ...nameDrafts, [r.tissueId]: (e.target as HTMLInputElement).value })}
+            />
+            <div class="merge-card-head-right">
+              {#if r.sources.length === 1}
+                <span class="merge-single-badge">pojedyncza, niepołączona</span>
+              {:else}
+                <span class="merge-count-badge">{r.sources.length} źródła</span>
+              {/if}
+              <button class="card-icon-btn" onclick={() => (zoomedId = r.tissueId)} title="Powiększ">⤢</button>
+              <button class="card-icon-btn" onclick={() => onSave(r)} title="Zapisz tę mapę pikseli">
+                {savedFlash.has(r.tissueId) ? "✓" : "💾"}
+              </button>
+            </div>
           </div>
           <div class="merge-sources">
             {#each r.sources as s, i (i)}
-              <span class="source-tag">Grupa {s.groupIndex + 1} · m/z {s.mz.toFixed(2)} ±{s.tol} · {datasetLabel(s.dataset)}</span>
+              <span class="source-tag">m/z {s.mz.toFixed(2)} ±{s.tol} · {datasetLabel(s.dataset)}</span>
             {/each}
           </div>
           <div class="merge-canvas">
@@ -67,6 +107,7 @@
               invertColors={false}
               showColorbar={false}
               showVmax={false}
+              compact
             />
           </div>
         </div>
@@ -74,6 +115,16 @@
     </div>
   {/if}
 </div>
+
+{#if zoomedResult}
+  <PixelMapZoomModal
+    tissue={{ label: labelFor(zoomedResult.tissueId), data: zoomedResult.data, width: zoomedResult.width, height: zoomedResult.height, vmax: zoomedResult.vmax }}
+    dispMin={0}
+    dispMax={1}
+    invertColors={false}
+    onclose={() => (zoomedId = null)}
+  />
+{/if}
 
 <style>
   .merge-wrap {
@@ -93,20 +144,6 @@
     flex-shrink: 0;
     margin-bottom: 16px;
   }
-
-  .btn-back {
-    background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 8px;
-    color: rgba(255,255,255,0.7);
-    font-size: 0.76rem;
-    font-weight: 600;
-    padding: 9px 14px;
-    cursor: pointer;
-    font-family: inherit;
-    transition: border-color 0.15s, color 0.15s;
-  }
-  .btn-back:hover { border-color: rgba(255,201,81,0.4); color: #ffc951; }
 
   .mode-field { width: 200px; }
 
@@ -176,13 +213,45 @@
     gap: 8px;
   }
 
-  .merge-tissue-name {
+  .merge-card-head-right {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .card-icon-btn {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px;
+    color: #f0f0f0;
+    font-size: 0.72rem;
+    line-height: 1;
+    padding: 4px 6px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .card-icon-btn:hover { border-color: rgba(255,201,81,0.5); background: rgba(255,201,81,0.1); }
+
+  .merge-name-input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
     font-size: 0.78rem;
     font-weight: 700;
     letter-spacing: 0.04em;
     color: #ffc951;
     text-transform: uppercase;
+    font-family: inherit;
+    padding: 4px 6px;
+    margin: -4px 0 -4px -6px;
+    outline: none;
+    transition: border-color 0.15s, background 0.15s;
   }
+  .merge-name-input:hover, .merge-name-input:focus { border-color: rgba(255,201,81,0.3); background: rgba(255,255,255,0.03); }
 
   .merge-single-badge, .merge-count-badge {
     font-size: 0.58rem;

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import MzColumn from "./MzColumn.svelte";
-  import MzMergeSubtab from "./MzMergeSubtab.svelte";
   import { allGroups, loadWieleMz, addGroup, removeGroup, reorderGroups } from "./mzGroups.svelte";
 
   interface Props {
@@ -22,7 +21,6 @@
     tissueColors = {},
   }: Props = $props();
 
-  let innerView = $state<"grupy" | "laczenie">("grupy");
   let draggedIndex  = $state<number | null>(null);
   let dragOverIndex = $state<number | null>(null);
 
@@ -60,85 +58,46 @@
   }
 </script>
 
-{#if innerView === "laczenie"}
-  <MzMergeSubtab onback={() => (innerView = "grupy")} {tissueLabels} />
-{:else}
-  <div class="wmz-shell">
-    <div class="wmz-toolbar">
-      <button class="wmz-merge-btn" onclick={() => (innerView = "laczenie")}>Łączenie →</button>
+<div class="wmz-wrap">
+  {#each groups as group, i (group.id)}
+    <div
+      class="wmz-col"
+      class:drag-over={dragOverIndex === i && draggedIndex !== i}
+      class:dragging={draggedIndex === i}
+      ondragover={(e) => onDragOver(e, i)}
+      ondragleave={() => onDragLeave(i)}
+      ondrop={(e) => onDrop(e, i)}
+      role="group"
+    >
+      <div class="wmz-col-header">
+        <span
+          class="wmz-handle"
+          draggable="true"
+          ondragstart={(e) => onDragStart(e, i)}
+          ondragend={onDragEnd}
+          title="Przeciągnij, aby zmienić kolejność"
+          role="button"
+          tabindex="0"
+        >⠿</span>
+        <span class="wmz-col-title">Grupa {i + 1}</span>
+        <button class="wmz-remove" onclick={() => removeGroup(group.id)} title="Usuń kolumnę">×</button>
+      </div>
+      <MzColumn
+        {group}
+        groupIndex={i}
+        {mzMin} {mzMax}
+        {tissueIds} {tissueLabels} {tissueColors}
+      />
     </div>
-    <div class="wmz-wrap">
-      {#each groups as group, i (group.id)}
-        <div
-          class="wmz-col"
-          class:drag-over={dragOverIndex === i && draggedIndex !== i}
-          class:dragging={draggedIndex === i}
-          ondragover={(e) => onDragOver(e, i)}
-          ondragleave={() => onDragLeave(i)}
-          ondrop={(e) => onDrop(e, i)}
-          role="group"
-        >
-          <div class="wmz-col-header">
-            <span
-              class="wmz-handle"
-              draggable="true"
-              ondragstart={(e) => onDragStart(e, i)}
-              ondragend={onDragEnd}
-              title="Przeciągnij, aby zmienić kolejność"
-              role="button"
-              tabindex="0"
-            >⠿</span>
-            <span class="wmz-col-title">Grupa {i + 1}</span>
-            <button class="wmz-remove" onclick={() => removeGroup(group.id)} title="Usuń kolumnę">×</button>
-          </div>
-          <MzColumn
-            {group}
-            {mzMin} {mzMax}
-            {tissueIds} {tissueLabels} {tissueColors}
-          />
-        </div>
-      {/each}
+  {/each}
 
-      <button class="wmz-add" onclick={() => addGroup(tolDefault)}>
-        <span class="wmz-add-icon">+</span>
-        <span class="wmz-add-label">Dodaj m/z</span>
-      </button>
-    </div>
-  </div>
-{/if}
+  <button class="wmz-add" onclick={() => addGroup(tolDefault)}>
+    <span class="wmz-add-icon">+</span>
+    <span class="wmz-add-label">Dodaj m/z</span>
+  </button>
+</div>
 
 <style>
-  .wmz-shell {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .wmz-toolbar {
-    display: flex;
-    justify-content: flex-end;
-    padding: 12px 16px 0;
-    flex-shrink: 0;
-  }
-
-  .wmz-merge-btn {
-    background: rgba(255,201,81,0.12);
-    border: 1px solid rgba(255,201,81,0.4);
-    border-radius: 8px;
-    color: #ffc951;
-    font-size: 0.76rem;
-    font-weight: 700;
-    padding: 8px 14px;
-    cursor: pointer;
-    font-family: inherit;
-    transition: background 0.15s, box-shadow 0.15s;
-  }
-  .wmz-merge-btn:hover {
-    background: rgba(255,201,81,0.2);
-    box-shadow: 0 2px 10px rgba(255,201,81,0.2);
-  }
-
   .wmz-wrap {
     flex: 1;
     min-height: 0;

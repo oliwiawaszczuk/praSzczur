@@ -10,6 +10,8 @@
   import ZestawDanych from "$lib/ZestawDanych.svelte";
   import Widma from "$lib/Widma.svelte";
   import WieleMz from "$lib/WieleMz.svelte";
+  import MzMergeSubtab from "$lib/MzMergeSubtab.svelte";
+  import MzSavedMapsSubtab from "$lib/MzSavedMapsSubtab.svelte";
   import PreWidma from "$lib/PreWidma.svelte";
   import WorkspaceSettings from "$lib/WorkspaceSettings.svelte";
   import Tablica from "$lib/Tablica.svelte";
@@ -18,19 +20,26 @@
   import "@fontsource/jetbrains-mono/600.css";
 
   type AppState = "booting" | "ready" | "error";
-  type Tab = "dane" | "zestawDanych" | "mz" | "wieleMz" | "preprocessing" | "widma" | "prewidma" | "segmentacja" | "tablica" | "settings";
+  type Tab = "dane" | "zestawDanych" | "mz" | "preprocessing" | "widma" | "prewidma" | "segmentacja" | "tablica" | "settings";
+  type MzSubTab = "mz" | "grupy" | "laczenie" | "zapisane";
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "dane",          label: "Dane" },
     { key: "zestawDanych",  label: "Zestaw danych" },
     { key: "mz",            label: "m/z" },
-    { key: "wieleMz",       label: "Wiele m/z" },
     { key: "widma",         label: "Widma" },
     { key: "prewidma",      label: "preWidma" },
     { key: "preprocessing", label: "Preprocessing" },
     { key: "segmentacja",   label: "Segmentacja" },
     { key: "tablica",       label: "Tablica" },
     { key: "settings",   label: "Ustawienia" },
+  ];
+
+  const MZ_SUBTABS: { key: MzSubTab; label: string }[] = [
+    { key: "mz",       label: "m/z" },
+    { key: "grupy",    label: "Grupy" },
+    { key: "laczenie", label: "Łączenie" },
+    { key: "zapisane", label: "Zapisane" },
   ];
 
   let state:       AppState = $state("booting");
@@ -42,6 +51,7 @@
   let dispMin      = $state(0);
   let dispMax      = $state(1);
   let activeTab: Tab   = $state("dane");
+  let mzSubTab: MzSubTab = $state("mz");
   let mzMin            = $state(0);
   let mzMax            = $state(Infinity);
   let tissueIds        = $state<string[]>([]);
@@ -65,6 +75,7 @@
 
   // Persist to workspace (only write, browser-only)
   $effect(() => { if (restored) wsSet("app_activeTab", activeTab); });
+  $effect(() => { if (restored) wsSet("app_mzSubTab", mzSubTab); });
   $effect(() => { if (restored && lastMz !== null) wsSet("app_lastMz", lastMz); });
   $effect(() => { if (restored) wsSet("app_lastTol", lastTol); });
   $effect(() => { if (restored) wsSet("app_dispMin", dispMin); });
@@ -80,6 +91,7 @@
 
       // Load all persisted state — dopiero po wczytaniu workspace
       activeTab    = wsGet<Tab>("app_activeTab", "dane");
+      mzSubTab     = wsGet<MzSubTab>("app_mzSubTab", "mz");
       tissueLabels = wsGet("dane_tissueLabels", {});
       lastMz       = wsGet("app_lastMz", null);
       dispMin      = wsGet("app_dispMin", 0);
@@ -209,6 +221,21 @@
         {/each}
       </div>
 
+      <!-- Podzakładki zakładki m/z (m/z / Grupy / Łączenie / Zapisane) -->
+      {#if activeTab === "mz"}
+        <div class="subtabbar">
+          {#each MZ_SUBTABS as st}
+            <button
+              class="subtab"
+              class:active={mzSubTab === st.key}
+              onclick={() => { mzSubTab = st.key; }}
+            >
+              {st.label}
+            </button>
+          {/each}
+        </div>
+      {/if}
+
       <!-- Content zakładki — zawsze zamontowane, ukrywane przez CSS -->
       <main class="content" class:hidden={activeTab !== "dane"}>
         <DaneTab
@@ -220,7 +247,7 @@
       <main class="content" class:hidden={activeTab !== "zestawDanych"}>
         <ZestawDanych visible={activeTab === "zestawDanych"} />
       </main>
-      <main class="content content-mz" class:hidden={activeTab !== "mz"}>
+      <main class="content content-mz" class:hidden={!(activeTab === "mz" && mzSubTab === "mz")}>
         <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} error={queryError} {tissueLabels} {tissueColors} {invertColors} />
         <div class="sidebar-panel">
           <Sidebar
@@ -238,8 +265,14 @@
           />
         </div>
       </main>
-      <main class="content" class:hidden={activeTab !== "wieleMz"}>
+      <main class="content" class:hidden={!(activeTab === "mz" && mzSubTab === "grupy")}>
         <WieleMz {mzMin} {mzMax} tolDefault={defaultTol} {tissueIds} {tissueLabels} {tissueColors} />
+      </main>
+      <main class="content" class:hidden={!(activeTab === "mz" && mzSubTab === "laczenie")}>
+        <MzMergeSubtab {tissueLabels} />
+      </main>
+      <main class="content" class:hidden={!(activeTab === "mz" && mzSubTab === "zapisane")}>
+        <MzSavedMapsSubtab />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "preprocessing"}>
         <div class="tab-placeholder">
@@ -450,6 +483,43 @@
     color: #ffc951;
     border-color: rgba(255,255,255,0.1);
     box-shadow: 0 -2px 8px rgba(255,201,81,0.1);
+  }
+
+  /* Pasek podzakładek (np. m/z: m/z / Grupy / Łączenie / Zapisane) — celowo
+     mniej wyrazisty niż główne zakładki, żeby wizualnie było jasne, że to
+     nawigacja drugiego poziomu wewnątrz jednej zakładki. */
+  .subtabbar {
+    display: flex;
+    gap: 4px;
+    padding: 7px 16px;
+    background: #2a2a2a;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    flex-shrink: 0;
+  }
+
+  .subtab {
+    padding: 4px 12px;
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    font-family: "JetBrains Mono", monospace;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: rgba(255,255,255,0.35);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+
+  .subtab:hover:not(.active) {
+    background: rgba(255,255,255,0.05);
+    color: rgba(255,255,255,0.6);
+  }
+
+  .subtab.active {
+    background: rgba(255,201,81,0.1);
+    border-color: rgba(255,201,81,0.3);
+    color: #ffc951;
   }
 
   .hidden { display: none !important; }

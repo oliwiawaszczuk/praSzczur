@@ -187,6 +187,46 @@ def _ensure_datasets_registry(wid: str) -> dict:
     return reg
 
 
+# ── Zapisane mapy pikseli (Wiele m/z → zapis pojedynczej/połączonej tkanki) ──
+# Każdy workspace ma własny rejestr zapisanych map pikseli — metadane w
+# registry.json (bez danych pikselowych, żeby lista do galerii była lekka),
+# pełne dane (w tym `data`) w osobnym pliku <id>.json per zapis.
+# Struktura: workspaces/<wid>/pixel_maps/registry.json + pixel_maps/<id>.json
+
+
+def _pixel_maps_root(wid: str) -> Path:
+    return _workspace_dir(wid) / "pixel_maps"
+
+
+def _pixel_maps_registry_file(wid: str) -> Path:
+    return _pixel_maps_root(wid) / "registry.json"
+
+
+def _pixel_map_data_file(pmid: str, wid: str) -> Path:
+    return _pixel_maps_root(wid) / f"{pmid}.json"
+
+
+def _find_pixel_map(reg: dict, pmid: str) -> dict | None:
+    return next((m for m in reg["maps"] if m["id"] == pmid), None)
+
+
+def _ensure_pixel_maps_registry(wid: str) -> dict:
+    f = _pixel_maps_registry_file(wid)
+    try:
+        if f.exists():
+            reg = json.loads(f.read_text())
+            if "maps" in reg:
+                return reg
+    except Exception:
+        pass
+    return {"maps": []}
+
+
+def _save_pixel_maps_registry(reg: dict, wid: str) -> None:
+    _pixel_maps_root(wid).mkdir(parents=True, exist_ok=True)
+    _pixel_maps_registry_file(wid).write_text(json.dumps(reg, indent=2))
+
+
 def _ensure_default_workspace() -> dict:
     """Wczytuje registry; jeśli brak workspace'ów, tworzy domyślny i migruje
     ewentualne stare dane z data/processed/ (poprzedni, jednoworkspace'owy model)."""
@@ -1846,6 +1886,82 @@ def put_dataset_graph(wid: str, did: str, body: dict) -> dict:
     ds["graph"] = body
     ds["updatedAt"] = _now_iso()
     _save_datasets_registry(dreg, wid)
+    return {"ok": True}
+
+
+# ── Zapisane mapy pikseli (Wiele m/z) ───────────────────────────────────────
+
+@app.get("/workspaces/{wid}/pixel_maps")
+def list_pixel_maps(wid: str) -> dict:
+    reg = _load_registry()
+    if not _find_ws(reg, wid):
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    preg = _ensure_pixel_maps_registry(wid)
+    return {"maps": preg["maps"]}
+
+
+@app.post("/workspaces/{wid}/pixel_maps")
+def create_pixel_map(wid: str, body: dict) -> dict:
+    reg = _load_registry()
+    if not _find_ws(reg, wid):
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    preg = _ensure_pixel_maps_registry(wid)
+    pmid = uuid.uuid4().hex[:12]
+    now = _now_iso()
+    meta = {
+        "id": pmid,
+        "name": (body.get("name") or "Zapisana mapa").strip() or "Zapisana mapa",
+        "tissueId": body.get("tissueId", ""),
+        "tissueLabel": body.get("tissueLabel", ""),
+        "width": body.get("width", 0),
+        "height": body.get("height", 0),
+        "vmax": body.get("vmax", 0),
+        "mode": body.get("mode", "single"),
+        "sources": body.get("sources", []),
+        "createdAt": now, "updatedAt": now,
+    }
+    preg["maps"].append(meta)
+    _save_pixel_maps_registry(preg, wid)
+    full = {**meta, "data": body.get("data", [])}
+    _pixel_maps_root(wid).mkdir(parents=True, exist_ok=True)
+    _pixel_map_data_file(pmid, wid).write_text(json.dumps(full))
+    return meta
+
+
+@app.get("/workspaces/{wid}/pixel_maps/{pmid}")
+def get_pixel_map(wid: str, pmid: str) -> dict:
+    """Zwraca pełny rekord zapisanej mapy (w tym `data`) — wołane leniwie per
+    karta w galerii "Zapisane", nie przy samej liście (żeby lista była lekka)."""
+    preg = _ensure_pixel_maps_registry(wid)
+    if not _find_pixel_map(preg, pmid):
+        raise HTTPException(404, f"Mapa '{pmid}' nie istnieje")
+    f = _pixel_map_data_file(pmid, wid)
+    if not f.exists():
+        raise HTTPException(404, f"Dane mapy '{pmid}' nie istnieją")
+    return json.loads(f.read_text())
+
+
+@app.put("/workspaces/{wid}/pixel_maps/{pmid}")
+def rename_pixel_map(wid: str, pmid: str, body: dict) -> dict:
+    preg = _ensure_pixel_maps_registry(wid)
+    m = _find_pixel_map(preg, pmid)
+    if not m:
+        raise HTTPException(404, f"Mapa '{pmid}' nie istnieje")
+    if "name" in body and body["name"].strip():
+        m["name"] = body["name"].strip()
+    m["updatedAt"] = _now_iso()
+    _save_pixel_maps_registry(preg, wid)
+    return m
+
+
+@app.delete("/workspaces/{wid}/pixel_maps/{pmid}")
+def delete_pixel_map(wid: str, pmid: str) -> dict:
+    preg = _ensure_pixel_maps_registry(wid)
+    if not _find_pixel_map(preg, pmid):
+        raise HTTPException(404, f"Mapa '{pmid}' nie istnieje")
+    preg["maps"] = [m for m in preg["maps"] if m["id"] != pmid]
+    _save_pixel_maps_registry(preg, wid)
+    _pixel_map_data_file(pmid, wid).unlink(missing_ok=True)
     return {"ok": True}
 
 
