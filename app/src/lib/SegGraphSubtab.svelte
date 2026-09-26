@@ -2,44 +2,43 @@
   import { onMount } from "svelte";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
   import ConfirmModal from "$lib/ConfirmModal.svelte";
-  import DualRange from "$lib/DualRange.svelte";
-  import CurveEditor from "$lib/CurveEditor.svelte";
   import IonCanvas from "$lib/IonCanvas.svelte";
   import PixelMapZoomModal from "$lib/PixelMapZoomModal.svelte";
+  import SegLabelCanvas from "$lib/SegLabelCanvas.svelte";
   import type { TissueImage } from "$lib/api.js";
   import { maxOf } from "$lib/tissueMerge";
+  import { COMBINE_MODE_LABELS } from "$lib/mzgraphnodes";
   import {
     savedMapsList, loadSavedMaps, savedMapsLoaded, fetchSavedMapData, savePixelMap,
     type SavedPixelMap,
   } from "$lib/savedPixelMaps.svelte";
   import {
-    MZ_NODE_TYPE_LIST, MZ_NODE_TYPES, MZ_CATEGORY_ORDER, MZ_CATEGORY_LABELS,
-    defaultMzGraph, mzDefaultParams, makeMzId, evaluateMzNode, wouldCreateCycle,
-    COMBINE_MODE_LABELS, COMBINE_MODE_LIST, DEFAULT_CURVE_POINTS, computeHistogram,
-    type MzGraph, type MzGraphNode, type MzGraphEdge, type MzGraphViewport, type MzEvalResult,
-    type MzCurvePoint, type CombineModeExt,
-  } from "$lib/mzgraphnodes";
+    SEG_NODE_TYPE_LIST, SEG_NODE_TYPES, SEG_CATEGORY_ORDER, SEG_CATEGORY_LABELS, SEG_PALETTE,
+    defaultSegGraph, segDefaultParams, makeSegId, evaluateSegNode, wouldCreateSegCycle, runKmeans,
+    type SegGraph, type SegGraphNode, type SegGraphEdge, type SegGraphViewport,
+    type SegMapValue, type SegPortKind,
+  } from "$lib/segnodes";
 
   interface Props {
-    /** Czy ta podzakładka jest aktualnie widoczna — pozwala przeliczyć
-     * auto-fit widoku dopiero gdy faktycznie stanie się widoczna (patrz
-     * ten sam wzorzec w PreNodesEditor.svelte). */
+    /** Czy ta podzakładka jest aktualnie widoczna — pozwala przeliczyć auto-fit
+     * widoku dopiero gdy faktycznie stanie się widoczna (ten sam wzorzec co
+     * MzGraphSubtab.svelte / PreNodesEditor.svelte). */
     visible?: boolean;
   }
   let { visible = true }: Props = $props();
 
   onMount(async () => { if (!savedMapsLoaded()) await loadSavedMaps(); });
 
-  const LS_GRAPH = "mzgraph_graph";
+  const LS_GRAPH = "seggraph_graph";
 
-  function sanitize(g: MzGraph): MzGraph {
+  function sanitize(g: SegGraph): SegGraph {
     if (!g.nodes) g.nodes = [];
     if (!g.edges) g.edges = [];
     if (!g.viewport) g.viewport = { x: 0, y: 0, zoom: 1 };
     return g;
   }
 
-  let graph = $state<MzGraph>(sanitize(wsGet<MzGraph>(LS_GRAPH, defaultMzGraph())));
+  let graph = $state<SegGraph>(sanitize(wsGet<SegGraph>(LS_GRAPH, defaultSegGraph())));
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   function persist() {
@@ -77,24 +76,26 @@
   }
 
   function evalNode(nodeId: string) {
-    return evaluateMzNode(graph, nodeId, mapData, savedMapExists);
+    return evaluateSegNode(graph, nodeId, mapData, savedMapExists);
   }
 
-  function resultTissue(r: MzEvalResult): TissueImage {
+  function resultTissue(r: SegMapValue): TissueImage {
     return { label: r.tissueLabel || r.tissueId, data: r.data, width: r.width, height: r.height, vmax: maxOf(r.data) };
   }
 
   let zoomTissue = $state<TissueImage | null>(null);
 
-  // ── Pan / zoom (identyczna matematyka co PreNodesEditor.svelte / BoardCanvas.svelte) ──
+  const savedMapModeLabel: Record<string, string> = { ...COMBINE_MODE_LABELS, single: "pojedyncza", segment: "segment" };
+
+  // ── Pan / zoom (identyczna matematyka co MzGraphSubtab.svelte) ──────────
   let container = $state<HTMLDivElement | null>(null);
   let viewport = $derived(graph.viewport);
 
-  function setViewport(v: MzGraphViewport) {
+  function setViewport(v: SegGraphViewport) {
     graph = { ...graph, viewport: v };
     persist();
   }
-  function setViewportSilent(v: MzGraphViewport) {
+  function setViewportSilent(v: SegGraphViewport) {
     graph = { ...graph, viewport: v };
   }
 
@@ -128,23 +129,21 @@
   });
   const dotRadius = 1.3;
 
-  function nodeWidth(node: MzGraphNode): number {
+  function nodeWidth(node: SegGraphNode): number {
     if (node.type === "map_source") return 240;
-    if (node.type === "combine") return 240;
+    if (node.type === "kmeans") return 250;
+    if (node.type === "select_segments") return 230;
     if (node.type === "save_output") return 230;
-    if (node.type === "curve") return 230;
     return 210;
   }
 
   // Podgląd mapy pikseli w karcie node'a skaluje wysokość do rzeczywistego
-  // stosunku szerokości/wysokości tkanki (zamiast sztywnej wysokości) — inaczej
-  // przy tkankach o innym kształcie niż "domyślny" część obrazu była
-  // przycinana przez overflow:hidden (nie widać całej tkanki).
+  // stosunku szerokości/wysokości tkanki (ten sam wzorzec co MzGraphSubtab).
   const PREVIEW_MIN_H = 90;
   const PREVIEW_MAX_H = 320;
-  function previewHeight(node: MzGraphNode): number {
+  function previewHeight(node: SegGraphNode): number {
     const outcome = evalNode(node.id);
-    const w = nodeWidth(node) - 20; // szerokość treści karty (padding 10px z każdej strony)
+    const w = nodeWidth(node) - 20;
     if (outcome.ok && outcome.value.width > 0 && outcome.value.height > 0) {
       const ratio = outcome.value.height / outcome.value.width;
       return Math.max(PREVIEW_MIN_H, Math.min(PREVIEW_MAX_H, Math.round(w * ratio)));
@@ -152,18 +151,21 @@
     return 130;
   }
 
-  function nodeHeight(node: MzGraphNode): number {
+  function nodeHeight(node: SegGraphNode): number {
     let h = 30 + 20; // header + body padding
     if (node.type === "map_source") {
-      h += 30 + 22; // dropdown + toggle
+      h += 30 + 22;
       if (node.expanded) h += 90;
-    } else if (node.type === "intensity_range") {
-      h += 50;
-    } else if (node.type === "curve") {
-      h += 110 + 20; // edytor krzywej + podpis
-    } else if (node.type === "combine") {
+    } else if (node.type === "kmeans") {
+      h += 34; // k slider
       const n = graph.edges.filter((e) => e.to === node.id).length;
-      h += 34 + Math.max(1, n) * 24;
+      h += Math.max(1, n) * 24 + 10; // lista podłączonych map
+      h += 34 + 16; // przycisk Przetwórz + status
+    } else if (node.type === "select_segments") {
+      const inEdge = graph.edges.find((e) => e.to === node.id);
+      const inOutcome = inEdge ? evalNode(inEdge.from) : null;
+      const kCount = inOutcome?.ok && inOutcome.value.kind === "segmentacja" ? inOutcome.value.legend.length : 1;
+      h += Math.max(1, kCount) * 22 + 10;
     } else if (node.type === "save_output") {
       h += 30 + 34 + 16;
     }
@@ -224,7 +226,7 @@
   let dragStart = { x: 0, y: 0 };
   let dragNodeOrigin = { x: 0, y: 0 };
 
-  function onNodeHeaderPointerDown(e: PointerEvent, node: MzGraphNode) {
+  function onNodeHeaderPointerDown(e: PointerEvent, node: SegGraphNode) {
     if ((e.target as HTMLElement).closest(".node-info, .node-menu-trigger")) return;
     e.stopPropagation();
     dragNodeId = node.id;
@@ -245,19 +247,26 @@
     dragNodeId = null;
   }
 
-  // ── Połączenia ──────────────────────────────────────────────────
+  // ── Połączenia (porty mają "kind" — mapa/segmentacja — więc nie da się
+  // podłączyć segmentacji tam, gdzie oczekiwana jest mapa, i odwrotnie) ────
   interface DragConn { nodeId: string; port: "in" | "out"; x: number; y: number; }
   let connDrag = $state<DragConn | null>(null);
   let cursorWorld = $state<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  function portPos(node: MzGraphNode, port: "in" | "out"): { x: number; y: number } {
+  function portPos(node: SegGraphNode, port: "in" | "out"): { x: number; y: number } {
     const headerH = 30;
     return { x: node.x + (port === "in" ? 0 : nodeWidth(node)), y: node.y + headerH / 2 };
   }
 
-  function onPortPointerDown(e: PointerEvent, node: MzGraphNode, port: "in" | "out") {
+  function portKind(node: SegGraphNode, port: "in" | "out"): SegPortKind | undefined {
+    const def = SEG_NODE_TYPES[node.type];
+    if (!def) return undefined;
+    return port === "in" ? def.inputKind : def.outputKind;
+  }
+
+  function onPortPointerDown(e: PointerEvent, node: SegGraphNode, port: "in" | "out") {
     e.stopPropagation();
-    const def = MZ_NODE_TYPES[node.type];
+    const def = SEG_NODE_TYPES[node.type];
     if (port === "in" && !def?.multiInput) {
       // Blender-style: chwytanie za końcówkę już podłączonego (single) wejścia
       // odłącza istniejące połączenie i zaczyna ciągnąć je od strony źródła.
@@ -283,15 +292,16 @@
   }
 
   const CONNECT_RADIUS_SCREEN = 26;
-  function findNearestPort(pos: { x: number; y: number }, wantPort: "in" | "out", excludeNodeId: string) {
-    let best: MzGraphNode | null = null;
+  function findNearestPort(pos: { x: number; y: number }, wantPort: "in" | "out", excludeNodeId: string, wantKind?: SegPortKind) {
+    let best: SegGraphNode | null = null;
     let bestDist = CONNECT_RADIUS_SCREEN / viewport.zoom;
     for (const n of graph.nodes) {
       if (n.id === excludeNodeId) continue;
-      const def = MZ_NODE_TYPES[n.type];
+      const def = SEG_NODE_TYPES[n.type];
       if (!def) continue;
       if (wantPort === "in" && !def.hasInput) continue;
       if (wantPort === "out" && !def.hasOutput) continue;
+      if (wantKind && portKind(n, wantPort) !== wantKind) continue;
       const p = portPos(n, wantPort);
       const d = Math.hypot(p.x - pos.x, p.y - pos.y);
       if (d < bestDist) { bestDist = d; best = n; }
@@ -310,7 +320,9 @@
   function resolveConnection() {
     if (!connDrag) return;
     const wanted: "in" | "out" = connDrag.port === "out" ? "in" : "out";
-    const target = findNearestPort(cursorWorld, wanted, connDrag.nodeId);
+    const draggedNode = graph.nodes.find((n) => n.id === connDrag!.nodeId);
+    const wantKind = draggedNode ? portKind(draggedNode, connDrag.port) : undefined;
+    const target = findNearestPort(cursorWorld, wanted, connDrag.nodeId, wantKind);
     if (target) finishConnection(connDrag, { nodeId: target.id, port: wanted });
     connDrag = null;
   }
@@ -320,15 +332,15 @@
     if (a.port === b.port) return; // must be in+out
     const fromId = a.port === "out" ? a.nodeId : b.nodeId;
     const toId = a.port === "in" ? a.nodeId : b.nodeId;
-    if (wouldCreateCycle(graph, fromId, toId)) return;
+    if (wouldCreateSegCycle(graph, fromId, toId)) return;
     const targetNode = graph.nodes.find((n) => n.id === toId);
-    const targetDef = targetNode ? MZ_NODE_TYPES[targetNode.type] : undefined;
+    const targetDef = targetNode ? SEG_NODE_TYPES[targetNode.type] : undefined;
     if (targetDef?.multiInput) {
       if (graph.edges.some((e) => e.from === fromId && e.to === toId)) return; // no duplicate
-      graph.edges.push({ id: makeMzId("edge"), from: fromId, to: toId });
+      graph.edges.push({ id: makeSegId("edge"), from: fromId, to: toId });
     } else {
       graph.edges = graph.edges.filter((e) => e.to !== toId);
-      graph.edges.push({ id: makeMzId("edge"), from: fromId, to: toId });
+      graph.edges.push({ id: makeSegId("edge"), from: fromId, to: toId });
     }
     persist();
   }
@@ -343,7 +355,7 @@
     return `M ${from.x} ${from.y} C ${from.x + dx} ${from.y}, ${to.x - dx} ${to.y}, ${to.x} ${to.y}`;
   }
 
-  function nodePos(id: string): MzGraphNode | undefined {
+  function nodePos(id: string): SegGraphNode | undefined {
     return graph.nodes.find((n) => n.id === id);
   }
 
@@ -372,7 +384,7 @@
     paletteOpen = true;
   }
 
-  function onNodeContextMenu(e: MouseEvent, node: MzGraphNode) {
+  function onNodeContextMenu(e: MouseEvent, node: SegGraphNode) {
     e.preventDefault();
     e.stopPropagation();
     closeMenus();
@@ -388,26 +400,20 @@
   }
 
   function addNode(typeId: string) {
-    const node: MzGraphNode = {
-      id: makeMzId("node"),
+    const node: SegGraphNode = {
+      id: makeSegId("node"),
       type: typeId,
       x: palettePos.world.x,
       y: palettePos.world.y,
-      params: mzDefaultParams(typeId),
+      params: segDefaultParams(typeId),
     };
     if (typeId === "map_source") {
       node.savedMapId = savedMapsList()[0]?.id;
       node.expanded = false;
       ensureMapLoaded(node.savedMapId);
     }
-    if (typeId === "intensity_range") {
-      node.params = { min: 0, max: 100 };
-    }
-    if (typeId === "curve") {
-      node.curvePoints = DEFAULT_CURVE_POINTS.map((p) => ({ ...p }));
-    }
-    if (typeId === "combine") {
-      node.params = { mode: "mean" };
+    if (typeId === "select_segments") {
+      node.selectedLabels = [];
     }
     if (typeId === "save_output") {
       node.saveName = "";
@@ -452,7 +458,7 @@
   }
 
   let filteredTypes = $derived(
-    MZ_NODE_TYPE_LIST.filter((t) => {
+    SEG_NODE_TYPE_LIST.filter((t) => {
       const q = paletteFilter.trim().toLowerCase();
       if (!q) return true;
       return t.label.toLowerCase().includes(q) || t.description.toLowerCase().includes(q);
@@ -460,7 +466,7 @@
   );
 
   // ── Pola specyficzne dla typów węzłów ──────────────────────────────
-  function setNodeSavedMap(node: MzGraphNode, id: string) {
+  function setNodeSavedMap(node: SegGraphNode, id: string) {
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
     graph.nodes[idx] = { ...graph.nodes[idx], savedMapId: id };
@@ -468,41 +474,36 @@
     ensureMapLoaded(id);
   }
 
-  function toggleExpanded(node: MzGraphNode) {
+  function toggleExpanded(node: SegGraphNode) {
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
     graph.nodes[idx] = { ...graph.nodes[idx], expanded: !graph.nodes[idx].expanded };
     persist();
   }
 
-  function setIntensityRange(node: MzGraphNode, lo: number, hi: number) {
+  function setKmeansK(node: SegGraphNode, k: number) {
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
-    graph.nodes[idx] = { ...graph.nodes[idx], params: { ...graph.nodes[idx].params, min: Math.round(lo * 100), max: Math.round(hi * 100) } };
+    graph.nodes[idx] = { ...graph.nodes[idx], params: { ...graph.nodes[idx].params, k } };
     persist();
   }
 
-  function setCurvePoints(node: MzGraphNode, points: MzCurvePoint[]) {
+  function toggleSegmentLabel(node: SegGraphNode, label: number) {
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
-    graph.nodes[idx] = { ...graph.nodes[idx], curvePoints: points };
+    const cur = graph.nodes[idx].selectedLabels ?? [];
+    const next = cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label];
+    graph.nodes[idx] = { ...graph.nodes[idx], selectedLabels: next };
     persist();
   }
 
-  function setCombineMode(node: MzGraphNode, mode: string) {
-    const idx = graph.nodes.findIndex((n) => n.id === node.id);
-    if (idx === -1) return;
-    graph.nodes[idx] = { ...graph.nodes[idx], params: { ...graph.nodes[idx].params, mode } };
-    persist();
-  }
-
-  function setSaveName(node: MzGraphNode, value: string) {
+  function setSaveName(node: SegGraphNode, value: string) {
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
     graph.nodes[idx] = { ...graph.nodes[idx], saveName: value };
   }
 
-  function inputsFor(node: MzGraphNode): MzGraphEdge[] {
+  function inputsFor(node: SegGraphNode): SegGraphEdge[] {
     return graph.edges.filter((e) => e.to === node.id);
   }
 
@@ -513,18 +514,80 @@
       const meta = savedMapsList().find((m) => m.id === n.savedMapId);
       return meta?.name ?? "— wybierz mapę —";
     }
-    if (n.type === "intensity_range") return `Zakres intensywności (${n.params.min ?? 0}–${n.params.max ?? 100}%)`;
-    if (n.type === "curve") return `Krzywa intensywności (${n.curvePoints?.length ?? 2} pkt)`;
-    if (n.type === "combine") return `Łączenie (${COMBINE_MODE_LABELS[(n.params.mode as CombineModeExt) ?? "mean"]})`;
-    return MZ_NODE_TYPES[n.type]?.label ?? n.type;
+    if (n.type === "kmeans") return `K-means (k=${n.params.k ?? 3})`;
+    return SEG_NODE_TYPES[n.type]?.label ?? n.type;
+  }
+
+  // ── K-means: przeliczane ręcznie (przycisk), niesynchronicznie z UI ─────
+  let runningNodeId = $state<string | null>(null);
+  let kmeansStatus = $state<Record<string, string>>({});
+
+  function runKmeansNode(node: SegGraphNode) {
+    const inEdges = graph.edges.filter((e) => e.to === node.id);
+    if (inEdges.length === 0) { kmeansStatus = { ...kmeansStatus, [node.id]: "podłącz przynajmniej jedną mapę" }; return; }
+    const inputs: SegMapValue[] = [];
+    for (const e of inEdges) {
+      const r = evalNode(e.from);
+      if (!r.ok) { kmeansStatus = { ...kmeansStatus, [node.id]: r.error }; return; }
+      if (r.value.kind !== "mapa") { kmeansStatus = { ...kmeansStatus, [node.id]: "wejście musi być mapą" }; return; }
+      inputs.push(r.value);
+    }
+    const { width, height, tissueId, tissueLabel } = inputs[0];
+    if (inputs.some((r) => r.width !== width || r.height !== height)) {
+      kmeansStatus = { ...kmeansStatus, [node.id]: "podłączone mapy mają różne wymiary" };
+      return;
+    }
+    if (inputs.some((r) => r.tissueId !== tissueId)) {
+      kmeansStatus = { ...kmeansStatus, [node.id]: "podłączone mapy pochodzą z różnych tkanek" };
+      return;
+    }
+    const k = Math.round(Number(node.params.k ?? 3));
+    runningNodeId = node.id;
+    kmeansStatus = { ...kmeansStatus, [node.id]: "" };
+    // setTimeout, żeby przycisk zdążył pokazać "Przetwarzanie…" przed ciężkim,
+    // synchronicznym liczeniem k-means (patrz runKmeans w segnodes.ts).
+    setTimeout(() => {
+      try {
+        const { labels, legend } = runKmeans(inputs.map((r) => r.data), k);
+        const idx = graph.nodes.findIndex((n) => n.id === node.id);
+        if (idx !== -1) {
+          graph.nodes[idx] = {
+            ...graph.nodes[idx],
+            kmeansResult: {
+              k, width, height, tissueId, tissueLabel, labels, legend,
+              sources: dedupeMapSources(inputs.flatMap((r) => r.sources)),
+            },
+          };
+          persist();
+        }
+        kmeansStatus = { ...kmeansStatus, [node.id]: `gotowe — k=${k}` };
+      } catch (e) {
+        kmeansStatus = { ...kmeansStatus, [node.id]: e instanceof Error ? e.message : String(e) };
+      } finally {
+        runningNodeId = null;
+      }
+    }, 20);
+  }
+
+  function dedupeMapSources(all: SegMapValue["sources"]): SegMapValue["sources"] {
+    const seen = new Set<string>();
+    const out: SegMapValue["sources"] = [];
+    for (const s of all) {
+      const key = `${s.mz}|${s.tol}|${s.datasetId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(s);
+    }
+    return out;
   }
 
   let savingNodeId = $state<string | null>(null);
   let saveStatus = $state<Record<string, string>>({});
 
-  async function saveOutputNode(node: MzGraphNode) {
+  async function saveOutputNode(node: SegGraphNode) {
     const outcome = evalNode(node.id);
     if (!outcome.ok) { saveStatus = { ...saveStatus, [node.id]: outcome.error }; return; }
+    if (outcome.value.kind !== "mapa") { saveStatus = { ...saveStatus, [node.id]: "nieprawidłowe wejście" }; return; }
     const name = (node.saveName ?? "").trim();
     if (!name) { saveStatus = { ...saveStatus, [node.id]: "podaj nazwę" }; return; }
     savingNodeId = node.id;
@@ -537,7 +600,7 @@
         width: r.width,
         height: r.height,
         vmax: maxOf(r.data),
-        mode: r.mode,
+        mode: "segment",
         sources: r.sources,
         data: r.data,
       });
@@ -548,15 +611,13 @@
       savingNodeId = null;
     }
   }
-
-  const savedMapModeLabel: Record<string, string> = { ...COMBINE_MODE_LABELS, single: "pojedyncza", segment: "segment" };
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />
 
 <div
   bind:this={container}
-  class="mznodes-canvas"
+  class="segnodes-canvas"
   style="
     background-position: {viewport.x}px {viewport.y}px;
     background-size: {dotSpacingWorld * viewport.zoom}px {dotSpacingWorld * viewport.zoom}px;
@@ -568,9 +629,9 @@
   onpointerup={onCanvasPointerUp}
   onpointerdown={closeMenus}
   role="application"
-  aria-label="Edytor grafu map m/z"
+  aria-label="Edytor grafu segmentacji"
 >
-  <div class="mznodes-content" style="transform: translate({viewport.x}px, {viewport.y}px) scale({viewport.zoom});">
+  <div class="segnodes-content" style="transform: translate({viewport.x}px, {viewport.y}px) scale({viewport.zoom});">
 
     <!-- Edges -->
     <svg class="edges-layer">
@@ -579,18 +640,18 @@
         {@const toNode = nodePos(edge.to)}
         {#if fromNode && toNode}
           <path d={edgePath(portPos(fromNode, "out"), portPos(toNode, "in"))}
-                stroke="rgba(255,201,81,0.55)" stroke-width="2" fill="none" />
+                stroke="rgba(126,200,227,0.55)" stroke-width="2" fill="none" />
         {/if}
       {/each}
       {#if connDrag}
         <path d={edgePath({ x: connDrag.x, y: connDrag.y }, cursorWorld)}
-              stroke="rgba(255,201,81,0.4)" stroke-width="2" fill="none" stroke-dasharray="4 3" />
+              stroke="rgba(126,200,227,0.4)" stroke-width="2" fill="none" stroke-dasharray="4 3" />
       {/if}
     </svg>
 
     <!-- Nodes -->
     {#each graph.nodes as node (node.id)}
-      {@const def = MZ_NODE_TYPES[node.type]}
+      {@const def = SEG_NODE_TYPES[node.type]}
       {#if def}
         <div class="mnode"
              style="left:{node.x}px; top:{node.y}px; width:{nodeWidth(node)}px;"
@@ -637,35 +698,13 @@
                   </div>
                 </div>
               {/if}
-            {:else if node.type === "intensity_range"}
-              <div class="field" onpointerdown={(e) => e.stopPropagation()}>
-                <DualRange
-                  min={Number(node.params.min ?? 0) / 100}
-                  max={Number(node.params.max ?? 100) / 100}
-                  ondisprange={(lo, hi) => setIntensityRange(node, lo, hi)}
-                />
-              </div>
-            {:else if node.type === "curve"}
-              {@const inEdge = graph.edges.find((e) => e.to === node.id)}
-              {@const inOutcome = inEdge ? evalNode(inEdge.from) : null}
-              {@const histogram = inOutcome?.ok ? computeHistogram(inOutcome.value.data) : []}
-              <div class="field" onpointerdown={(e) => e.stopPropagation()}>
-                <CurveEditor
-                  points={node.curvePoints ?? DEFAULT_CURVE_POINTS}
-                  {histogram}
-                  onchange={(points) => setCurvePoints(node, points)}
-                />
-              </div>
-            {:else if node.type === "combine"}
+            {:else if node.type === "kmeans"}
               <label class="field">
-                <span>Sposób łączenia</span>
-                <select class="ds-select" value={(node.params.mode as string) ?? "mean"}
-                        onpointerdown={(e) => e.stopPropagation()}
-                        onchange={(e) => setCombineMode(node, (e.target as HTMLSelectElement).value)}>
-                  {#each COMBINE_MODE_LIST as m}
-                    <option value={m}>{COMBINE_MODE_LABELS[m]}</option>
-                  {/each}
-                </select>
+                <span>k = {node.params.k ?? 3}</span>
+                <input type="range" min="2" max="10" step="1"
+                       value={Number(node.params.k ?? 3)}
+                       onpointerdown={(e) => e.stopPropagation()}
+                       oninput={(e) => setKmeansK(node, Number((e.target as HTMLInputElement).value))} />
               </label>
               <div class="combine-list" onpointerdown={(e) => e.stopPropagation()}>
                 {#if inputsFor(node).length === 0}
@@ -677,6 +716,32 @@
                       <button class="combine-remove" onclick={() => removeEdge(edge.id)} title="Usuń połączenie">×</button>
                     </div>
                   {/each}
+                {/if}
+              </div>
+              <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
+                      disabled={runningNodeId === node.id}
+                      onclick={() => runKmeansNode(node)}>
+                {runningNodeId === node.id ? "Przetwarzanie…" : "Przetwórz"}
+              </button>
+              {#if kmeansStatus[node.id]}
+                <span class="preview-result">{kmeansStatus[node.id]}</span>
+              {/if}
+            {:else if node.type === "select_segments"}
+              {@const inEdge = graph.edges.find((e) => e.to === node.id)}
+              {@const inOutcome = inEdge ? evalNode(inEdge.from) : null}
+              <div class="seg-checklist" onpointerdown={(e) => e.stopPropagation()}>
+                {#if inOutcome?.ok && inOutcome.value.kind === "segmentacja"}
+                  {#each inOutcome.value.legend as l (l.label)}
+                    <label class="seg-check-item">
+                      <input type="checkbox"
+                             checked={(node.selectedLabels ?? []).includes(l.label)}
+                             onchange={() => toggleSegmentLabel(node, l.label)} />
+                      <span class="seg-swatch" style="background:{SEG_PALETTE[l.label % SEG_PALETTE.length]}"></span>
+                      <span>klasa {l.label} ({l.count}px)</span>
+                    </label>
+                  {/each}
+                {:else}
+                  <div class="combine-list-empty">podłącz wynik k-means</div>
                 {/if}
               </div>
             {:else if node.type === "save_output"}
@@ -696,21 +761,23 @@
               {/if}
             {/if}
 
-            <!-- Podgląd na żywo — dla każdego typu węzła (łańcuch od tego node'a wstecz do źródeł).
-                 {#if true} to jedyny sposób, by {@const} mógł tu być użyty (musi być
-                 bezpośrednim dzieckiem blokowej konstrukcji, nie zwykłego <div>). -->
+            <!-- Podgląd na żywo — {#if true} to jedyny sposób, by {@const} mógł
+                 tu być użyty (musi być bezpośrednim dzieckiem konstrukcji blokowej). -->
             {#if true}
               {@const outcome = evalNode(node.id)}
               <div class="mz-preview" style="height:{previewHeight(node)}px">
-                {#if outcome.ok}
+                {#if outcome.ok && outcome.value.kind === "mapa"}
+                  {@const mapVal = outcome.value}
                   <IonCanvas
-                    tissue={resultTissue(outcome.value)}
+                    tissue={resultTissue(mapVal)}
                     dispMin={0} dispMax={1} invertColors={false}
                     showColorbar={false} showVmax={false} compact
                   />
                   <button class="mz-zoom-btn" onpointerdown={(e) => e.stopPropagation()}
-                          onclick={() => (zoomTissue = resultTissue(outcome.value))} title="Powiększ">⤢</button>
-                {:else}
+                          onclick={() => (zoomTissue = resultTissue(mapVal))} title="Powiększ">⤢</button>
+                {:else if outcome.ok && outcome.value.kind === "segmentacja"}
+                  <SegLabelCanvas labels={outcome.value.labels} legend={outcome.value.legend} />
+                {:else if !outcome.ok}
                   <div class="mz-preview-empty">{outcome.error}</div>
                 {/if}
               </div>
@@ -738,10 +805,10 @@
          onwheel={(e) => e.stopPropagation()}>
       <input class="ctx-filter" type="text" placeholder="Szukaj node'a…" bind:value={paletteFilter} autofocus />
       <div class="ctx-list">
-        {#each MZ_CATEGORY_ORDER as cat (cat)}
+        {#each SEG_CATEGORY_ORDER as cat (cat)}
           {@const items = filteredTypes.filter((t) => t.category === cat)}
           {#if items.length > 0}
-            <div class="ctx-cat">{MZ_CATEGORY_LABELS[cat]}</div>
+            <div class="ctx-cat">{SEG_CATEGORY_LABELS[cat]}</div>
             {#each items as t (t.id)}
               <button class="ctx-item" onclick={() => addNode(t.id)}>
                 <span class="ctx-item-label">{t.label}</span>
@@ -780,7 +847,7 @@
 {/if}
 
 <style>
-  .mznodes-canvas {
+  .segnodes-canvas {
     position: relative;
     width: 100%;
     height: 100%;
@@ -792,7 +859,7 @@
     touch-action: none;
   }
 
-  .mznodes-content {
+  .segnodes-content {
     position: absolute;
     left: 0; top: 0;
     transform-origin: 0 0;
@@ -895,7 +962,7 @@
     width: 100%;
     appearance: none; -webkit-appearance: none; -moz-appearance: none;
     background: #1a1a1a
-      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23ffc951' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>")
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%237ec8e3' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>")
       no-repeat right 6px center;
     background-size: 8px 5px;
     border: 1px solid rgba(255,255,255,0.1);
@@ -909,7 +976,7 @@
     box-sizing: border-box;
     transition: border-color 0.15s, color 0.15s;
   }
-  .ds-select:hover  { border-color: rgba(255,201,81,0.3); color: #ffc951; }
+  .ds-select:hover  { border-color: rgba(126,200,227,0.35); color: #7ec8e3; }
   .ds-select option { background: #1a1a1a; color: #e0e0e0; }
 
   .mz-expand-toggle {
@@ -925,7 +992,7 @@
     font-family: inherit;
     transition: color 0.15s;
   }
-  .mz-expand-toggle:hover { color: #ffc951; }
+  .mz-expand-toggle:hover { color: #7ec8e3; }
 
   .mz-details {
     display: flex;
@@ -940,20 +1007,20 @@
     font-size: 0.7rem;
     font-weight: 700;
     letter-spacing: 0.03em;
-    color: #ffc951;
+    color: #7ec8e3;
     text-transform: uppercase;
   }
 
   .saved-meta-row { display: flex; gap: 6px; }
-  .mode-tag, .tissue-tag {
+  .mode-tag {
     font-size: 0.58rem;
     font-weight: 600;
     letter-spacing: 0.05em;
     text-transform: uppercase;
     padding: 2px 7px;
     border-radius: 5px;
-    color: #ffc951;
-    background: rgba(255,201,81,0.12);
+    color: #7ec8e3;
+    background: rgba(126,200,227,0.12);
   }
   .saved-sources { display: flex; flex-wrap: wrap; gap: 5px; }
   .source-tag {
@@ -1002,6 +1069,29 @@
   }
   .combine-remove:hover { color: #ff6b6b; }
 
+  .seg-checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  .seg-check-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.65rem;
+    color: rgba(255,255,255,0.75);
+    cursor: pointer;
+  }
+  .seg-check-item input[type="checkbox"] { cursor: pointer; }
+  .seg-swatch {
+    width: 9px; height: 9px;
+    border-radius: 2px;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+
   .mz-name-input {
     width: 100%;
     background: rgba(255,255,255,0.05);
@@ -1014,28 +1104,28 @@
     box-sizing: border-box;
     outline: none;
   }
-  .mz-name-input:focus { border-color: rgba(255,201,81,0.4); }
+  .mz-name-input:focus { border-color: rgba(126,200,227,0.4); }
 
   .run-btn {
     width: 100%;
-    background: rgba(255,201,81,0.12);
-    border: 1px solid rgba(255,201,81,0.4);
+    background: rgba(126,200,227,0.12);
+    border: 1px solid rgba(126,200,227,0.4);
     border-radius: 6px;
-    color: #ffc951;
+    color: #7ec8e3;
     font-size: 0.68rem;
     font-weight: 700;
     padding: 6px 8px;
     cursor: pointer;
     font-family: inherit;
   }
-  .run-btn:hover:not(:disabled) { background: rgba(255,201,81,0.2); }
+  .run-btn:hover:not(:disabled) { background: rgba(126,200,227,0.2); }
   .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .save-btn {
-    background: rgba(126,200,227,0.12);
-    border-color: rgba(126,200,227,0.4);
-    color: #7ec8e3;
+    background: rgba(255,201,81,0.12);
+    border-color: rgba(255,201,81,0.4);
+    color: #ffc951;
   }
-  .save-btn:hover:not(:disabled) { background: rgba(126,200,227,0.2); }
+  .save-btn:hover:not(:disabled) { background: rgba(255,201,81,0.2); }
 
   .preview-result {
     font-size: 0.6rem;
@@ -1076,7 +1166,7 @@
     font-family: inherit;
     transition: border-color 0.15s, background 0.15s;
   }
-  .mz-zoom-btn:hover { border-color: rgba(255,201,81,0.5); background: rgba(255,201,81,0.15); }
+  .mz-zoom-btn:hover { border-color: rgba(126,200,227,0.5); background: rgba(126,200,227,0.15); }
 
   .port {
     position: absolute;
@@ -1147,8 +1237,8 @@
     font-weight: 700;
     letter-spacing: 0.09em;
     text-transform: uppercase;
-    color: #ffc951;
-    background: rgba(255,201,81,0.07);
+    color: #7ec8e3;
+    background: rgba(126,200,227,0.07);
     border-top: 1px solid rgba(255,255,255,0.08);
     border-bottom: 1px solid rgba(255,255,255,0.08);
   }

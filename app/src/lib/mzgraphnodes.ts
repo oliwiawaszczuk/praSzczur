@@ -115,7 +115,7 @@ export const MZ_NODE_TYPES: Record<string, MzNodeTypeDef> = {
   combine: {
     id: "combine",
     label: "Łączenie",
-    description: "Łączy wiele map pikseli (tej samej tkanki) w jedną, wybraną metodą.",
+    description: "Łączy wiele map pikseli (tej samej tkanki) w jedną: średnia/suma/maksimum/iloczyn, albo odejmowanie/maskowanie — w tych dwóch ostatnich pierwsze podłączone wejście to baza, kolejne to maska/odejmowana wartość (przydatne np. do odjęcia segmentu z zakładki Segmentacja).",
     category: "przetwarzanie",
     hasInput: true,
     hasOutput: true,
@@ -135,14 +135,17 @@ export const MZ_NODE_TYPES: Record<string, MzNodeTypeDef> = {
 
 export const MZ_NODE_TYPE_LIST: MzNodeTypeDef[] = Object.values(MZ_NODE_TYPES);
 
-export const COMBINE_MODE_LABELS: Record<CombineMode, string> = {
+export const COMBINE_MODE_LABELS: Record<CombineModeExt, string> = {
   mean: "średnia",
   sum: "suma",
   max: "maksimum",
   multiply: "iloczyn",
+  subtract: "różnica (baza − reszta)",
+  mask_exclude: "maska — wytnij",
+  mask_keep: "maska — zachowaj tylko",
 };
 
-export const COMBINE_MODE_LIST: CombineMode[] = ["mean", "sum", "max", "multiply"];
+export const COMBINE_MODE_LIST: CombineModeExt[] = ["mean", "sum", "max", "multiply", "subtract", "mask_exclude", "mask_keep"];
 
 let _idCounter = 0;
 export function makeMzId(prefix: string): string {
@@ -168,13 +171,24 @@ export function defaultMzGraph(): MzGraph {
 // map (2D array) muszą być już wczytane do `mapCache` (pobrane przez
 // fetchSavedMapData) — ewaluator nie robi żadnych zapytań sieciowych.
 
+/** CombineMode (tissueMerge.ts, używany też przez "Łączenie" w zakładce m/z →
+ * Łączenie) rozszerzony o tryby specyficzne dla tego node'a: arytmetyczne
+ * odejmowanie oraz maskowanie binarne (0/1, próg 0.5) — pierwsze podłączone
+ * wejście to baza, reszta to maska/odejmowana wartość. Rozszerzenie lokalne
+ * (nie w tissueMerge.ts), żeby nie ruszać innych miejsc używających CombineMode
+ * (Wiele m/z → Łączenie, mergeTissueMaps). */
+export type CombineModeExt = CombineMode | "subtract" | "mask_exclude" | "mask_keep";
+
 export interface MzEvalResult {
   tissueId: string;
   tissueLabel: string;
   width: number;
   height: number;
   data: number[][];
-  mode: CombineMode | "single";
+  /** "segment" = wczytana mapa pochodzi z zakładki Segmentacja (wyeksportowany
+   * segment) — nie jest to tryb "Łączenia", tylko odziedziczona etykieta
+   * z SavedPixelMapMode, przechodząca przez graf bez zmian. */
+  mode: CombineModeExt | "single" | "segment";
   sources: SavedPixelMapSource[];
 }
 
@@ -182,7 +196,7 @@ export type MzEvalOutcome =
   | { ok: true; value: MzEvalResult }
   | { ok: false; error: string };
 
-function combineArrays(arrays: number[][][], mode: CombineMode): number[][] {
+function combineArrays(arrays: number[][][], mode: CombineModeExt): number[][] {
   const h = arrays[0].length;
   const w = arrays[0][0]?.length ?? 0;
   const out: number[][] = Array.from({ length: h }, () => new Array(w).fill(0));
@@ -193,6 +207,10 @@ function combineArrays(arrays: number[][][], mode: CombineMode): number[][] {
       if (mode === "sum") v = vals.reduce((a, b) => a + b, 0);
       else if (mode === "max") v = Math.max(...vals);
       else if (mode === "multiply") v = vals.reduce((a, b) => a * b, 1);
+      // Baza = pierwsze podłączone wejście (kolejność wg edges), reszta = maska/odejmowana wartość.
+      else if (mode === "subtract") v = Math.max(0, vals[0] - vals.slice(1).reduce((a, b) => a + b, 0));
+      else if (mode === "mask_exclude") v = vals.slice(1).some((m) => m >= 0.5) ? 0 : vals[0];
+      else if (mode === "mask_keep") v = vals.slice(1).every((m) => m >= 0.5) ? vals[0] : 0;
       else v = vals.reduce((a, b) => a + b, 0) / vals.length; // mean
       out[y][x] = v;
     }
@@ -238,7 +256,7 @@ export function computeHistogram(data: number[][], bins = 40): number[] {
   return counts;
 }
 
-function dedupeSources(all: SavedPixelMapSource[]): SavedPixelMapSource[] {
+export function dedupeSources(all: SavedPixelMapSource[]): SavedPixelMapSource[] {
   const seen = new Set<string>();
   const out: SavedPixelMapSource[] = [];
   for (const s of all) {
@@ -345,7 +363,7 @@ function evaluateInner(
     if (results.some((r) => r.tissueId !== tissueId)) {
       return { ok: false, error: "podłączone mapy pochodzą z różnych tkanek" };
     }
-    const mode = (node.params.mode as CombineMode) ?? "mean";
+    const mode = (node.params.mode as CombineModeExt) ?? "mean";
     const data = results.length === 1 ? results[0].data : combineArrays(results.map((r) => r.data), mode);
     return {
       ok: true,

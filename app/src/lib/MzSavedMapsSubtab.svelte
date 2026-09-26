@@ -50,7 +50,11 @@
     mapData = rest;
   }
 
-  const modeLabels: Record<string, string> = { mean: "średnia", sum: "suma", max: "maksimum", multiply: "iloczyn", single: "pojedyncza" };
+  const modeLabels: Record<string, string> = {
+    mean: "średnia", sum: "suma", max: "maksimum", multiply: "iloczyn", single: "pojedyncza",
+    subtract: "różnica", mask_exclude: "maska — wytnij", mask_keep: "maska — zachowaj tylko",
+    segment: "segment",
+  };
 
   let zoomedId = $state<string | null>(null);
   const zoomedMeta = $derived(metas.find((m) => m.id === zoomedId) ?? null);
