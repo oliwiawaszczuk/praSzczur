@@ -84,10 +84,13 @@ export function updateGroup(id: string, patch: Partial<Omit<MzGroup, "id">>): vo
   saveGroups();
 }
 
+// Przenosi grupę ze srcIdx na targetIdx (przesuwając pozostałe, jak przy
+// przeciąganiu warstwy widma w zakładce Widma), a nie zwykła zamiana miejsc.
 export function reorderGroups(srcIdx: number, targetIdx: number): void {
   if (srcIdx === targetIdx) return;
   const next = [...groups];
-  [next[srcIdx], next[targetIdx]] = [next[targetIdx], next[srcIdx]];
+  const [moved] = next.splice(srcIdx, 1);
+  next.splice(targetIdx, 0, moved);
   groups = next;
   saveGroups();
 }
@@ -120,6 +123,15 @@ export function toggleSelected(groupId: string, tissueId: string): void {
 
 export function isSelected(groupId: string, tissueId: string): boolean {
   return (selection[groupId] ?? []).includes(tissueId);
+}
+
+export function clearSelection(): void {
+  selection = {};
+  saveSelection();
+}
+
+export function hasAnySelection(): boolean {
+  return Object.values(selection).some((tids) => tids.length > 0);
 }
 
 export function setCombineMode(mode: CombineMode): void {

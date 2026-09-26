@@ -5,6 +5,7 @@
   import { datasets, activeDatasetId, sanitizeDatasetId, datasetLabel, RAW_DATASET_ID } from "$lib/datasets.svelte";
   import { type MzGroup, updateGroup, runGroupQuery, resultFor, toggleSelected, isSelected } from "./mzGroups.svelte";
   import { savePixelMap } from "./savedPixelMaps.svelte";
+  import { windowValue, maxOf } from "./tissueMerge";
   import PixelMapZoomModal from "./PixelMapZoomModal.svelte";
 
   interface Props {
@@ -94,6 +95,11 @@
     const img = tissues?.[tid];
     if (!img || group.mz === null) return;
     const label = tissueLabels[tid] ?? img.label;
+    // Zastosuj bieżący zakres wyświetlania (dispMin/dispMax) i odwrócenie
+    // kolorów PRZED zapisem — inaczej zapisana mapa ignorowałaby ustawiony
+    // zakres i zawsze zapisywałaby surowe, nieprzycięte dane (jak w Łączeniu,
+    // patrz mergeTissueMaps).
+    const data = img.data.map((row) => row.map((v) => windowValue(v, dispMin, dispMax, invert)));
     try {
       await savePixelMap({
         name: `${label} · ${new Date().toLocaleString("pl-PL")}`,
@@ -101,10 +107,10 @@
         tissueLabel: label,
         width: img.width,
         height: img.height,
-        vmax: img.vmax,
+        vmax: maxOf(data),
         mode: "single",
         sources: [{ groupIndex, mz: group.mz, tol: group.tol, datasetId: group.dataset, datasetLabel: datasetLabel(group.dataset) }],
-        data: img.data,
+        data,
       });
       savedFlash = new Set(savedFlash).add(tid);
       setTimeout(() => { const next = new Set(savedFlash); next.delete(tid); savedFlash = next; }, 1000);

@@ -12,6 +12,7 @@
   import WieleMz from "$lib/WieleMz.svelte";
   import MzMergeSubtab from "$lib/MzMergeSubtab.svelte";
   import MzSavedMapsSubtab from "$lib/MzSavedMapsSubtab.svelte";
+  import MzGraphSubtab from "$lib/MzGraphSubtab.svelte";
   import PreWidma from "$lib/PreWidma.svelte";
   import WorkspaceSettings from "$lib/WorkspaceSettings.svelte";
   import Tablica from "$lib/Tablica.svelte";
@@ -21,7 +22,7 @@
 
   type AppState = "booting" | "ready" | "error";
   type Tab = "dane" | "zestawDanych" | "mz" | "preprocessing" | "widma" | "prewidma" | "segmentacja" | "tablica" | "settings";
-  type MzSubTab = "mz" | "grupy" | "laczenie" | "zapisane";
+  type MzSubTab = "mz" | "grupy" | "laczenie" | "zapisane" | "graf";
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "dane",          label: "Dane" },
@@ -40,6 +41,7 @@
     { key: "grupy",    label: "Grupy" },
     { key: "laczenie", label: "Łączenie" },
     { key: "zapisane", label: "Zapisane" },
+    { key: "graf",     label: "Mapa Node Graph" },
   ];
 
   let state:       AppState = $state("booting");
@@ -273,6 +275,9 @@
       </main>
       <main class="content" class:hidden={!(activeTab === "mz" && mzSubTab === "zapisane")}>
         <MzSavedMapsSubtab />
+      </main>
+      <main class="content" class:hidden={!(activeTab === "mz" && mzSubTab === "graf")}>
+        <MzGraphSubtab visible={activeTab === "mz" && mzSubTab === "graf"} />
       </main>
       <main class="content full-tab" class:hidden={activeTab !== "preprocessing"}>
         <div class="tab-placeholder">

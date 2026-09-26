@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import MzColumn from "./MzColumn.svelte";
-  import { allGroups, loadWieleMz, addGroup, removeGroup, reorderGroups } from "./mzGroups.svelte";
+  import { allGroups, loadWieleMz, addGroup, removeGroup, reorderGroups, clearSelection, hasAnySelection } from "./mzGroups.svelte";
 
   interface Props {
     mzMin?: number;
@@ -21,83 +21,124 @@
     tissueColors = {},
   }: Props = $props();
 
-  let draggedIndex  = $state<number | null>(null);
-  let dragOverIndex = $state<number | null>(null);
-
   onMount(() => { loadWieleMz(tolDefault); });
 
   const groups = $derived(allGroups());
 
-  function onDragStart(e: DragEvent, index: number) {
-    draggedIndex = index;
-    e.dataTransfer?.setData("text/plain", String(index));
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-  }
+  // ── Drag-to-reorder (Pointer Events) — natywny HTML5 DnD jest niestabilny
+  // w webview Tauri, więc ten sam wzorzec co przy przeciąganiu warstw widma
+  // w zakładce Widma (Widma.svelte: startDrag/onDragPointerMove/onDragPointerUp). ─
+  let draggingIdx = $state<number | null>(null);
+  let dragOverIdx = $state<number | null>(null);
+  let colsListEl  = $state<HTMLDivElement | null>(null);
 
-  function onDragOver(e: DragEvent, index: number) {
+  function startDrag(e: PointerEvent, i: number) {
     e.preventDefault();
-    dragOverIndex = index;
+    draggingIdx = i;
+    dragOverIdx = i;
+    window.addEventListener("pointermove", onDragPointerMove);
+    window.addEventListener("pointerup", onDragPointerUp);
   }
 
-  function onDragLeave(index: number) {
-    if (dragOverIndex === index) dragOverIndex = null;
+  function onDragPointerMove(e: PointerEvent) {
+    if (draggingIdx === null || !colsListEl) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const col = (el as HTMLElement | null)?.closest(".wmz-col") as HTMLElement | null;
+    if (!col || !colsListEl.contains(col)) return;
+    const idx = Number(col.dataset.idx);
+    if (!isNaN(idx)) dragOverIdx = idx;
   }
 
-  function onDrop(e: DragEvent, targetIdx: number) {
-    e.preventDefault();
-    const src = draggedIndex;
-    dragOverIndex = null;
-    draggedIndex = null;
-    if (src === null) return;
-    reorderGroups(src, targetIdx);
-  }
-
-  function onDragEnd() {
-    draggedIndex = null;
-    dragOverIndex = null;
+  function onDragPointerUp() {
+    if (draggingIdx !== null && dragOverIdx !== null && dragOverIdx !== draggingIdx) {
+      reorderGroups(draggingIdx, dragOverIdx);
+    }
+    draggingIdx = null;
+    dragOverIdx = null;
+    window.removeEventListener("pointermove", onDragPointerMove);
+    window.removeEventListener("pointerup", onDragPointerUp);
   }
 </script>
 
-<div class="wmz-wrap">
-  {#each groups as group, i (group.id)}
-    <div
-      class="wmz-col"
-      class:drag-over={dragOverIndex === i && draggedIndex !== i}
-      class:dragging={draggedIndex === i}
-      ondragover={(e) => onDragOver(e, i)}
-      ondragleave={() => onDragLeave(i)}
-      ondrop={(e) => onDrop(e, i)}
-      role="group"
-    >
-      <div class="wmz-col-header">
-        <span
-          class="wmz-handle"
-          draggable="true"
-          ondragstart={(e) => onDragStart(e, i)}
-          ondragend={onDragEnd}
-          title="Przeciągnij, aby zmienić kolejność"
-          role="button"
-          tabindex="0"
-        >⠿</span>
-        <span class="wmz-col-title">Grupa {i + 1}</span>
-        <button class="wmz-remove" onclick={() => removeGroup(group.id)} title="Usuń kolumnę">×</button>
-      </div>
-      <MzColumn
-        {group}
-        groupIndex={i}
-        {mzMin} {mzMax}
-        {tissueIds} {tissueLabels} {tissueColors}
-      />
-    </div>
-  {/each}
+<div class="wmz-outer">
+  <div class="wmz-toolbar">
+    <button class="wmz-clear-btn" onclick={clearSelection} disabled={!hasAnySelection()}>
+      Wyczyść zaznaczenia
+    </button>
+  </div>
 
-  <button class="wmz-add" onclick={() => addGroup(tolDefault)}>
-    <span class="wmz-add-icon">+</span>
-    <span class="wmz-add-label">Dodaj m/z</span>
-  </button>
+  <div class="wmz-wrap" bind:this={colsListEl}>
+    {#each groups as group, i (group.id)}
+      <div
+        class="wmz-col"
+        class:drag-over={dragOverIdx === i && draggingIdx !== null && draggingIdx !== i}
+        class:dragging={draggingIdx === i}
+        data-idx={i}
+        role="group"
+      >
+        <div class="wmz-col-header">
+          <span
+            class="wmz-handle"
+            onpointerdown={(e) => startDrag(e, i)}
+            title="Przeciągnij, aby zmienić kolejność"
+            role="button"
+            tabindex="0"
+          >⠿</span>
+          <span class="wmz-col-title">Grupa {i + 1}</span>
+          <button class="wmz-remove" onclick={() => removeGroup(group.id)} title="Usuń kolumnę">×</button>
+        </div>
+        <MzColumn
+          {group}
+          groupIndex={i}
+          {mzMin} {mzMax}
+          {tissueIds} {tissueLabels} {tissueColors}
+        />
+      </div>
+    {/each}
+
+    <button class="wmz-add" onclick={() => addGroup(tolDefault)}>
+      <span class="wmz-add-icon">+</span>
+      <span class="wmz-add-label">Dodaj m/z</span>
+    </button>
+  </div>
 </div>
 
 <style>
+  .wmz-outer {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .wmz-toolbar {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: flex-end;
+    padding: 10px 16px 0;
+    box-sizing: border-box;
+  }
+
+  .wmz-clear-btn {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 7px;
+    color: rgba(255,255,255,0.6);
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
+  }
+  .wmz-clear-btn:hover:not(:disabled) {
+    border-color: rgba(255,201,81,0.5);
+    background: rgba(255,201,81,0.1);
+    color: #ffc951;
+  }
+  .wmz-clear-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
   .wmz-wrap {
     flex: 1;
     min-height: 0;
@@ -174,6 +215,8 @@
   .wmz-add {
     width: 90px;
     min-width: 90px;
+    height: 210px;
+    align-self: flex-start;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
