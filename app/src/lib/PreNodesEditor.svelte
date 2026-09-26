@@ -5,7 +5,7 @@
   import { fetchPreprocessChain, fetchImzmlNativeRange, type PreprocessChainResult } from "./api";
   import {
     NODE_TYPE_LIST, NODE_TYPES, CATEGORY_ORDER, CATEGORY_LABELS, defaultGraph, defaultDatasetGraph,
-    originalDatasetGraph, graphFromSteps, defaultParams, makeId, buildChain,
+    graphFromSteps, defaultParams, makeId, buildChain,
     type PreGraph, type PreNode, type PreEdge, type PreViewport,
   } from "$lib/prenodes";
   import {
@@ -34,10 +34,6 @@
     visible?: boolean;
   }
   let { pixelLeft = null, pixelRight = null, onResult, datasetId, visible = true }: Props = $props();
-
-  // Zestaw "original" jest chroniony — pokazujemy jego graf (stały: źródło→wynik)
-  // wyłącznie do podglądu, bez możliwości edycji/przebudowy.
-  let readonly = $derived(datasetId === "original");
 
   onMount(async () => { if (!datasetsLoaded()) await loadDatasets(); });
 
@@ -70,7 +66,6 @@
   }
 
   function setNodeDataset(node: PreNode, datasetId: string) {
-    if (readonly) return;
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
     graph.nodes[idx] = { ...graph.nodes[idx], datasetId };
@@ -80,7 +75,6 @@
   // Wygaszenie node'a preprocessingu (oczko) — dane przechodzą przez niego
   // bez zmian, patrz buildChain() w prenodes.ts.
   function toggleNodeEnabled(node: PreNode) {
-    if (readonly) return;
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
     const enabled = graph.nodes[idx].enabled === false; // był false → włącz, inaczej wygaś
@@ -108,7 +102,6 @@
   // wprost z jego rzeczywistego, zapisanego łańcucha (`source_dataset_id` +
   // `steps`), zamiast pokazywać mylący pusty/domyślny graf.
   function fallbackGraphFor(id: string): PreGraph {
-    if (id === "original") return originalDatasetGraph();
     const meta: DatasetMeta | undefined = datasets().find((d) => d.id === id);
     if (meta?.steps?.length) {
       return graphFromSteps(meta.source_dataset_id ?? RAW_DATASET_ID, meta.steps);
@@ -144,7 +137,7 @@
   async function loadGraphFor(id: string) {
     if (!datasetsLoaded()) await loadDatasets();
     const meta = datasets().find((d) => d.id === id);
-    const remote = id === "original" ? null : (await fetchDatasetGraph(id) as PreGraph | null);
+    const remote = await fetchDatasetGraph(id) as PreGraph | null;
     const useRemote = remote && graphMatchesSteps(remote, meta);
     graph = sanitize(useRemote ? remote! : fallbackGraphFor(id));
     loadedDatasetId = id;
@@ -172,7 +165,6 @@
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   function persist() {
-    if (readonly) return;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       if (datasetId) saveDatasetGraph(datasetId, graph);
@@ -308,7 +300,6 @@
   let dragNodeOrigin = { x: 0, y: 0 };
 
   function onNodeHeaderPointerDown(e: PointerEvent, node: PreNode) {
-    if (readonly) return;
     if ((e.target as HTMLElement).closest(".node-info, .node-menu-trigger")) return;
     e.stopPropagation();
     dragNodeId = node.id;
@@ -345,7 +336,6 @@
   }
 
   function onPortPointerDown(e: PointerEvent, node: PreNode, port: "in" | "out") {
-    if (readonly) return;
     e.stopPropagation();
     if (port === "in") {
       // Blender-style: chwytanie za końcówkę JUŻ podłączonego wejścia odłącza
@@ -460,7 +450,6 @@
 
   function onCanvasContextMenu(e: MouseEvent) {
     e.preventDefault();
-    if (readonly) return;
     closeMenus();
     const rect = container?.getBoundingClientRect();
     const screenY = e.clientY - (rect?.top ?? 0);
@@ -475,7 +464,6 @@
   function onNodeContextMenu(e: MouseEvent, node: PreNode) {
     e.preventDefault();
     e.stopPropagation();
-    if (readonly) return;
     closeMenus();
     const rect = container?.getBoundingClientRect();
     nodeMenuPos = { x: e.clientX - (rect?.left ?? 0), y: e.clientY - (rect?.top ?? 0) };
@@ -499,7 +487,7 @@
     if (typeId === "source_binned") {
       // Bez zestawu wybranego domyślnie dropdown wyglądałby na pusty — wybierz
       // pierwszy dostępny (nie ma tu już niejawnej opcji "aktywny").
-      node.datasetId = datasets().find((d) => d.id !== "original")?.id;
+      node.datasetId = datasets()[0]?.id;
     }
     if (typeId === "mz_range" && nativeMzRange) {
       node.params = { ...node.params, mz_min: nativeMzRange.mz_min, mz_max: nativeMzRange.mz_max };
@@ -539,7 +527,7 @@
       e.preventDefault();
       fitAll();
     }
-    if (!typing && (e.key === "Delete" || e.key === "Backspace") && hoveredNodeId && !readonly) {
+    if (!typing && (e.key === "Delete" || e.key === "Backspace") && hoveredNodeId) {
       e.preventDefault();
       nodeMenuTarget = hoveredNodeId;
       confirmDeleteOpen = true;
@@ -557,7 +545,6 @@
   );
 
   function updateParam(node: PreNode, key: string, value: number | string) {
-    if (readonly) return;
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
     graph.nodes[idx] = { ...graph.nodes[idx], params: { ...graph.nodes[idx].params, [key]: value } };
@@ -623,7 +610,6 @@
   let confirmRebuildNode = $state<PreNode | null>(null);
 
   function requestRebuildDataset(node: PreNode) {
-    if (readonly) return;
     confirmRebuildNode = node;
   }
   function cancelRebuildDataset() {
@@ -766,7 +752,7 @@
                         value={node.datasetId ?? ""}
                         onpointerdown={(e) => e.stopPropagation()}
                         onchange={(e) => setNodeDataset(node, (e.target as HTMLSelectElement).value)}>
-                  {#each datasets().filter((d) => d.id !== "original") as d}
+                  {#each datasets() as d}
                     <option value={d.id}>{d.name}</option>
                   {/each}
                 </select>
@@ -790,7 +776,6 @@
                   <span class="field-head">
                     <input type="text" inputmode="decimal" class="param-value-input"
                            value={node.params[p.key] ?? p.default}
-                           readonly={readonly}
                            onpointerdown={(e) => e.stopPropagation()}
                            onchange={(e) => {
                              const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
@@ -810,7 +795,6 @@
                   </span>
                   <input type="range" min={pMin} max={pMax} step={p.step}
                          value={node.params[p.key] ?? p.default}
-                         disabled={readonly}
                          onpointerdown={(e) => e.stopPropagation()}
                          oninput={(e) => updateParam(node, p.key, Number((e.target as HTMLInputElement).value))} />
                 {/if}
@@ -833,10 +817,7 @@
 
                 <!-- Zapisz — cała tkanka, wszystkie piksele, bez wymogu wybranego piksela -->
                 <div class="output-col" onpointerdown={(e) => e.stopPropagation()}>
-                  {#if readonly}
-                    <span class="output-col-title">Przebuduj zestaw</span>
-                    <span class="preview-result">Zestaw "Oryginalny" jest chroniony — nie można go nadpisać.</span>
-                  {:else if datasetId}
+                  {#if datasetId}
                     <span class="output-col-title">Przebuduj zestaw</span>
                     <span class="save-warning">⚠ nadpisze dane bieżącego zestawu</span>
                     <button class="run-btn save-btn"
@@ -854,7 +835,7 @@
                             value={saveDatasetTarget[node.id] ?? ""}
                             onchange={(e) => saveDatasetTarget = { ...saveDatasetTarget, [node.id]: (e.target as HTMLSelectElement).value }}>
                       <option value="">+ nowy zestaw…</option>
-                      {#each datasets().filter((d) => d.id !== "original") as d}
+                      {#each datasets() as d}
                         <option value={d.id}>nadpisz: {d.name}</option>
                       {/each}
                     </select>
@@ -1132,9 +1113,8 @@
     transition: background 0.12s, border-color 0.12s;
     box-sizing: border-box;
   }
-  .param-value-input:hover:not([readonly]) { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.12); }
+  .param-value-input:hover { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.12); }
   .param-value-input:focus { background: rgba(255,255,255,0.05); border-color: rgba(255,201,81,0.4); outline: none; }
-  .param-value-input[readonly] { opacity: 0.6; cursor: default; }
 
   .output-columns {
     display: flex;

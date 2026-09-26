@@ -97,8 +97,8 @@ def _find_ws(reg: dict, wid: str) -> dict | None:
 
 
 # ── Zestawy danych (Datasets) ───────────────────────────────────────────────
-# Każdy workspace ma własny rejestr zestawów danych (np. "Oryginalny" = surowy
-# binning z Dane, oraz kolejne = wynik pipeline'u preprocessingu z preWidma).
+# Każdy workspace ma własny rejestr zestawów danych — zwykły binning z zakładki
+# Dane oraz kolejne, będące wynikiem pipeline'u preprocessingu z preWidma.
 # Struktura: workspaces/<wid>/datasets/registry.json + datasets/<did>/*.npz
 
 
@@ -137,21 +137,12 @@ def _save_datasets_registry(reg: dict, wid: str) -> None:
 
 def _ensure_datasets_registry(wid: str) -> dict:
     """Wczytuje rejestr zestawów workspace'u; jeśli brak, migruje starą,
-    jednozestawową strukturę `processed/` do zestawu 'original'. Samo-naprawa:
-    zestaw 'original' jest chroniony (nie da się go usunąć/zmienić przez API),
-    ale gdyby z jakiegoś powodu zniknął z rejestru, odtwarzamy wpis (puste dane,
-    jeśli katalog też przepadł) — 'original' MUSI zawsze istnieć na liście."""
+    jednozestawową strukturę `processed/` (jeśli są tam jakieś .npz) do nowego,
+    zwykłego zestawu — bez żadnej specjalnej/chronionej nazwy czy id, zestaw
+    jest od razu w pełni edytowalny/usuwalny jak każdy inny."""
     reg = _load_datasets_registry_raw(wid)
     if reg is not None:
         changed = False
-        if not _find_dataset(reg, "original"):
-            now = _now_iso()
-            _datasets_root(wid).joinpath("original").mkdir(parents=True, exist_ok=True)
-            reg["datasets"].insert(0, {
-                "id": "original", "name": "Oryginalny", "kind": "binned",
-                "createdAt": now, "updatedAt": now,
-            })
-            changed = True
         # Migracja: stare wpisy 'binned' z płaskim `params` -> ujednolicone `steps`
         # zaczynające się od mz_range/bin_size z surowego imzML.
         for ds in reg["datasets"]:
@@ -172,23 +163,26 @@ def _ensure_datasets_registry(wid: str) -> dict:
     now = _now_iso()
     root = _datasets_root(wid)
     root.mkdir(parents=True, exist_ok=True)
-    orig_dir = root / "original"
-    orig_dir.mkdir(parents=True, exist_ok=True)
 
     legacy = _workspace_dir(wid) / "processed"
-    if legacy.exists():
-        for f in legacy.glob("*.npz"):
-            dest = orig_dir / f.name
+    legacy_files = list(legacy.glob("*.npz")) if legacy.exists() else []
+    if legacy_files:
+        did = uuid.uuid4().hex[:12]
+        dest_dir = root / did
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for f in legacy_files:
+            dest = dest_dir / f.name
             if not dest.exists():
                 shutil.copy(f, dest)
-
-    reg = {
-        "active_id": "original",
-        "datasets": [{
-            "id": "original", "name": "Oryginalny", "kind": "binned",
-            "createdAt": now, "updatedAt": now,
-        }],
-    }
+        reg = {
+            "active_id": did,
+            "datasets": [{
+                "id": did, "name": "Zbinowany (import)", "kind": "binned",
+                "createdAt": now, "updatedAt": now,
+            }],
+        }
+    else:
+        reg = {"active_id": "", "datasets": []}
     _save_datasets_registry(reg, wid)
     return reg
 
@@ -1058,7 +1052,7 @@ async def process(body: dict) -> StreamingResponse:
     body: { bin_size, bin_agg, mz_min, mz_max, tissues: [{id, x_min, x_max, label, is_ref}],
             dataset_id?, dataset_name? }
     dataset_id: docelowy zestaw danych (domyślnie aktywny zestaw workspace'u,
-    zwykle "original"); jeśli nie istnieje, zostanie utworzony.
+    a jeśli workspace nie ma jeszcze żadnego — nowy zestaw z losowym id).
 
     Utrzymywane dla wstecznej kompatybilności — docelowa ścieżka to
     `/workspaces/{wid}/datasets/{did}/build_pipeline` z `source_dataset_id="__raw__"`
@@ -1071,11 +1065,9 @@ async def process(body: dict) -> StreamingResponse:
     mz_min     = float(body.get("mz_min",   MZ_MIN))
     mz_max     = float(body.get("mz_max",   MZ_MAX))
     tissues    = body.get("tissues", _tissues_meta)
-    dataset_id   = body.get("dataset_id") or _active_dataset_id or "original"
+    dataset_id   = body.get("dataset_id") or _active_dataset_id or uuid.uuid4().hex[:12]
     dataset_name = body.get("dataset_name")
     target_dir   = _dataset_dir(dataset_id, _active_workspace_id)
-    if dataset_id == "original" and any(target_dir.glob("*.npz")):
-        raise HTTPException(400, "Zestaw 'Oryginalny' jest chroniony — nie można go nadpisać. Utwórz nowy zestaw.")
     imzml_path = Path(body["imzml_path"]) if body.get("imzml_path") else \
                  ROOT / "source" / "FMP10_Rat_brain_breg_084.imzML"
     if not imzml_path.is_absolute():
@@ -1101,22 +1093,18 @@ async def process(body: dict) -> StreamingResponse:
             ds = _find_dataset(dreg, dataset_id)
             now = _now_iso()
             if ds is None:
-                ds = {"id": dataset_id, "name": dataset_name or dataset_id,
+                ds = {"id": dataset_id, "name": dataset_name or "Zbinowany",
                       "kind": "binned", "createdAt": now}
                 dreg["datasets"].append(ds)
             elif dataset_name:
                 ds["name"] = dataset_name
             ds["kind"] = "binned"
             ds["updatedAt"] = now
-            # "original" jest chroniony i traktowany jako sam surowy imzML (bez
-            # zapamiętanych kroków budowy) — patrz get_dataset_graph, które dla
-            # "original" zawsze zwraca stały graf źródło→wynik.
-            if dataset_id != "original":
-                ds["source_dataset_id"] = RAW_DATASET_ID
-                ds["steps"] = [
-                    {"method": "mz_range", "params": {"mz_min": mz_min, "mz_max": mz_max}},
-                    {"method": "bin_size", "params": {"bin_size": bin_size, "bin_agg": bin_agg}},
-                ]
+            ds["source_dataset_id"] = RAW_DATASET_ID
+            ds["steps"] = [
+                {"method": "mz_range", "params": {"mz_min": mz_min, "mz_max": mz_max}},
+                {"method": "bin_size", "params": {"bin_size": bin_size, "bin_agg": bin_agg}},
+            ]
             ds.pop("params", None)
             dreg["active_id"] = dataset_id
             _save_datasets_registry(dreg, _active_workspace_id)
@@ -1369,12 +1357,59 @@ def pixel_spectrum(tissue: str, x: int, y: int, dataset: str = "") -> dict:
 
 
 # ── Tissue pixel map for Widma tab ────────────────────────────────────────
+def _tissue_pixel_map_raw(tissue: str, mz: float, tol: float, global_vmax: float) -> dict:
+    """Jak tissue_pixel_map, ale liczy intensywność bezpośrednio z oryginalnego
+    pliku imzML (mz ± tol lub TIC), z pominięciem binowania z .npz — używane
+    gdy dataset == RAW_DATASET_ID ("Dane oryginalne"). Współrzędne pikseli
+    tkanki bierzemy z aktywnego zestawu (_cache), sama geometria tkanki nie
+    zależy od binowania."""
+    if tissue not in _cache:
+        raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
+    if not _imzml_path:
+        raise HTTPException(503, "Brak ścieżki do pliku imzML — uruchom preprocessing raz "
+                                  "aby zapamiętać ścieżkę.")
+    path = Path(_imzml_path)
+    if not path.exists():
+        raise HTTPException(404, f"Plik {path} nie istnieje")
+
+    from pyimzml.ImzMLParser import ImzMLParser
+    p = ImzMLParser(str(path))
+    raw_coords = np.array(p.coordinates)
+    coord_to_idx = {(int(rx), int(ry)): i for i, (rx, ry, *_ ) in enumerate(raw_coords)}
+
+    coords = _cache[tissue]["coords"]
+    xs = coords[:, 0].astype(int).tolist()
+    ys = coords[:, 1].astype(int).tolist()
+    values_raw: list[float] = []
+    for x, y in zip(xs, ys):
+        idx = coord_to_idx.get((x, y))
+        if idx is None:
+            values_raw.append(0.0)
+            continue
+        mz_arr, ints = p.getspectrum(idx)
+        mz_arr = np.asarray(mz_arr, dtype=np.float64)
+        ints   = np.asarray(ints,   dtype=np.float64)
+        if mz > 0:
+            mask = np.abs(mz_arr - mz) <= tol
+            values_raw.append(float(ints[mask].sum()) if mask.any() else 0.0)
+        else:
+            values_raw.append(float(ints.sum()))
+
+    arr = np.array(values_raw, dtype=np.float64)
+    local_vmax = float(arr.max()) if arr.max() > 0 else 1.0
+    norm_by = global_vmax if global_vmax > 0 else local_vmax
+    values = (arr / norm_by).tolist()
+    return {"tissue": tissue, "xs": xs, "ys": ys, "values": values}
+
+
 @app.get("/tissue_pixel_map")
 def tissue_pixel_map(tissue: str, mz: float = -1.0, tol: float = 0.3,
                      global_vmax: float = -1.0, dataset: str = "") -> dict:
     """Zwraca listę pikseli tkanki z opcjonalną intensywnością jonu (mz±tol).
     global_vmax: jeśli > 0, normalizuje przez tę wartość (jak ion_image) zamiast
     lokalnego max — zapewnia spójną skalę kolorów z zakładką m/z."""
+    if dataset == RAW_DATASET_ID:
+        return _tissue_pixel_map_raw(tissue, mz, tol, global_vmax)
     cache = _get_dataset_cache(dataset)
     if tissue not in cache:
         raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
@@ -1558,8 +1593,6 @@ def create_dataset(wid: str, body: dict) -> dict:
 
 @app.put("/workspaces/{wid}/datasets/{did}")
 def rename_dataset(wid: str, did: str, body: dict) -> dict:
-    if did == "original":
-        raise HTTPException(400, "Zestaw 'Oryginalny' jest chroniony — nie można go edytować")
     dreg = _ensure_datasets_registry(wid)
     ds = _find_dataset(dreg, did)
     if not ds:
@@ -1574,8 +1607,6 @@ def rename_dataset(wid: str, did: str, body: dict) -> dict:
 @app.delete("/workspaces/{wid}/datasets/{did}")
 def delete_dataset(wid: str, did: str) -> dict:
     global _active_dataset_id, _tissues_meta
-    if did == "original":
-        raise HTTPException(400, "Zestaw 'Oryginalny' jest chroniony — nie można go usunąć")
     dreg = _ensure_datasets_registry(wid)
     if not _find_dataset(dreg, did):
         raise HTTPException(404, f"Zestaw '{did}' nie istnieje")
@@ -1623,8 +1654,6 @@ async def build_pipeline_dataset(wid: str, did: str, body: dict) -> StreamingRes
     steps = body.get("steps") or []
     if not source_id:
         raise HTTPException(400, "Brak source_dataset_id")
-    if did == "original":
-        raise HTTPException(400, "Zestaw 'Oryginalny' jest chroniony — nie można go nadpisać. Utwórz nowy zestaw.")
 
     dreg = _ensure_datasets_registry(wid)
     if not _find_dataset(dreg, did):
@@ -1797,14 +1826,7 @@ async def build_pipeline_dataset(wid: str, did: str, body: dict) -> StreamingRes
 @app.get("/workspaces/{wid}/datasets/{did}/graph")
 def get_dataset_graph(wid: str, did: str) -> dict:
     """Zwraca zapisany graf node'ów (edycja przetwarzania) dla zestawu `did`,
-    albo pusty obiekt jeśli zestaw nie ma jeszcze zapisanego grafu.
-
-    "original" jest chroniony i zawsze traktowany jako bezpośrednio surowy
-    imzML — niezależnie od tego, co ewentualnie zostało w nim kiedyś zapisane,
-    zawsze zwracamy pusty graf (frontend renderuje dla niego stały,
-    tylko-do-odczytu widok źródło→wynik)."""
-    if did == "original":
-        return {}
+    albo pusty obiekt jeśli zestaw nie ma jeszcze zapisanego grafu."""
     dreg = _ensure_datasets_registry(wid)
     ds = _find_dataset(dreg, did)
     if not ds:
@@ -1817,8 +1839,6 @@ def put_dataset_graph(wid: str, did: str, body: dict) -> dict:
     """Zapisuje graf node'ów (nodes/edges/viewport) dla zestawu `did` — to
     reprezentacja do edycji/podglądu; wykonywalny łańcuch (`steps`) zapisuje
     się osobno przy `build_pipeline`."""
-    if did == "original":
-        raise HTTPException(400, "Zestaw 'Oryginalny' jest chroniony — nie można edytować jego grafu")
     dreg = _ensure_datasets_registry(wid)
     ds = _find_dataset(dreg, did)
     if not ds:

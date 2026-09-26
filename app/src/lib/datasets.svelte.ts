@@ -42,6 +42,15 @@ export function datasetLabel(id: string): string {
   return _list.find((d) => d.id === id)?.name ?? id;
 }
 
+// Dawniej istniał specjalny, chroniony pseudo-zestaw "original" ("Oryginalny",
+// mylony z RAW_DATASET_ID/"Dane oryginalne") — usunięty razem z jego danymi.
+// Migruje ewentualny, WCZEŚNIEJ zapisany wybór "original" (dropdowny, warstwy
+// Widma z localStorage workspace'u) na RAW_DATASET_ID, żeby stare, martwe
+// odwołanie nie próbowało odpytać usunięty zestaw.
+export function sanitizeDatasetId(id: string): string {
+  return id === "original" ? RAW_DATASET_ID : id;
+}
+
 // Zestaw do zaznaczenia po przejściu na zakładkę "Zestaw danych" (np. z
 // DaneTab po utworzeniu nowego zestawu z ROI tkanek) — proste przekazanie
 // intencji między zakładkami, bez potrzeby osobnego routera/eventu.

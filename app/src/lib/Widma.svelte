@@ -4,13 +4,15 @@
   import { fetchPixelSpectrum, fetchPixelSpectrumRaw } from "./api.js";
   import type { PixelSpectrum } from "./api.js";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
-  import { datasets, loadDatasets, datasetsLoaded, activeDatasetId, RAW_DATASET_ID } from "$lib/datasets.svelte";
+  import { datasets, sanitizeDatasetId, loadDatasets, datasetsLoaded, RAW_DATASET_ID } from "$lib/datasets.svelte";
   import PixelMapPanel from "$lib/PixelMapPanel.svelte";
 
   const LS_LAYERS    = "widma_layers";
   const LS_NORM      = "widma_norm";
   const LS_TISSUE    = "widma_tissue";
   const LS_NEW_DS    = "widma_newLayerDataset";
+  const LS_BIN_SHOW  = "widma_showBinGrid";
+  const LS_BIN_SIZE  = "widma_binSizeValue";
 
   interface SavedLayer { tissue: string; x: number; y: number; label: string; color: string; visible: boolean; locked: boolean; datasetId: string; }
 
@@ -40,9 +42,6 @@
     locked: boolean;
     spectrum: PixelSpectrum;
     datasetId: string; // zestaw danych źródłowy tej warstwy (lub RAW_DATASET_ID)
-    // Zbinowana intensywność tego piksela (ta sama siatka co binMz), niezależna
-    // od wybranego zestawu — używana do słupków binów.
-    binIntensity: number[];
   }
 
   const COLORS = ["#ffc951","#7ec8e3","#a8e6cf","#ff8b94","#c9b1ff","#ffcba4","#b5ead7","#ffdac1"];
@@ -72,10 +71,16 @@
   let normMode        = $state<"none" | "max" | "tic">(wsGet(LS_NORM, "none"));
   // Zestaw danych domyślnie proponowany dla NOWEJ warstwy (każda warstwa ma
   // też własny dropdown, patrz `changeLayerDataset`).
-  let newLayerDataset = $state(wsGet<string>(LS_NEW_DS, ""));
+  let newLayerDataset = $state(sanitizeDatasetId(wsGet<string>(LS_NEW_DS, "")));
   let originalError   = $state("");
-  let binMz           = $state<number[]>([]);   // centra binów (z binnowanego widma)
-  let binIntensity    = $state<number[]>([]);   // intensywności binów (z pierwszej warstwy binnowanej)
+  // Referencyjna siatka binów (przerywana linia) — liczona LOKALNIE (w
+  // przeglądarce) przez zbinowanie surowego widma warstwy "Dane oryginalne"
+  // z zadeklarowanym tu bin size, NIEZALEŻNIE od bin size jakiegokolwiek
+  // zestawu w bazie. Wcześniej siatka brała się z aktywnego zestawu domyślnego
+  // ("Oryginalny"), co dawało linię z zupełnie innym bin size niż to, co user
+  // faktycznie porównywał (np. zestaw referencyjny z innym binem/zakresem).
+  let showBinGrid     = $state(wsGet<boolean>(LS_BIN_SHOW, true));
+  let binSizeValue    = $state(wsGet<number>(LS_BIN_SIZE, 0.3));
   let binLevel        = $state(0);              // Y poziom kreski binów na wykresie
   let plotDiv         = $state<HTMLDivElement | null>(null);
 
@@ -88,6 +93,8 @@
   $effect(() => { wsSet(LS_TISSUE, selectedTissue); });
   $effect(() => { wsSet(LS_NORM, normMode); });
   $effect(() => { wsSet(LS_NEW_DS, newLayerDataset); });
+  $effect(() => { wsSet(LS_BIN_SHOW, showBinGrid); });
+  $effect(() => { wsSet(LS_BIN_SIZE, binSizeValue); });
   $effect(() => {
     if (layers.length === 0) return;
     const saved: SavedLayer[] = layers.map(l => ({
@@ -100,7 +107,7 @@
 
   onMount(async () => {
     if (!datasetsLoaded()) await loadDatasets();
-    if (!newLayerDataset) newLayerDataset = activeDatasetId();
+    if (!newLayerDataset) newLayerDataset = RAW_DATASET_ID;
 
     const saved = wsGet<SavedLayer[]>(LS_LAYERS, []);
     if (saved.length === 0) return;
@@ -108,14 +115,10 @@
     try {
       const restored: Layer[] = [];
       for (const s of saved) {
-        const dsId = s.datasetId ?? activeDatasetId();
+        const dsId = sanitizeDatasetId(s.datasetId ?? RAW_DATASET_ID);
         try {
           const spec = await fetchSpec(s.tissue, s.x, s.y, dsId);
-          // binIntensity to zawsze zbinowana intensywność (aktywny zestaw) —
-          // niezależna od zestawu warstwy, potrzebna do słupków binów.
-          const binnedSpec = dsId === RAW_DATASET_ID ? await fetchPixelSpectrum(s.tissue, s.x, s.y) : spec;
-          if (binMz.length === 0) { binMz = binnedSpec.mz; binIntensity = binnedSpec.intensity; }
-          restored.push({ id: `${s.tissue}_${s.x}_${s.y}`, label: s.label, color: s.color, visible: s.visible, locked: s.locked, spectrum: spec, datasetId: dsId, binIntensity: binnedSpec.intensity });
+          restored.push({ id: `${s.tissue}_${s.x}_${s.y}`, label: s.label, color: s.color, visible: s.visible, locked: s.locked, spectrum: spec, datasetId: dsId });
         } catch {}
       }
       layers = restored;
@@ -138,12 +141,8 @@
     if (layers.some(l => l.spectrum.x === x && l.spectrum.y === y && l.spectrum.tissue === selectedTissue)) return;
     layerLoading = true;
     try {
-      const dsId = newLayerDataset || activeDatasetId();
+      const dsId = newLayerDataset || RAW_DATASET_ID;
       const spec = await fetchSpec(selectedTissue, x, y, dsId);
-      // binIntensity to zawsze zbinowana intensywność (aktywny zestaw) —
-      // niezależna od zestawu tej warstwy, potrzebna do słupków binów.
-      const binnedSpec = dsId === RAW_DATASET_ID ? await fetchPixelSpectrum(selectedTissue, x, y) : spec;
-      if (binMz.length === 0) { binMz = binnedSpec.mz; binIntensity = binnedSpec.intensity; }
       const color = COLORS[layers.length % COLORS.length];
       layers = [...layers, {
         id:      `${selectedTissue}_${x}_${y}`,
@@ -152,7 +151,6 @@
         visible: true,
         locked:  false,
         datasetId: dsId,
-        binIntensity: binnedSpec.intensity,
         spectrum: spec,
       }];
     } catch { /* pixel not found */ }
@@ -243,10 +241,39 @@
   // oś m/z różni się od siatki binów, więc rysujemy referencyjne kreski binów.
   const anyRaw = $derived(layers.some(l => l.datasetId === RAW_DATASET_ID));
 
+  // Referencyjna warstwa, z której liczymy siatkę binów — pierwsza widoczna
+  // warstwa "Dane oryginalne" (surowe widmo).
+  const refRawLayer = $derived(layers.find(l => l.visible && l.datasetId === RAW_DATASET_ID));
+
+  // Grupuje surowe widmo w biny o zadanej szerokości (sumując intensywność
+  // punktów w każdym binie) — liczone lokalnie, żeby siatka referencyjna
+  // zawsze odpowiadała temu, co user faktycznie chce porównać, a nie
+  // bin size'owi jakiegokolwiek zestawu w bazie.
+  function rebinRaw(mz: number[], intensity: number[], binSize: number): { centers: number[]; sums: number[] } {
+    if (mz.length === 0 || !(binSize > 0)) return { centers: [], sums: [] };
+    const mzMin = mz[0], mzMax = mz[mz.length - 1];
+    const nBins = Math.max(1, Math.round((mzMax - mzMin) / binSize));
+    const centers = new Array<number>(nBins);
+    const sums = new Array<number>(nBins).fill(0);
+    for (let i = 0; i < nBins; i++) centers[i] = mzMin + (i + 0.5) * binSize;
+    for (let i = 0; i < mz.length; i++) {
+      let idx = Math.floor((mz[i] - mzMin) / binSize);
+      if (idx < 0) idx = 0; else if (idx >= nBins) idx = nBins - 1;
+      sums[idx] += intensity[i];
+    }
+    return { centers, sums };
+  }
+
+  const binGrid = $derived(
+    showBinGrid && refRawLayer
+      ? rebinRaw(refRawLayer.spectrum.mz, refRawLayer.spectrum.intensity, binSizeValue)
+      : { centers: [] as number[], sums: [] as number[] }
+  );
+
   // ── Wykres Plotly ─────────────────────────────────────────────────────────
   $effect(() => {
     if (!plotDiv) return;
-    layers; normMode; activeMz; dispMin; dispMax; anyRaw; binMz; binIntensity; binLevel;
+    layers; normMode; activeMz; dispMin; dispMax; binGrid; binLevel;
 
     // Zachowaj aktualny zakres osi (żeby zoom nie ginął po update)
     const existingLayout = (plotDiv as any).layout as Plotly.Layout | undefined;
@@ -257,10 +284,10 @@
     const userZoomedX = savedXRange && xAutoRange !== true;
     const userZoomedY = savedYRange && yAutoRange !== true;
 
-    // Kreska binów — pionowe ticki + linia pozioma na poziomie binLevel gdy showOriginal
-    const binTrace: Plotly.Data[] = (anyRaw && binMz.length > 0) ? [{
-      x: binMz,
-      y: Array(binMz.length).fill(binLevel),
+    // Kreska binów — pionowe ticki + linia pozioma na poziomie binLevel
+    const binTrace: Plotly.Data[] = (binGrid.centers.length > 0) ? [{
+      x: binGrid.centers,
+      y: Array(binGrid.centers.length).fill(binLevel),
       type:  "scatter" as const,
       mode:  "markers" as const,
       name:  "biny",
@@ -269,28 +296,18 @@
       showlegend: false,
     }] : [];
 
-    // Pionowe przerywane linie — słupki intensywności binów (od binLevel w górę)
-    // Wysokość słupka bina = dokładnie ta sama wartość, jaką pokazuje przetworzone
-    // (zbinowane) widmo w tym binie — nie średnia surowych punktów w oknie.
-    // Przy wielu widocznych warstwach: średnia znormalizowanej intensywności binu
-    // po wszystkich widocznych warstwach (dla tego samego bina).
-    const binBarTrace: Plotly.Data[] = (anyRaw && binMz.length > 0) ? (() => {
-      const visLayers = layers.filter(l => l.visible && l.binIntensity?.length === binMz.length);
-      if (visLayers.length === 0) return [];
-
-      const halfBin = binMz.length > 1 ? (binMz[1] - binMz[0]) / 2 : 0.5;
-      const normed = visLayers.map(l => normalize(l.binIntensity));
-      const avgInts = binMz.map((_, i) => {
-        let total = 0;
-        for (const arr of normed) total += arr[i];
-        return total / normed.length;
-      });
+    // Pionowe przerywane linie — słupki intensywności binów (od binLevel w górę),
+    // liczone przez zbinowanie warstwy referencyjnej (refRawLayer) na siatce
+    // binGrid (patrz rebinRaw powyżej).
+    const binBarTrace: Plotly.Data[] = (binGrid.centers.length > 0) ? (() => {
+      const halfBin = binGrid.centers.length > 1 ? (binGrid.centers[1] - binGrid.centers[0]) / 2 : 0.5;
+      const normedSums = normalize(binGrid.sums);
 
       const xs: (number | null)[] = [];
       const ys: (number | null)[] = [];
-      for (let i = 0; i < binMz.length; i++) {
-        xs.push(binMz[i] - halfBin, binMz[i] - halfBin, null);
-        ys.push(binLevel, binLevel + avgInts[i], null);
+      for (let i = 0; i < binGrid.centers.length; i++) {
+        xs.push(binGrid.centers[i] - halfBin, binGrid.centers[i] - halfBin, null);
+        ys.push(binLevel, binLevel + normedSums[i], null);
       }
       return [{
         x: xs, y: ys,
@@ -326,7 +343,7 @@
         yref: "paper" as const,
         line: { color: "#ffc951", width: 1, dash: "dot" as const },
       }] : []),
-      ...(anyRaw && binMz.length > 0 ? [{
+      ...(binGrid.centers.length > 0 ? [{
         type:  "line" as const,
         x0: 0, x1: 1,
         xref: "paper" as const,
@@ -522,17 +539,29 @@
             <option value={d.id}>{d.name}</option>
           {/each}
         </select>
-        {#if anyRaw && binMz.length > 1}
-          <span class="orig-label" style="opacity:.6">(bin size = {(binMz[1] - binMz[0]).toFixed(3)} Da)</span>
-        {/if}
       </div>
       {#if anyRaw}
         <div class="bin-level-row">
+          <label class="bin-checkbox-label">
+            <input type="checkbox" bind:checked={showBinGrid} />
+            <span class="orig-label">Bin size</span>
+          </label>
+          <input
+            class="bin-level-input"
+            type="number"
+            step="any"
+            min="0.001"
+            disabled={!showBinGrid}
+            value={binSizeValue}
+            onchange={(e) => { const v = parseFloat((e.target as HTMLInputElement).value); if (v > 0) binSizeValue = v; }}
+            onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+          />
           <span class="orig-label">Poziom kreski</span>
           <input
             class="bin-level-input"
             type="number"
             step="any"
+            disabled={!showBinGrid}
             value={binLevel}
             onchange={(e) => { binLevel = parseFloat((e.target as HTMLInputElement).value) || 0; }}
             onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
@@ -913,12 +942,20 @@
   .bin-level-row {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 2px 0 4px 22px;
   }
 
+  .bin-checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+  }
+
   .bin-level-input {
-    width: 72px;
+    width: 64px;
     background: #111;
     border: 1px solid rgba(255,255,255,0.12);
     border-radius: 5px;

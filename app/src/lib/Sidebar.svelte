@@ -4,7 +4,7 @@
   import "@fontsource/jetbrains-mono/600.css";
   import DualRange from "./DualRange.svelte";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
-  import { datasets, loadDatasets, datasetsLoaded, activeDatasetId } from "$lib/datasets.svelte";
+  import { datasets, sanitizeDatasetId, loadDatasets, datasetsLoaded, activeDatasetId, RAW_DATASET_ID } from "$lib/datasets.svelte";
 
   const BASE = "http://127.0.0.1:7432";
 
@@ -59,12 +59,14 @@
   $effect(() => { wsSet("sidebar_invertColors", invertColors); });
   onMount(() => { oninvert?.(invertColors); });
 
-  // Zestaw danych używany do mapy jonowej (m/z tab).
-  let queryDataset = $state(wsGet<string>("sidebar_queryDataset", ""));
+  // Zestaw danych używany do mapy jonowej (m/z tab). Domyślnie "Dane
+  // oryginalne" (surowy imzML) — działa zawsze, bez wcześniejszego
+  // preprocessingu. `sanitizeDatasetId` migruje ewentualny stary, zapisany
+  // wybór usuniętego pseudo-zestawu "original" (patrz datasets.svelte.ts).
+  let queryDataset = $state(sanitizeDatasetId(wsGet<string>("sidebar_queryDataset", RAW_DATASET_ID)));
   $effect(() => { wsSet("sidebar_queryDataset", queryDataset); });
   onMount(async () => {
     if (!datasetsLoaded()) await loadDatasets();
-    if (!queryDataset) queryDataset = activeDatasetId();
   });
 
   // Section collapse state
@@ -188,6 +190,7 @@
   <section class="section">
     <label class="field-label" for="query-dataset-select">Zestaw danych</label>
     <select id="query-dataset-select" class="ds-select" bind:value={queryDataset} onchange={onDatasetChange}>
+      <option value={RAW_DATASET_ID}>Dane oryginalne</option>
       {#each datasets() as d}
         <option value={d.id}>{d.name}{d.id === activeDatasetId() ? " (aktywny)" : ""}</option>
       {/each}

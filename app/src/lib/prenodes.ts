@@ -212,18 +212,6 @@ export function defaultDatasetGraph(): PreGraph {
   };
 }
 
-/** Stały, tylko-do-odczytu graf dla zestawu "original" (chroniony — traktowany
- * jako sam surowy imzML, bez żadnych kroków pomiędzy). */
-export function originalDatasetGraph(): PreGraph {
-  const raw: PreNode = { id: makeId("node"), type: "source_raw", x: -260, y: 0, params: {} };
-  const out: PreNode = { id: makeId("node"), type: "output", x: 60, y: 0, params: {} };
-  return {
-    nodes: [raw, out],
-    edges: [{ id: makeId("edge"), from: raw.id, to: out.id }],
-    viewport: { x: 0, y: 0, zoom: 1 },
-  };
-}
-
 /** Odtwarza graf node'ów z rzeczywistego, zapisanego łańcucha zestawu danych
  * (`source_dataset_id` + `steps`) — używane gdy zestaw nie ma jeszcze
  * zapisanego grafu (edycji wizualnej), np. bo powstał przez starszą ścieżkę

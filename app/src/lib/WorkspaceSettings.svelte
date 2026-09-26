@@ -111,7 +111,6 @@
   }
 
   function dsStartRename(id: string, current: string) {
-    if (id === "original") return;
     dsRenamingId = id; dsRenameVal = current;
   }
 
@@ -124,7 +123,6 @@
   }
 
   function dsAskDelete(id: string, name: string) {
-    if (id === "original") return;
     dsDeleteTarget = { id, name };
   }
 
@@ -220,17 +218,12 @@
     <div class="ws-list">
       {#each datasets() as d}
         {@const isActive = d.id === activeDatasetId()}
-        {@const isLocked = d.id === "original"}
         <div class="ws-row" class:active={isActive}>
           <span class="ws-dot" class:on={isActive}></span>
           {#if dsRenamingId === d.id}
             <input class="field-input rename-input" type="text" bind:value={dsRenameVal}
                    onkeydown={(e) => e.key === "Enter" && dsCommitRename()}
                    onblur={dsCommitRename} />
-          {:else if isLocked}
-            <span class="ws-name ws-name-locked" title="Zestaw Oryginalny jest chroniony — nie można go edytować ani usunąć">
-              🔒 {d.name}{#if isActive}<span class="ws-active-badge">aktywny</span>{/if}
-            </span>
           {:else}
             <button class="ws-name" onclick={() => dsDoActivate(d.id)} disabled={dsBusy || isActive}>
               {d.name}{#if isActive}<span class="ws-active-badge">aktywny</span>{/if}
@@ -238,10 +231,8 @@
           {/if}
           <span class="ws-meta">{d.kind} · zmieniony {fmtDate(d.updatedAt)}</span>
           <div class="ws-actions">
-            {#if !isLocked}
-              <button class="icon-btn" title="Zmień nazwę" onclick={() => dsStartRename(d.id, d.name)}>✎</button>
-              <button class="icon-btn del" title="Usuń" onclick={() => dsAskDelete(d.id, d.name)}>×</button>
-            {/if}
+            <button class="icon-btn" title="Zmień nazwę" onclick={() => dsStartRename(d.id, d.name)}>✎</button>
+            <button class="icon-btn del" title="Usuń" onclick={() => dsAskDelete(d.id, d.name)}>×</button>
           </div>
         </div>
       {/each}
@@ -274,11 +265,6 @@
   .card {
     background: #222; border: 1px solid rgba(255,255,255,0.07);
     border-radius: 12px; padding: 14px 16px; max-width: 640px;
-  }
-  .ws-name-locked {
-    background: none; border: none; color: rgba(255,255,255,0.5); font-size: 0.78rem;
-    font-weight: 600; font-family: inherit; text-align: left; padding: 0;
-    display: flex; align-items: center; gap: 6px;
   }
   .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
   .card-title {

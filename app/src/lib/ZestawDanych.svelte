@@ -58,7 +58,6 @@
   }
 
   function chainSummary(d: DatasetMeta): string {
-    if (d.id === "original") return "Dane oryginalne → Wynik";
     if (!d.steps || d.steps.length === 0) return d.kind === "empty" ? "pusty zestaw" : "brak zapisanego łańcucha";
     const src = d.source_dataset_id === "__raw__" ? "Dane oryginalne" : (d.source_dataset_id ?? "?");
     return `${src} → ` + d.steps.map((s) => s.method).join(" → ");
@@ -86,10 +85,8 @@
             </div>
             <div class="zd-item-chain">{chainSummary(d)}</div>
             <div class="zd-item-actions" onclick={(e) => e.stopPropagation()}>
-              {#if d.id !== "original"}
-                <button onclick={() => startRename(d)}>Zmień nazwę</button>
-                <button class="danger" onclick={() => requestDelete(d.id)}>Usuń</button>
-              {/if}
+              <button onclick={() => startRename(d)}>Zmień nazwę</button>
+              <button class="danger" onclick={() => requestDelete(d.id)}>Usuń</button>
             </div>
           {/if}
         </div>

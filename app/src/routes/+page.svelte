@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { waitForSidecar, fetchIonImage, fetchDatasetStatus } from "$lib/api.js";
+  import { waitForSidecar, fetchIonImage, fetchIonImageRaw, fetchDatasetStatus } from "$lib/api.js";
   import type { TissueImage } from "$lib/api.js";
+  import { RAW_DATASET_ID, sanitizeDatasetId } from "$lib/datasets.svelte";
   import IonGrid from "$lib/IonGrid.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import DaneTab from "$lib/DaneTab.svelte";
@@ -98,8 +99,11 @@
           defaultTol = Math.round(binSize * 100) / 100;
           if (!hadSavedTol) lastTol = defaultTol;
         }
-        // Auto-restore last m/z query
-        if (lastMz !== null) handleQuery({ mz: lastMz, tol: lastTol });
+        // Auto-restore last m/z query — zestaw danych czytamy z tego samego
+        // klucza workspace co Sidebar ("sidebar_queryDataset"), inaczej
+        // pierwsze zapytanie po starcie appki użyłoby innego zestawu niż to,
+        // co user ma ustawione w dropdownie zakładki m/z.
+        if (lastMz !== null) handleQuery({ mz: lastMz, tol: lastTol, dataset: sanitizeDatasetId(wsGet<string>("sidebar_queryDataset", RAW_DATASET_ID)) });
       }
     } catch (e) {
       errorMsg = (e as Error).message;
@@ -126,7 +130,7 @@
           const binSize = (ds.mz_max - ds.mz_min) / (ds.n_bins - 1);
           defaultTol = Math.round(binSize * 100) / 100;
         }
-        if (lastMz !== null) handleQuery({ mz: lastMz, tol: lastTol });
+        if (lastMz !== null) handleQuery({ mz: lastMz, tol: lastTol, dataset: sanitizeDatasetId(wsGet<string>("sidebar_queryDataset", RAW_DATASET_ID)) });
       }
     } catch {}
   }
@@ -138,7 +142,9 @@
     lastTol = tol;
     lastDataset = dataset;
     try {
-      const res = await fetchIonImage(mz, tol, dataset);
+      const res = dataset === RAW_DATASET_ID
+        ? await fetchIonImageRaw(mz, tol)
+        : await fetchIonImage(mz, tol, dataset);
       tissues = res.tissues;
       // Zapisz globalny vmax per tkanka (spójny z Widma)
       const newVmax: Record<string, number> = {};
