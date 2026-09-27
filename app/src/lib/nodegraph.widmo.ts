@@ -88,6 +88,28 @@ export function widmoInputSignature(mz: number[], intensity: number[], params: R
   return `${mz.length}|${intensity.length}|${sum.toFixed(3)}|${JSON.stringify(params)}`;
 }
 
+/** Maksimum wektora intensywności bez spreadu argumentów do Math.max — widmo
+ * płynące tu przez graf może mieć dziesiątki tysięcy punktów (pełna siatka
+ * m/z), a Math.max(...arr) na takiej długości ryzykuje "Maximum call stack
+ * size exceeded" w WebKit (silnik webview Tauri na macOS). */
+export function maxIntensity(intensity: number[]): number {
+  let m = 0;
+  for (const v of intensity) if (v > m) m = v;
+  return m;
+}
+
+/** m/z, których intensywność leży w paśmie [lo, hi] (wartości absolutne, nie
+ * ułamki) — logika węzła "widmo/mz_list" (próg zadany jako ułamek maksimum
+ * widma, przeliczany na wartość absolutną przed wywołaniem tej funkcji, patrz
+ * NodeGraphTab.svelte). */
+export function filterMzByIntensityBand(mz: number[], intensity: number[], lo: number, hi: number): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < mz.length; i++) {
+    if (intensity[i] >= lo && intensity[i] <= hi) out.push(mz[i]);
+  }
+  return out;
+}
+
 function asWidmo(v: NodeValue, socketLabel: string): WidmoValue | { error: string } {
   if (v.kind !== "widmo") return { error: `wejście "${socketLabel}" musi być widmem` };
   return v;
@@ -268,6 +290,25 @@ const WIDMO_NODE_TYPES: NodeTypeDef[] = [
       const a = inputs.a[0];
       const b = inputs.b[0];
       if (!a || !b) return { ok: false, error: "podłącz oba widma (A i B)" };
+      return { ok: false, error: "węzeł podglądowy — brak wyniku liczbowego" };
+    },
+  },
+  {
+    id: "widmo/mz_list",
+    label: "Lista m/z (próg)",
+    description: "Wypisuje m/z, których intensywność leży w paśmie [próg dolny, próg górny] (ułamek maksimum widma), jako tekst do skopiowania w formacie \"[m1;m2;...]\" — gotowy do wklejenia w zakładce m/z → Grupy → \"Lista m/z\". Węzeł czysto podglądowy, bez wyniku liczbowego do dalszego łączenia w grafie (jak \"Porównanie widm\").",
+    domain: "widmo", stage: "wynik",
+    inputs: [{ id: "in", label: "widmo", kind: "widmo" }],
+    outputs: [],
+    params: [
+      { key: "threshold1_frac", label: "Próg dolny (ułamek max)", min: 0, max: 1, step: 0.001, default: 0.05 },
+      { key: "threshold2_frac", label: "Próg górny (ułamek max)", min: 0, max: 1, step: 0.001, default: 1 },
+    ],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0];
+      if (!src) return { ok: false, error: "podłącz wejście" };
+      const checked = asWidmo(src, "widmo");
+      if ("error" in checked) return { ok: false, error: checked.error };
       return { ok: false, error: "węzeł podglądowy — brak wyniku liczbowego" };
     },
   },

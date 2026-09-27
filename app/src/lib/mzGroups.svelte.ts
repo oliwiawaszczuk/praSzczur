@@ -67,6 +67,20 @@ export function addGroup(tolDefault: number): void {
   saveGroups();
 }
 
+/** Modal "Lista m/z" (WieleMz.svelte) — jedna wklejona lista m/z staje się
+ * wieloma grupami naraz, jedno m/z = jedna grupa, wszystkie z tym samym
+ * zestawem danych/tolerancją; dopisywane na koniec istniejących kolumn (jak
+ * `addGroup`), nie zastępują ich. */
+export function addGroupsFromMzList(values: number[], dataset: string, tolDefault: number): void {
+  const ds = sanitizeDatasetId(dataset);
+  const newGroups: MzGroup[] = values.map((mz) => ({
+    id: crypto.randomUUID(), dataset: ds, mz, tol: tolDefault, dispMin: 0, dispMax: 1, invert: false,
+  }));
+  groups = [...groups, ...newGroups];
+  saveGroups();
+  for (const g of newGroups) runGroupQuery(g.id, g.mz as number, g.tol, g.dataset);
+}
+
 export function removeGroup(id: string): void {
   groups = groups.filter((g) => g.id !== id);
   const { [id]: _removed, ...restResults } = groupResults;

@@ -32,8 +32,9 @@
   import { SEG_PALETTE, runKmeans, MERGE_MODE_LABELS, MERGE_MODE_LIST } from "$lib/nodegraph.segmentacja";
   import {
     WIDMO_COMBINE_MODE_LABELS, WIDMO_COMBINE_MODE_LIST, WIDMO_NORMALIZE_MODE_LABELS, WIDMO_NORMALIZE_MODE_LIST,
-    widmoInputSignature, segmentInputSignature,
+    widmoInputSignature, segmentInputSignature, maxIntensity, filterMzByIntensityBand,
   } from "$lib/nodegraph.widmo";
+  import { formatMzListText } from "$lib/mzListFormat";
   // rejestrują swoje typy węzłów przy imporcie (side-effect na moduł) — muszą
   // być zaimportowane choćby raz, żeby NODE_TYPES nie był pusty.
   import "$lib/nodegraph.mapa";
@@ -283,6 +284,7 @@
     if (node.type === "widmo/from_segment") return 240;
     if (node.type === "widmo/combine") return 240;
     if (node.type === "widmo/compare") return 260;
+    if (node.type === "widmo/mz_list") return 260;
     if (node.type === "widmo/save_spectrum") return 230;
     return 210;
   }
@@ -350,12 +352,16 @@
       h += 22 + Math.max(1, inputsFor(node, "b").length) * 24;
       h += 30; // checkbox "pokaż różnicę"
       h += 180; // podgląd wykresu — węzeł podglądowy, większy niż domyślny (kind-gate go nie obejmuje, patrz niżej)
+    } else if (node.type === "widmo/mz_list") {
+      h += 40 * 2; // dwa suwaki progów (dolny/górny)
+      h += 180 + 10; // podgląd wykresu z liniami progów
+      h += 40 + 34; // pole z listą m/z do skopiowania + przycisk "Kopiuj"
     } else if (node.type === "widmo/save_spectrum") {
       h += 30 + 34 + 16;
     }
     const kind = outputKind(node);
     if (kind === "mapa" || kind === "segmentacja" || kind === "segment" || kind === "widmo") h += previewHeight(node) + 10;
-    else if (node.type !== "widmo/compare") h += 22;
+    else if (node.type !== "widmo/compare" && node.type !== "widmo/mz_list") h += 22;
     return Math.max(h, 80);
   }
 
@@ -1222,6 +1228,21 @@
       savingNodeId = null;
     }
   }
+
+  /** "widmo/mz_list" — kopiuje wygenerowaną listę m/z do schowka (Web
+   * Clipboard API — działa w webview Tauri bez dodatkowych uprawnień, bo to
+   * zwykłe wywołanie z JS, nie komenda Tauri). Status czyści się po chwili,
+   * ten sam wzorzec co `savedFlash` w MzColumn.svelte. */
+  let mzListCopyStatus = $state<Record<string, boolean>>({});
+  async function copyMzList(node: GraphNode, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      mzListCopyStatus = { ...mzListCopyStatus, [node.id]: true };
+      setTimeout(() => { mzListCopyStatus = { ...mzListCopyStatus, [node.id]: false }; }, 1200);
+    } catch {
+      // cichy błąd — przycisk po prostu nie pokaże "Skopiowano ✓"
+    }
+  }
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />
@@ -1715,6 +1736,70 @@
                   {/if}
                 </div>
               {/if}
+            {:else if node.type === "widmo/mz_list"}
+              {#each NODE_TYPES[node.type]?.params ?? [] as p (p.key)}
+                <label class="field">
+                  <span class="field-head">
+                    <input type="text" inputmode="decimal" class="param-value-input"
+                           value={node.params[p.key] ?? p.default}
+                           onpointerdown={(e) => e.stopPropagation()}
+                           onchange={(e) => {
+                             const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                             if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default); return; }
+                             setNodeParamClampedFloat(node, p.key, raw, p.min ?? raw, p.max ?? raw);
+                             (e.target as HTMLInputElement).value = String(Math.min(p.max ?? raw, Math.max(p.min ?? raw, raw)));
+                           }}
+                           onkeydown={(e) => {
+                             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                             if (e.key === "Escape") {
+                               (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default);
+                               (e.target as HTMLInputElement).blur();
+                             }
+                           }} />
+                    <span>{p.label}</span>
+                  </span>
+                  <input type="range" min={p.min} max={p.max} step={p.step}
+                         value={node.params[p.key] ?? p.default}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         oninput={(e) => setNodeParamClampedFloat(node, p.key, Number((e.target as HTMLInputElement).value), p.min ?? 0, p.max ?? 100)} />
+                </label>
+              {/each}
+              {#if true}
+                {@const inEdge = graph.edges.find((e) => e.to === node.id && e.toSocket === "in")}
+                {@const inOutcome = inEdge ? evalNode(inEdge.from) : null}
+                {@const widmoVal = inOutcome?.ok && inOutcome.value.kind === "widmo" ? inOutcome.value : null}
+                {@const t1 = Number(node.params.threshold1_frac ?? 0.05)}
+                {@const t2 = Number(node.params.threshold2_frac ?? 1)}
+                {@const maxI = widmoVal ? maxIntensity(widmoVal.intensity) : 0}
+                {@const lo = Math.min(t1, t2) * maxI}
+                {@const hi = Math.max(t1, t2) * maxI}
+                {@const matches = widmoVal ? filterMzByIntensityBand(widmoVal.mz, widmoVal.intensity, lo, hi) : []}
+                {@const listText = formatMzListText(matches)}
+                <div class="mz-preview" style="height:180px">
+                  {#if widmoVal}
+                    {@const traces = [
+                      { mz: widmoVal.mz, intensity: widmoVal.intensity, label: widmoVal.label, color: "#5b9bd5" },
+                      { mz: widmoVal.mz, intensity: widmoVal.mz.map(() => lo), label: "Próg dolny", color: "#ff8a5b" },
+                      { mz: widmoVal.mz, intensity: widmoVal.mz.map(() => hi), label: "Próg górny", color: "#4dd0e1" },
+                    ]}
+                    <SpectrumTracesPlot {traces} compact />
+                    <button class="mz-zoom-btn" onpointerdown={(e) => e.stopPropagation()}
+                            onclick={() => (zoomWidmoTraces = traces)} title="Powiększ">⤢</button>
+                  {:else}
+                    <div class="mz-preview-empty">podłącz wejście (widmo)</div>
+                  {/if}
+                </div>
+                {#if widmoVal}
+                  <label class="field" onpointerdown={(e) => e.stopPropagation()}>
+                    <span>Lista m/z ({matches.length}) — do skopiowania</span>
+                    <textarea class="mz-name-input mz-list-output" readonly rows="2">{listText}</textarea>
+                  </label>
+                  <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
+                          onclick={() => copyMzList(node, listText)}>
+                    {mzListCopyStatus[node.id] ? "Skopiowano ✓" : "Kopiuj listę m/z"}
+                  </button>
+                {/if}
+              {/if}
             {:else if node.type === "widmo/save_spectrum"}
               <label class="field" onpointerdown={(e) => e.stopPropagation()}>
                 <span>Nazwa nowego widma</span>
@@ -1758,7 +1843,7 @@
                     <div class="mz-preview-empty">{outcome.error}</div>
                   {/if}
                 </div>
-              {:else if !outcome.ok && node.type !== "widmo/compare"}
+              {:else if !outcome.ok && node.type !== "widmo/compare" && node.type !== "widmo/mz_list"}
                 <div class="node-status">{outcome.error}</div>
               {/if}
             {/if}
@@ -2294,6 +2379,12 @@
     outline: none;
   }
   .mz-name-input:focus { border-color: rgba(255,201,81,0.4); }
+  .mz-list-output {
+    resize: none;
+    font-family: "SF Mono", Menlo, monospace;
+    line-height: 1.4;
+    cursor: text;
+  }
 
   .run-btn {
     width: 100%;

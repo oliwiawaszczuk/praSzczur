@@ -326,6 +326,16 @@ faktycznie **łączy dwie różne domeny w jednym potoku**, nie tylko dwa różn
   `mapa/save_output`) — żeby użyć różnicy jako danych dalej w grafie, trzeba
   użyć `widmo/combine` z trybem "różnica" na dwóch wejściach; ten węzeł
   dubluje wtedy istniejącą semantykę zamiast definiować drugą.
+- **`widmo/mz_list`** ("Lista m/z (próg)") — też węzeł czysto podglądowy
+  (`outputs: []`): dwa suwaki, próg dolny/górny jako ułamek maksimum widma
+  (`maxIntensity`/`filterMzByIntensityBand` w `nodegraph.widmo.ts`), pokazuje
+  wejściowe widmo z dwiema poziomymi liniami progów (te same 3 trace'y przez
+  `SpectrumTracesPlot`, próg jako stała intensywność na całej siatce m/z) i
+  listę m/z, których intensywność wpada w to pasmo, jako tekst do skopiowania
+  w formacie `[m1;m2;...]` (`formatMzListText`/`parseMzListText` w
+  `mzListFormat.ts`) — ten sam format przyjmuje modal "Lista m/z" w zakładce
+  m/z → Grupy (`MzListModal.svelte`), gdzie każde wklejone m/z staje się
+  własną grupą/kolumną.
 
 Podgląd na żywo węzłów widma (mini-wykres w ciele node'a + przycisk "⤢" →
 `SpectrumZoomModal.svelte` na cały ekran) używa wspólnego

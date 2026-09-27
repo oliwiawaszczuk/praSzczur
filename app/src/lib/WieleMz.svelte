@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import MzColumn from "./MzColumn.svelte";
+  import MzListModal from "./MzListModal.svelte";
   import { allGroups, loadWieleMz, addGroup, removeGroup, reorderGroups, clearSelection, hasAnySelection } from "./mzGroups.svelte";
 
   interface Props {
@@ -24,6 +25,8 @@
   onMount(() => { loadWieleMz(tolDefault); });
 
   const groups = $derived(allGroups());
+
+  let mzListModalOpen = $state(false);
 
   // ── Drag-to-reorder (Pointer Events) — natywny HTML5 DnD jest niestabilny
   // w webview Tauri, więc ten sam wzorzec co przy przeciąganiu warstw widma
@@ -62,10 +65,15 @@
 
 <div class="wmz-outer">
   <div class="wmz-toolbar">
+    <button class="wmz-clear-btn" onclick={() => (mzListModalOpen = true)}>
+      Lista m/z
+    </button>
     <button class="wmz-clear-btn" onclick={clearSelection} disabled={!hasAnySelection()}>
       Wyczyść zaznaczenia
     </button>
   </div>
+
+  <MzListModal open={mzListModalOpen} {tolDefault} onclose={() => (mzListModalOpen = false)} />
 
   <div class="wmz-wrap" bind:this={colsListEl}>
     {#each groups as group, i (group.id)}
@@ -115,6 +123,7 @@
     flex-shrink: 0;
     display: flex;
     justify-content: flex-end;
+    gap: 8px;
     padding: 10px 16px 0;
     box-sizing: border-box;
   }
