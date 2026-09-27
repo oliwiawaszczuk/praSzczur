@@ -5,6 +5,7 @@
   import type { PixelSpectrum } from "./api.js";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
   import { datasets, sanitizeDatasetId, loadDatasets, datasetsLoaded, RAW_DATASET_ID } from "$lib/datasets.svelte";
+  import { saveSpectrum } from "$lib/spectraLibrary.svelte";
   import PixelMapPanel from "$lib/PixelMapPanel.svelte";
 
   const LS_LAYERS    = "widma_layers";
@@ -177,6 +178,36 @@
     const l = layers.find(l => l.id === id);
     if (l?.locked) return;
     layers = layers.filter(l => l.id !== id);
+  }
+
+  // ── Zapis warstwy do biblioteki "Zapisane widma" (do użycia w Node Graph,
+  // węzeł "widmo/spectrum_source") ─────────────────────────────────────────
+  let savingLayerId  = $state<string | null>(null);
+  let saveLayerStatus = $state<Record<string, string>>({});
+
+  function layerDatasetLabel(datasetId: string): string {
+    return datasetId === RAW_DATASET_ID ? "Dane oryginalne" : (datasets().find(d => d.id === datasetId)?.name ?? datasetId);
+  }
+
+  async function saveLayerToLibrary(layer: Layer) {
+    savingLayerId = layer.id;
+    saveLayerStatus = { ...saveLayerStatus, [layer.id]: "" };
+    try {
+      await saveSpectrum({
+        name: layer.label,
+        tissueId: layer.spectrum.tissue,
+        tissueLabel: tLabel(layer.spectrum.tissue),
+        mode: "single",
+        sources: [{ x: layer.spectrum.x, y: layer.spectrum.y, datasetId: layer.datasetId, datasetLabel: layerDatasetLabel(layer.datasetId) }],
+        mz: layer.spectrum.mz,
+        intensity: layer.spectrum.intensity,
+      });
+      saveLayerStatus = { ...saveLayerStatus, [layer.id]: "✓ zapisano" };
+    } catch (e) {
+      saveLayerStatus = { ...saveLayerStatus, [layer.id]: e instanceof Error ? e.message : String(e) };
+    } finally {
+      savingLayerId = null;
+    }
   }
 
   // ── Drag-to-reorder (Pointer Events) ─────────────────────────────────────
@@ -495,6 +526,12 @@
               {#if layer.locked}
                 <span class="lock-badge" title="Zablokowana">⊘</span>
               {/if}
+              <button
+                class="layer-btn save-btn"
+                onclick={() => saveLayerToLibrary(layer)}
+                disabled={savingLayerId === layer.id}
+                title={savingLayerId === layer.id ? "Zapisywanie…" : (saveLayerStatus[layer.id] || "Zapisz do biblioteki widm (do użycia w Node Graph)")}
+              >{savingLayerId === layer.id ? "…" : "💾"}</button>
               <button
                 class="layer-btn vis-btn"
                 class:vis-off={!layer.visible}

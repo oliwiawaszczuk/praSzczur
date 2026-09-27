@@ -7,26 +7,38 @@
   import IonCanvas from "$lib/IonCanvas.svelte";
   import PixelMapZoomModal from "$lib/PixelMapZoomModal.svelte";
   import SegLabelCanvas from "$lib/SegLabelCanvas.svelte";
+  import SegmentMaskCanvas from "$lib/SegmentMaskCanvas.svelte";
+  import SpectrumTracesPlot from "$lib/SpectrumTracesPlot.svelte";
+  import SpectrumZoomModal from "$lib/SpectrumZoomModal.svelte";
   import type { TissueImage } from "$lib/api.js";
+  import { fetchSpectrumProcess, fetchSegmentSpectrum, type SpectrumProcessMethod, type SegmentSpectrumMode } from "$lib/api";
   import { maxOf, combineMasks } from "$lib/tissueMerge";
+  import { datasets, loadDatasets, datasetsLoaded, RAW_DATASET_ID } from "$lib/datasets.svelte";
   import {
     savedMapsList, loadSavedMaps, savedMapsLoaded, fetchSavedMapData, savePixelMap,
     type SavedPixelMap, type SavedPixelMapMode,
   } from "$lib/savedPixelMaps.svelte";
   import {
+    savedSpectraList, loadSavedSpectra, savedSpectraLoaded, fetchSavedSpectrumData, saveSpectrum,
+    type SavedSpectrum,
+  } from "$lib/spectraLibrary.svelte";
+  import {
     NODE_TYPES, nodeTypeList, defaultGraph, defaultParamsFor, makeId, evaluateGraphNode, wouldCreateCycle,
-    PORT_KIND_COLORS, DOMAIN_ORDER, DOMAIN_LABELS, STAGE_ORDER, STAGE_LABELS, DEFAULT_CURVE_POINTS,
+    PORT_KIND_COLORS, PORT_KIND_LABELS, DOMAIN_ORDER, DOMAIN_LABELS, STAGE_ORDER, STAGE_LABELS, DEFAULT_CURVE_POINTS,
     type Graph, type GraphNode, type GraphEdge, type GraphViewport, type PortKind, type PortSocketDef,
-    type MapaValue, type CurvePoint, type EvalOutcome, type NodeTypeDef,
+    type MapaValue, type SegmentValue, type WidmoValue, type CurvePoint, type EvalOutcome, type NodeTypeDef,
   } from "$lib/nodegraph";
   import { COMBINE_MODE_LABELS, COMBINE_MODE_LIST, computeHistogram, type CombineModeExt } from "$lib/nodegraph.mapa";
-  import { SEG_PALETTE, runKmeans } from "$lib/nodegraph.segmentacja";
+  import { SEG_PALETTE, runKmeans, MERGE_MODE_LABELS, MERGE_MODE_LIST } from "$lib/nodegraph.segmentacja";
+  import {
+    WIDMO_COMBINE_MODE_LABELS, WIDMO_COMBINE_MODE_LIST, WIDMO_NORMALIZE_MODE_LABELS, WIDMO_NORMALIZE_MODE_LIST,
+    widmoInputSignature, segmentInputSignature,
+  } from "$lib/nodegraph.widmo";
   // rejestrują swoje typy węzłów przy imporcie (side-effect na moduł) — muszą
-  // być zaimportowane choćby raz, żeby NODE_TYPES nie był pusty. Domena Widmo
-  // (preprocessing widm) świadomie nie istnieje tu jeszcze — patrz
-  // docs/node-graph.md, sekcja "świadomie poza zakresem".
+  // być zaimportowane choćby raz, żeby NODE_TYPES nie był pusty.
   import "$lib/nodegraph.mapa";
   import "$lib/nodegraph.segmentacja";
+  import "$lib/nodegraph.widmo";
 
   interface Props {
     /** Czy ta zakładka jest aktualnie widoczna — pozwala przeliczyć auto-fit
@@ -35,7 +47,11 @@
   }
   let { visible = true }: Props = $props();
 
-  onMount(async () => { if (!savedMapsLoaded()) await loadSavedMaps(); });
+  onMount(async () => {
+    if (!savedMapsLoaded()) await loadSavedMaps();
+    if (!savedSpectraLoaded()) await loadSavedSpectra();
+    if (!datasetsLoaded()) await loadDatasets();
+  });
 
   const LS_GRAPH = "nodegraph_graph";
   const LS_SIDEBAR = "nodegraph_sidebarOpen";
@@ -73,9 +89,21 @@
     return groups;
   });
 
-  function nodeTypeDotColor(t: NodeTypeDef): string {
-    const kind = t.outputs[0]?.kind ?? t.inputs[0]?.kind;
-    return kind ? PORT_KIND_COLORS[kind] : "rgba(255,255,255,0.3)";
+  /** Kolor/tło kropki legendy w prawym panelu — odzwierciedla, JAKIE gniazda
+   * węzeł PRZYJMUJE (wejścia), bo to jest praktyczna wskazówka "co mogę
+   * podłączyć do tego node'a"; węzły źródłowe bez wejść (np. "Mapa m/z")
+   * pokazują kolor swojego wyjścia zamiast tego. Gdy węzeł ma kilka RÓŻNYCH
+   * rodzajów wejść naraz, kropka dzieli się równo między te kolory
+   * (conic-gradient) zamiast pokazywać tylko jeden z nich. */
+  function nodeTypeDotBackground(t: NodeTypeDef): string {
+    const kinds = [...new Set(t.inputs.map((s) => s.kind))];
+    if (kinds.length === 0) {
+      const outKind = t.outputs[0]?.kind;
+      return outKind ? PORT_KIND_COLORS[outKind] : "rgba(255,255,255,0.3)";
+    }
+    if (kinds.length === 1) return PORT_KIND_COLORS[kinds[0]];
+    const step = 100 / kinds.length;
+    return `conic-gradient(${kinds.map((k, i) => `${PORT_KIND_COLORS[k]} ${i * step}% ${(i + 1) * step}%`).join(", ")})`;
   }
 
   // Przeciąganie z sidebara na płótno — celowo NIE natywne HTML5 drag'n'drop
@@ -130,7 +158,7 @@
 
   $effect(() => {
     for (const n of graph.nodes) {
-      if (n.type === "mapa/map_source") ensureMapLoaded(n.savedMapId);
+      if (n.type === "mapa/map_source" || n.type === "segmentacja/segment_source") ensureMapLoaded(n.savedMapId);
     }
   });
 
@@ -138,8 +166,45 @@
     return savedMapsList().some((m) => m.id === id);
   }
 
+  // ── Dane zapisanych widm — analogiczne do mapData/ensureMapLoaded powyżej,
+  // ale osobny cache (inna biblioteka, inny kształt danych: mz/intensity). ──
+  let spectrumData = $state<Record<string, SavedSpectrum>>({});
+  let loadingSpectrumIds = $state<Set<string>>(new Set());
+
+  async function ensureSpectrumLoaded(id: string | undefined) {
+    if (!id || spectrumData[id] || loadingSpectrumIds.has(id)) return;
+    loadingSpectrumIds = new Set(loadingSpectrumIds).add(id);
+    try {
+      const full = await fetchSavedSpectrumData(id);
+      spectrumData = { ...spectrumData, [id]: full };
+    } catch {
+      // pomiń — node pokaże błąd "wybrane widmo zostało usunięte" / "wczytywanie…"
+    } finally {
+      const next = new Set(loadingSpectrumIds);
+      next.delete(id);
+      loadingSpectrumIds = next;
+    }
+  }
+
+  $effect(() => {
+    for (const n of graph.nodes) {
+      if (n.type === "widmo/spectrum_source") ensureSpectrumLoaded(n.savedSpectrumId);
+    }
+  });
+
+  function savedSpectrumExists(id: string): boolean {
+    return savedSpectraList().some((s) => s.id === id);
+  }
+
+  // Mapa m/z to coś innego niż segment (patrz SegmentValue w nodegraph.ts) —
+  // "Mapa m/z" pokazuje więc tylko zapisy NIE będące segmentem, a "Zapisany
+  // segment" odwrotnie: tylko zapisy BĘDĄCE segmentem. Bez tego dałoby się
+  // wczytać zapisany segment jako zwykłą mapę intensywności i odwrotnie.
+  let nonSegmentSavedMaps = $derived(savedMapsList().filter((m) => m.mode !== "segment"));
+  let segmentSavedMaps = $derived(savedMapsList().filter((m) => m.mode === "segment"));
+
   function evalNode(nodeId: string): EvalOutcome {
-    return evaluateGraphNode(graph, nodeId, { mapCache: mapData, savedMapExists });
+    return evaluateGraphNode(graph, nodeId, { mapCache: mapData, savedMapExists, spectrumCache: spectrumData, savedSpectrumExists });
   }
 
   function resultTissue(r: MapaValue): TissueImage {
@@ -147,6 +212,7 @@
   }
 
   let zoomTissue = $state<TissueImage | null>(null);
+  let zoomWidmoTraces = $state<{ mz: number[]; intensity: number[]; label: string; color: string }[] | null>(null);
 
   const savedMapModeLabel: Record<string, string> = { ...COMBINE_MODE_LABELS, single: "pojedyncza", segment: "segment" };
 
@@ -209,6 +275,15 @@
     if (node.type === "mapa/curve") return 230;
     if (node.type === "segmentacja/kmeans") return 250;
     if (node.type === "segmentacja/select_segments") return 230;
+    if (node.type === "segmentacja/merge_segments") return 240;
+    if (node.type === "segmentacja/remove_islands") return 230;
+    if (node.type === "segmentacja/segment_source") return 240;
+    if (node.type === "segmentacja/save_segment") return 230;
+    if (node.type === "widmo/spectrum_source") return 240;
+    if (node.type === "widmo/from_segment") return 240;
+    if (node.type === "widmo/combine") return 240;
+    if (node.type === "widmo/compare") return 260;
+    if (node.type === "widmo/save_spectrum") return 230;
     return 210;
   }
 
@@ -250,18 +325,49 @@
       const inOutcome = inEdge ? evalNode(inEdge.from) : null;
       const kCount = inOutcome?.ok && inOutcome.value.kind === "segmentacja" ? inOutcome.value.legend.length : 1;
       h += Math.max(1, kCount) * 22 + 10;
+    } else if (node.type === "segmentacja/merge_segments") {
+      h += 34 + Math.max(1, inputsFor(node, "in").length) * 24;
+    } else if (node.type === "segmentacja/remove_islands") {
+      h += 40;
+    } else if (node.type === "segmentacja/segment_source") {
+      h += 30 + 22;
+      if (node.expanded) h += 70;
+    } else if (node.type === "segmentacja/save_segment") {
+      h += 30 + 34 + 16;
+    } else if (node.type === "widmo/spectrum_source") {
+      h += 30 + 22;
+      if (node.expanded) h += 70;
+    } else if (node.type === "widmo/from_segment") {
+      h += 34 + 34 + 34 + 16;
+    } else if (node.type === "widmo/combine") {
+      h += 34 + Math.max(1, inputsFor(node, "in").length) * 24;
+    } else if (node.type === "widmo/normalize") {
+      h += 34;
+    } else if (node.type === "widmo/smooth" || node.type === "widmo/baseline" || node.type === "widmo/peakpick") {
+      h += 40 + 34 + 16;
+    } else if (node.type === "widmo/compare") {
+      h += 22 + Math.max(1, inputsFor(node, "a").length) * 24;
+      h += 22 + Math.max(1, inputsFor(node, "b").length) * 24;
+      h += 30; // checkbox "pokaż różnicę"
+      h += 180; // podgląd wykresu — węzeł podglądowy, większy niż domyślny (kind-gate go nie obejmuje, patrz niżej)
+    } else if (node.type === "widmo/save_spectrum") {
+      h += 30 + 34 + 16;
     }
     const kind = outputKind(node);
-    if (kind === "mapa" || kind === "segmentacja") h += previewHeight(node) + 10;
-    else h += 22;
+    if (kind === "mapa" || kind === "segmentacja" || kind === "segment" || kind === "widmo") h += previewHeight(node) + 10;
+    else if (node.type !== "widmo/compare") h += 22;
     return Math.max(h, 80);
   }
 
+  /** "F" — dopasowuje widok do zaznaczonych node'ów, jeśli coś jest
+   * zaznaczone (`selectedNodeIds`), inaczej (jak dawniej) do wszystkich. */
   function fitAll() {
     if (!container || graph.nodes.length === 0) return;
+    const targets = selectedNodeIds.size > 0 ? graph.nodes.filter((n) => selectedNodeIds.has(n.id)) : graph.nodes;
+    if (targets.length === 0) return;
     const rect = container.getBoundingClientRect();
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const n of graph.nodes) {
+    for (const n of targets) {
       minX = Math.min(minX, n.x);
       minY = Math.min(minY, n.y);
       maxX = Math.max(maxX, n.x + nodeWidth(n));
@@ -457,19 +563,35 @@
 
   function onPortPointerUp(e: PointerEvent) {
     e.stopPropagation();
-    resolveConnection();
+    // false: puszczenie DOKŁADNIE na (niepasującym) porcie to nie "puste
+    // miejsce" — po prostu nic się nie łączy, bez otwierania wyszukiwarki.
+    resolveConnection(false);
   }
-  function onCanvasPointerUp() {
-    resolveConnection();
+  function onCanvasPointerUp(e: PointerEvent) {
+    resolveConnection(true, e);
     onNodeHeaderPointerUp();
     if (marqueeActive) finishMarquee();
   }
-  function resolveConnection() {
+  /** Puszczenie ciągniętego połączenia. Gdy trafia w pasujące gniazdo — łączy.
+   * Gdy `openSearchIfEmpty` i miejsce jest puste (nic nie trafione) — zamiast
+   * po prostu porzucić przeciąganie, otwiera wyszukiwarkę dodawania node'a w
+   * tym miejscu, WSTĘPNIE PRZEFILTROWANĄ do typów mających pasujące gniazdo
+   * (patrz `pendingConn` + `filteredTypes`); wybór typu w tej wyszukiwarce
+   * od razu łączy nowy node (patrz `addNode`). */
+  function resolveConnection(openSearchIfEmpty: boolean, e?: PointerEvent) {
     if (!connDrag) return;
     const wantDir: "in" | "out" = connDrag.direction === "out" ? "in" : "out";
     const target = findNearestSocket(cursorWorld, wantDir, connDrag.nodeId, connDrag.kind);
-    if (target) finishConnection(connDrag, { nodeId: target.node.id, socketId: target.socket.id, direction: wantDir });
-    connDrag = null;
+    if (target) {
+      finishConnection(connDrag, { nodeId: target.node.id, socketId: target.socket.id, direction: wantDir });
+      connDrag = null;
+    } else if (openSearchIfEmpty) {
+      const drag = connDrag;
+      connDrag = null;
+      openPaletteAt(e?.clientX ?? lastMouseClient.x, e?.clientY ?? lastMouseClient.y, drag);
+    } else {
+      connDrag = null;
+    }
   }
 
   function finishConnection(a: DragConn, b: { nodeId: string; socketId: string; direction: "in" | "out" }) {
@@ -506,16 +628,20 @@
     return graph.nodes.find((n) => n.id === id);
   }
 
-  const EDGE_COLORS: Record<PortKind, string> = {
-    widmo: "rgba(91,155,213,0.55)",
-    mapa: "rgba(255,201,81,0.55)",
-    segmentacja: "rgba(126,200,227,0.55)",
-  };
-  const EDGE_COLOR_DRAG: Record<PortKind, string> = {
-    widmo: "rgba(91,155,213,0.4)",
-    mapa: "rgba(255,201,81,0.4)",
-    segmentacja: "rgba(126,200,227,0.4)",
-  };
+  // Wyprowadzone z PORT_KIND_COLORS (zamiast osobno wpisanych rgba) — żeby
+  // kolor krawędzi/kropki portu i kolor legendy w sidebarze NIGDY nie mogły
+  // się rozjechać, gdyby ktoś zmienił tylko jedno z tych miejsc.
+  function hexToRgba(hex: string, alpha: number): string {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+  }
+  const PORT_KINDS = Object.keys(PORT_KIND_COLORS) as PortKind[];
+  const EDGE_COLORS: Record<PortKind, string> = Object.fromEntries(
+    PORT_KINDS.map((k) => [k, hexToRgba(PORT_KIND_COLORS[k], 0.55)]),
+  ) as Record<PortKind, string>;
+  const EDGE_COLOR_DRAG: Record<PortKind, string> = Object.fromEntries(
+    PORT_KINDS.map((k) => [k, hexToRgba(PORT_KIND_COLORS[k], 0.4)]),
+  ) as Record<PortKind, string>;
   function edgeKind(edge: GraphEdge): PortKind {
     const n = nodePos(edge.from);
     return (n && NODE_TYPES[n.type]?.outputs.find((s) => s.id === edge.fromSocket)?.kind) || "mapa";
@@ -568,7 +694,13 @@
     });
   });
 
-  function openPaletteAt(clientX: number, clientY: number) {
+  /** Gdy wyszukiwarka jest otwarta jako następstwo puszczenia ciągniętego
+   * połączenia w puste miejsce (patrz `resolveConnection`) — lista jest
+   * przefiltrowana do typów mających pasujące gniazdo, a wybór typu od razu
+   * dokańcza połączenie (patrz `addNode`). */
+  let pendingConn = $state<DragConn | null>(null);
+
+  function openPaletteAt(clientX: number, clientY: number, forConn: DragConn | null = null) {
     closeMenus();
     const rect = container?.getBoundingClientRect();
     const screenY = clientY - (rect?.top ?? 0);
@@ -576,6 +708,7 @@
     palettePos.world = screenToWorld({ x: clientX, y: clientY });
     paletteMaxHeight = 360;
     paletteFilter = "";
+    pendingConn = forConn;
     paletteOpen = true;
   }
 
@@ -597,6 +730,7 @@
   function closeMenus() {
     paletteOpen = false;
     nodeMenuOpen = false;
+    pendingConn = null;
     onCtxItemLeave();
   }
 
@@ -631,7 +765,12 @@
       params: defaultParamsFor(typeId),
     };
     if (typeId === "mapa/map_source") {
-      node.savedMapId = savedMapsList()[0]?.id;
+      node.savedMapId = nonSegmentSavedMaps[0]?.id;
+      node.expanded = false;
+      ensureMapLoaded(node.savedMapId);
+    }
+    if (typeId === "segmentacja/segment_source") {
+      node.savedMapId = segmentSavedMaps[0]?.id;
       node.expanded = false;
       ensureMapLoaded(node.savedMapId);
     }
@@ -640,28 +779,79 @@
     if (typeId === "mapa/combine") node.params = { mode: "mean" };
     if (typeId === "mapa/save_output") node.saveName = "";
     if (typeId === "segmentacja/select_segments") node.selectedLabels = [];
+    if (typeId === "segmentacja/save_segment") node.saveName = "";
+    if (typeId === "widmo/spectrum_source") {
+      node.savedSpectrumId = savedSpectraList()[0]?.id;
+      node.expanded = false;
+      ensureSpectrumLoaded(node.savedSpectrumId);
+    }
+    if (typeId === "widmo/from_segment") node.params = { ...node.params, dataset: RAW_DATASET_ID };
+    if (typeId === "widmo/save_spectrum") node.saveName = "";
     graph.nodes.push(node);
+    if (pendingConn) {
+      const def = NODE_TYPES[typeId];
+      const wantDir: "in" | "out" = pendingConn.direction === "out" ? "in" : "out";
+      const sockets = wantDir === "in" ? def?.inputs ?? [] : def?.outputs ?? [];
+      const socket = sockets.find((s) => s.kind === pendingConn!.kind);
+      if (socket) finishConnection(pendingConn, { nodeId: node.id, socketId: socket.id, direction: wantDir });
+    }
     persist();
     closeMenus();
   }
 
+  // ── Usuwanie — pojedynczego node'a ALBO całego zaznaczenia naraz, zawsze z
+  // potwierdzeniem pokazującym WSZYSTKIE node'y, które faktycznie znikną. ──
   let confirmDeleteOpen = $state(false);
+  let deleteIds = $state<string[]>([]);
+
+  function deleteNodeLabel(id: string): string {
+    const n = graph.nodes.find((x) => x.id === id);
+    return (n && NODE_TYPES[n.type]?.label) ?? "?";
+  }
+
+  let deleteMessage = $derived.by(() => {
+    if (deleteIds.length <= 1) {
+      return deleteIds[0] ? `Czy na pewno chcesz usunąć node "${deleteNodeLabel(deleteIds[0])}"?` : "";
+    }
+    const labels = deleteIds.map((id) => deleteNodeLabel(id)).join(", ");
+    return `Czy na pewno chcesz usunąć ${deleteIds.length} zaznaczone node'y: ${labels}?`;
+  });
+
+  /** Wywołane z menu prawego klawisza na node'ie (nodeMenuTarget). Jeśli
+   * kliknięty node jest częścią aktualnego wieloznaczenia — usuwa CAŁĄ grupę,
+   * nie tylko ten jeden node. */
   function requestDeleteNode() {
     nodeMenuOpen = false;
+    const id = nodeMenuTarget;
+    if (!id) return;
+    deleteIds = selectedNodeIds.has(id) && selectedNodeIds.size > 1 ? [...selectedNodeIds] : [id];
     confirmDeleteOpen = true;
   }
+
+  /** Wywołane z klawisza Delete/Backspace — usuwa całe bieżące zaznaczenie,
+   * a jeśli nic nie jest zaznaczone, node pod kursorem (jak wcześniej). */
+  function requestDeleteSelection() {
+    if (selectedNodeIds.size > 0) deleteIds = [...selectedNodeIds];
+    else if (hoveredNodeId) deleteIds = [hoveredNodeId];
+    else return;
+    confirmDeleteOpen = true;
+  }
+
   function confirmDeleteNode() {
-    const id = nodeMenuTarget;
-    if (id) {
-      graph.nodes = graph.nodes.filter((n) => n.id !== id);
-      graph.edges = graph.edges.filter((e) => e.from !== id && e.to !== id);
+    const ids = new Set(deleteIds);
+    if (ids.size > 0) {
+      graph.nodes = graph.nodes.filter((n) => !ids.has(n.id));
+      graph.edges = graph.edges.filter((e) => !ids.has(e.from) && !ids.has(e.to));
       persist();
     }
+    selectedNodeIds = new Set([...selectedNodeIds].filter((id) => !ids.has(id)));
     confirmDeleteOpen = false;
+    deleteIds = [];
     nodeMenuTarget = null;
   }
   function cancelDeleteNode() {
     confirmDeleteOpen = false;
+    deleteIds = [];
     nodeMenuTarget = null;
   }
 
@@ -676,15 +866,23 @@
       e.preventDefault();
       openPaletteAt(lastMouseClient.x, lastMouseClient.y);
     }
-    if (!typing && (e.key === "Delete" || e.key === "Backspace") && hoveredNodeId) {
+    if (!typing && (e.key === "Delete" || e.key === "Backspace") && (selectedNodeIds.size > 0 || hoveredNodeId)) {
       e.preventDefault();
-      nodeMenuTarget = hoveredNodeId;
-      confirmDeleteOpen = true;
+      requestDeleteSelection();
     }
+  }
+
+  /** Czy typ węzła ma gniazdo pasujące do drugiego końca ciągniętego
+   * połączenia (przeciwny kierunek, ten sam `kind`) — patrz `pendingConn`. */
+  function typeAcceptsConn(t: NodeTypeDef, conn: DragConn): boolean {
+    const wantDir: "in" | "out" = conn.direction === "out" ? "in" : "out";
+    const sockets = wantDir === "in" ? t.inputs : t.outputs;
+    return sockets.some((s) => s.kind === conn.kind);
   }
 
   let filteredTypes = $derived(
     nodeTypeList().filter((t) => {
+      if (pendingConn && !typeAcceptsConn(t, pendingConn)) return false;
       const q = paletteFilter.trim().toLowerCase();
       if (!q) return true;
       return t.label.toLowerCase().includes(q) || t.description.toLowerCase().includes(q) || (t.detail?.toLowerCase().includes(q) ?? false);
@@ -705,6 +903,30 @@
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
     graph.nodes[idx] = { ...graph.nodes[idx], expanded: !graph.nodes[idx].expanded };
+    persist();
+  }
+
+  function setNodeSpectrumSource(node: GraphNode, id: string) {
+    const idx = graph.nodes.findIndex((n) => n.id === node.id);
+    if (idx === -1) return;
+    graph.nodes[idx] = { ...graph.nodes[idx], savedSpectrumId: id };
+    persist();
+    ensureSpectrumLoaded(id);
+  }
+
+  /** Generyczny setter dla parametrów tekstowych węzła (params.mode/params.dataset
+   * itd.) — odpowiednik setNodeParamClamped, ale dla stringów zamiast liczb. */
+  function setNodeStringParam(node: GraphNode, key: string, value: string) {
+    const idx = graph.nodes.findIndex((n) => n.id === node.id);
+    if (idx === -1) return;
+    graph.nodes[idx] = { ...graph.nodes[idx], params: { ...graph.nodes[idx].params, [key]: value } };
+    persist();
+  }
+
+  function toggleShowDiff(node: GraphNode) {
+    const idx = graph.nodes.findIndex((n) => n.id === node.id);
+    if (idx === -1) return;
+    graph.nodes[idx] = { ...graph.nodes[idx], showDiff: !graph.nodes[idx].showDiff };
     persist();
   }
 
@@ -735,12 +957,31 @@
     graph.nodes[idx] = { ...graph.nodes[idx], saveName: value };
   }
 
-  function setKmeansK(node: GraphNode, k: number) {
-    if (!Number.isFinite(k)) return;
-    const clamped = Math.min(10, Math.max(2, Math.round(k)));
+  /** Generyczny setter dla całkowitoliczbowych parametrów suwaka (k-means'owe
+   * `k`, "Usuwanie wysepek"'owe `islandMax` itd.) — zaokrągla i przycina do
+   * [min,max] w jednym miejscu, zamiast powielać tę samą logikę per pole. */
+  function setNodeParamClamped(node: GraphNode, key: string, value: number, min: number, max: number) {
+    if (!Number.isFinite(value)) return;
+    const clamped = Math.min(max, Math.max(min, Math.round(value)));
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
-    graph.nodes[idx] = { ...graph.nodes[idx], params: { ...graph.nodes[idx].params, k: clamped } };
+    graph.nodes[idx] = { ...graph.nodes[idx], params: { ...graph.nodes[idx].params, [key]: clamped } };
+    persist();
+  }
+
+  function setKmeansK(node: GraphNode, k: number) {
+    setNodeParamClamped(node, "k", k, 2, 10);
+  }
+
+  /** Jak setNodeParamClamped, ale bez zaokrąglania do liczby całkowitej — dla
+   * parametrów widma z krokiem dziesiętnym (np. "prominence_frac" w
+   * widmo/peakpick, krok 0.001). */
+  function setNodeParamClampedFloat(node: GraphNode, key: string, value: number, min: number, max: number) {
+    if (!Number.isFinite(value)) return;
+    const clamped = Math.min(max, Math.max(min, value));
+    const idx = graph.nodes.findIndex((n) => n.id === node.id);
+    if (idx === -1) return;
+    graph.nodes[idx] = { ...graph.nodes[idx], params: { ...graph.nodes[idx].params, [key]: clamped } };
     persist();
   }
 
@@ -756,13 +997,18 @@
   function sourceLabel(nodeId: string): string {
     const n = graph.nodes.find((x) => x.id === nodeId);
     if (!n) return "?";
-    if (n.type === "mapa/map_source") {
+    if (n.type === "mapa/map_source" || n.type === "segmentacja/segment_source") {
       const meta = savedMapsList().find((m) => m.id === n.savedMapId);
-      return meta?.name ?? "— wybierz mapę —";
+      return meta?.name ?? "— wybierz —";
+    }
+    if (n.type === "widmo/spectrum_source") {
+      const meta = savedSpectraList().find((m) => m.id === n.savedSpectrumId);
+      return meta?.name ?? "— wybierz —";
     }
     if (n.type === "mapa/intensity_range") return `Zakres intensywności (${n.params.min ?? 0}–${n.params.max ?? 100}%)`;
     if (n.type === "mapa/curve") return `Krzywa intensywności (${n.curvePoints?.length ?? 2} pkt)`;
     if (n.type === "mapa/combine") return `Łączenie (${COMBINE_MODE_LABELS[(n.params.mode as CombineModeExt) ?? "mean"]})`;
+    if (n.type === "widmo/combine") return `Łączenie (${WIDMO_COMBINE_MODE_LABELS[(n.params.mode as keyof typeof WIDMO_COMBINE_MODE_LABELS) ?? "sum"]})`;
     if (n.type === "segmentacja/kmeans") return `K-means (k=${n.params.k ?? 3})`;
     return NODE_TYPES[n.type]?.label ?? n.type;
   }
@@ -850,6 +1096,132 @@
       savingNodeId = null;
     }
   }
+
+  /** Jak saveOutputNode, ale dla SegmentValue — segment to inny rodzaj danych
+   * niż mapa (patrz nodegraph.ts), więc nie ma pola `mode` (zawsze zapisuje
+   * jako mode: "segment", nie odczytuje go z wartości). */
+  async function saveSegmentNode(node: GraphNode) {
+    const outcome = evalNode(node.id);
+    if (!outcome.ok) { saveStatus = { ...saveStatus, [node.id]: outcome.error }; return; }
+    if (outcome.value.kind !== "segment") { saveStatus = { ...saveStatus, [node.id]: "nieprawidłowe wejście" }; return; }
+    const name = (node.saveName ?? "").trim();
+    if (!name) { saveStatus = { ...saveStatus, [node.id]: "podaj nazwę" }; return; }
+    savingNodeId = node.id;
+    try {
+      const r = outcome.value;
+      await savePixelMap({
+        name, tissueId: r.tissueId, tissueLabel: r.tissueLabel, width: r.width, height: r.height,
+        vmax: maxOf(r.data), mode: "segment", sources: r.sources, data: r.data, mask: r.mask,
+      });
+      saveStatus = { ...saveStatus, [node.id]: `✓ zapisano jako "${name}"` };
+    } catch (e) {
+      saveStatus = { ...saveStatus, [node.id]: e instanceof Error ? e.message : String(e) };
+    } finally {
+      savingNodeId = null;
+    }
+  }
+
+  // ── Widmo: węzły wymagające backendu, przeliczane ręcznie (ten sam wzorzec
+  // co K-means powyżej — patrz komentarz na górze nodegraph.widmo.ts). ──────
+  let widmoRunStatus = $state<Record<string, string>>({});
+
+  /** "widmo/from_segment" — agreguje widma pikseli segmentu na backendzie
+   * (patrz /segment_spectrum w sidecarze) i cache'uje wynik na węźle. */
+  async function runFromSegmentNode(node: GraphNode) {
+    const inEdges = inputsFor(node, "in");
+    if (inEdges.length === 0) { widmoRunStatus = { ...widmoRunStatus, [node.id]: "podłącz segment" }; return; }
+    const r = evalNode(inEdges[0].from);
+    if (!r.ok) { widmoRunStatus = { ...widmoRunStatus, [node.id]: r.error }; return; }
+    if (r.value.kind !== "segment") { widmoRunStatus = { ...widmoRunStatus, [node.id]: "wejście musi być segmentem" }; return; }
+    const seg = r.value;
+    const mode = (node.params.mode as string) ?? "mean";
+    const datasetChoice = (node.params.dataset as string) ?? RAW_DATASET_ID;
+    const source: "raw" | "binned" = datasetChoice === RAW_DATASET_ID ? "raw" : "binned";
+    const dataset = source === "raw" ? "" : datasetChoice;
+    runningNodeId = node.id;
+    widmoRunStatus = { ...widmoRunStatus, [node.id]: "" };
+    try {
+      const res = await fetchSegmentSpectrum(seg.tissueId, source, dataset, seg.data, mode as SegmentSpectrumMode);
+      const idx = graph.nodes.findIndex((n) => n.id === node.id);
+      if (idx !== -1) {
+        graph.nodes[idx] = {
+          ...graph.nodes[idx],
+          widmoProcessCache: {
+            inputSignature: segmentInputSignature(seg.tissueId, seg.width, seg.height, mode, datasetChoice),
+            mz: res.mz, intensity: res.intensity,
+          },
+        };
+        persist();
+      }
+      widmoRunStatus = { ...widmoRunStatus, [node.id]: `gotowe — ${res.n_pixels}px` };
+    } catch (e) {
+      widmoRunStatus = { ...widmoRunStatus, [node.id]: e instanceof Error ? e.message : String(e) };
+    } finally {
+      runningNodeId = null;
+    }
+  }
+
+  const WIDMO_PROCESS_METHOD: Record<string, SpectrumProcessMethod> = {
+    "widmo/smooth": "smooth", "widmo/baseline": "baseline", "widmo/peakpick": "peakpick",
+  };
+
+  /** "widmo/smooth" / "widmo/baseline" / "widmo/peakpick" — algorytmy scipy,
+   * liczone na backendzie (patrz /spectrum_process w sidecarze). Wspólna
+   * funkcja dla wszystkich trzech, bo różni je tylko metoda/parametry. */
+  async function runSpectrumProcessNode(node: GraphNode) {
+    const method = WIDMO_PROCESS_METHOD[node.type];
+    if (!method) return;
+    const inEdges = inputsFor(node, "in");
+    if (inEdges.length === 0) { widmoRunStatus = { ...widmoRunStatus, [node.id]: "podłącz widmo" }; return; }
+    const r = evalNode(inEdges[0].from);
+    if (!r.ok) { widmoRunStatus = { ...widmoRunStatus, [node.id]: r.error }; return; }
+    if (r.value.kind !== "widmo") { widmoRunStatus = { ...widmoRunStatus, [node.id]: "wejście musi być widmem" }; return; }
+    const src = r.value;
+    runningNodeId = node.id;
+    widmoRunStatus = { ...widmoRunStatus, [node.id]: "" };
+    try {
+      const res = await fetchSpectrumProcess(method, src.mz, src.intensity, node.params as Record<string, number>);
+      const idx = graph.nodes.findIndex((n) => n.id === node.id);
+      if (idx !== -1) {
+        graph.nodes[idx] = {
+          ...graph.nodes[idx],
+          widmoProcessCache: {
+            inputSignature: widmoInputSignature(src.mz, src.intensity, node.params),
+            mz: src.mz, intensity: res.intensity,
+          },
+        };
+        persist();
+      }
+      widmoRunStatus = { ...widmoRunStatus, [node.id]: "gotowe" };
+    } catch (e) {
+      widmoRunStatus = { ...widmoRunStatus, [node.id]: e instanceof Error ? e.message : String(e) };
+    } finally {
+      runningNodeId = null;
+    }
+  }
+
+  /** Jak saveOutputNode/saveSegmentNode, ale dla WidmoValue — inna biblioteka
+   * ("Zapisane widma", nie "Zapisane" mapy pikseli), patrz spectraLibrary.svelte.ts. */
+  async function saveSpectrumNode(node: GraphNode) {
+    const outcome = evalNode(node.id);
+    if (!outcome.ok) { saveStatus = { ...saveStatus, [node.id]: outcome.error }; return; }
+    if (outcome.value.kind !== "widmo") { saveStatus = { ...saveStatus, [node.id]: "nieprawidłowe wejście" }; return; }
+    const name = (node.saveName ?? "").trim();
+    if (!name) { saveStatus = { ...saveStatus, [node.id]: "podaj nazwę" }; return; }
+    savingNodeId = node.id;
+    try {
+      const r = outcome.value;
+      await saveSpectrum({
+        name, tissueId: r.tissueId, tissueLabel: r.tissueLabel, mode: r.mode, sources: r.sources,
+        mz: r.mz, intensity: r.intensity,
+      });
+      saveStatus = { ...saveStatus, [node.id]: `✓ zapisano jako "${name}"` };
+    } catch (e) {
+      saveStatus = { ...saveStatus, [node.id]: e instanceof Error ? e.message : String(e) };
+    } finally {
+      savingNodeId = null;
+    }
+  }
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />
@@ -910,14 +1282,14 @@
 
           <div class="mnode-body">
             {#if node.type === "mapa/map_source"}
-              {@const meta = savedMapsList().find((m) => m.id === node.savedMapId)}
+              {@const meta = nonSegmentSavedMaps.find((m) => m.id === node.savedMapId)}
               <label class="field">
                 <span>Zapisana mapa</span>
                 <select class="ds-select" value={node.savedMapId ?? ""}
                         onpointerdown={(e) => e.stopPropagation()}
                         onchange={(e) => setNodeSavedMap(node, (e.target as HTMLSelectElement).value)}>
                   <option value="">— wybierz —</option>
-                  {#each savedMapsList() as m (m.id)}
+                  {#each nonSegmentSavedMaps as m (m.id)}
                     <option value={m.id}>{m.name}</option>
                   {/each}
                 </select>
@@ -931,6 +1303,32 @@
                   <div class="saved-meta-row">
                     <span class="mode-tag">{savedMapModeLabel[meta.mode] ?? meta.mode}</span>
                   </div>
+                  <div class="saved-sources">
+                    {#each meta.sources as s, i (i)}
+                      <span class="source-tag">m/z {s.mz.toFixed(2)} ±{s.tol} · {s.datasetLabel}</span>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            {:else if node.type === "segmentacja/segment_source"}
+              {@const meta = segmentSavedMaps.find((m) => m.id === node.savedMapId)}
+              <label class="field">
+                <span>Zapisany segment</span>
+                <select class="ds-select" value={node.savedMapId ?? ""}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setNodeSavedMap(node, (e.target as HTMLSelectElement).value)}>
+                  <option value="">— wybierz —</option>
+                  {#each segmentSavedMaps as m (m.id)}
+                    <option value={m.id}>{m.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <button class="mz-expand-toggle" onpointerdown={(e) => e.stopPropagation()} onclick={() => toggleExpanded(node)}>
+                {node.expanded ? "▾ szczegóły" : "▸ szczegóły"}
+              </button>
+              {#if node.expanded && meta}
+                <div class="mz-details" onpointerdown={(e) => e.stopPropagation()}>
+                  <div class="mz-details-name">{meta.name}</div>
                   <div class="saved-sources">
                     {#each meta.sources as s, i (i)}
                       <span class="source-tag">m/z {s.mz.toFixed(2)} ±{s.tol} · {s.datasetLabel}</span>
@@ -1066,6 +1464,272 @@
                   <div class="combine-list-empty">podłącz wynik k-means</div>
                 {/if}
               </div>
+            {:else if node.type === "segmentacja/merge_segments"}
+              <label class="field">
+                <span>Sposób łączenia</span>
+                <select class="ds-select" value={(node.params.mode as string) ?? "sum"}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setCombineMode(node, (e.target as HTMLSelectElement).value)}>
+                  {#each MERGE_MODE_LIST as m}
+                    <option value={m}>{MERGE_MODE_LABELS[m]}</option>
+                  {/each}
+                </select>
+              </label>
+              <div class="combine-list" onpointerdown={(e) => e.stopPropagation()}>
+                {#if inputsFor(node, "in").length === 0}
+                  <div class="combine-list-empty">brak podłączonych segmentów</div>
+                {:else}
+                  {#each inputsFor(node, "in") as edge (edge.id)}
+                    <div class="combine-list-item">
+                      <span class="combine-list-label">{sourceLabel(edge.from)}</span>
+                      <button class="combine-remove" onclick={() => removeEdge(edge.id)} title="Usuń połączenie">×</button>
+                    </div>
+                  {/each}
+                {/if}
+              </div>
+            {:else if node.type === "segmentacja/remove_islands"}
+              <label class="field">
+                <span class="field-head">
+                  <input type="text" inputmode="numeric" class="param-value-input"
+                         value={node.params.islandMax ?? 1}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         onchange={(e) => {
+                           const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                           if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params.islandMax ?? 1); return; }
+                           setNodeParamClamped(node, "islandMax", raw, 1, 20);
+                           (e.target as HTMLInputElement).value = String(Math.min(20, Math.max(1, Math.round(raw))));
+                         }}
+                         onkeydown={(e) => {
+                           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                           if (e.key === "Escape") {
+                             (e.target as HTMLInputElement).value = String(node.params.islandMax ?? 1);
+                             (e.target as HTMLInputElement).blur();
+                           }
+                         }} />
+                  <span>maks. rozmiar (px)</span>
+                </span>
+                <input type="range" min="1" max="20" step="1"
+                       value={Number(node.params.islandMax ?? 1)}
+                       onpointerdown={(e) => e.stopPropagation()}
+                       oninput={(e) => setNodeParamClamped(node, "islandMax", Number((e.target as HTMLInputElement).value), 1, 20)} />
+              </label>
+            {:else if node.type === "segmentacja/save_segment"}
+              <label class="field" onpointerdown={(e) => e.stopPropagation()}>
+                <span>Nazwa nowego segmentu</span>
+                <input class="mz-name-input" type="text" placeholder="nazwa…"
+                       value={node.saveName ?? ""}
+                       oninput={(e) => setSaveName(node, (e.target as HTMLInputElement).value)} />
+              </label>
+              <button class="run-btn save-btn" onpointerdown={(e) => e.stopPropagation()}
+                      disabled={savingNodeId === node.id}
+                      onclick={() => saveSegmentNode(node)}>
+                {savingNodeId === node.id ? "Zapisywanie…" : "Zapisz jako nowy segment"}
+              </button>
+              {#if saveStatus[node.id]}
+                <span class="preview-result">{saveStatus[node.id]}</span>
+              {/if}
+            {:else if node.type === "widmo/spectrum_source"}
+              {@const meta = savedSpectraList().find((m) => m.id === node.savedSpectrumId)}
+              <label class="field">
+                <span>Zapisane widmo</span>
+                <select class="ds-select" value={node.savedSpectrumId ?? ""}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setNodeSpectrumSource(node, (e.target as HTMLSelectElement).value)}>
+                  <option value="">— wybierz —</option>
+                  {#each savedSpectraList() as m (m.id)}
+                    <option value={m.id}>{m.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <button class="mz-expand-toggle" onpointerdown={(e) => e.stopPropagation()} onclick={() => toggleExpanded(node)}>
+                {node.expanded ? "▾ szczegóły" : "▸ szczegóły"}
+              </button>
+              {#if node.expanded && meta}
+                <div class="mz-details" onpointerdown={(e) => e.stopPropagation()}>
+                  <div class="mz-details-name">{meta.name}</div>
+                  <div class="saved-sources">
+                    {#each meta.sources as s, i (i)}
+                      <span class="source-tag">{s.note ?? `(${s.x},${s.y}) · ${s.datasetLabel ?? s.datasetId ?? "?"}`}</span>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            {:else if node.type === "widmo/from_segment"}
+              {#each NODE_TYPES[node.type]?.params ?? [] as p (p.key)}
+                <label class="field">
+                  <span>{p.label}</span>
+                  <select class="ds-select" value={node.params[p.key] ?? p.default}
+                          onpointerdown={(e) => e.stopPropagation()}
+                          onchange={(e) => setCombineMode(node, (e.target as HTMLSelectElement).value)}>
+                    {#each p.options ?? [] as opt}
+                      <option value={opt}>{WIDMO_COMBINE_MODE_LABELS[opt as keyof typeof WIDMO_COMBINE_MODE_LABELS] ?? opt}</option>
+                    {/each}
+                  </select>
+                </label>
+              {/each}
+              <label class="field">
+                <span>Zestaw danych</span>
+                <select class="ds-select" value={(node.params.dataset as string) ?? RAW_DATASET_ID}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setNodeStringParam(node, "dataset", (e.target as HTMLSelectElement).value)}>
+                  <option value={RAW_DATASET_ID}>Dane oryginalne</option>
+                  {#each datasets() as d}
+                    <option value={d.id}>{d.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
+                      disabled={runningNodeId === node.id}
+                      onclick={() => runFromSegmentNode(node)}>
+                {runningNodeId === node.id ? "Przetwarzanie…" : "Przetwórz"}
+              </button>
+              {#if widmoRunStatus[node.id]}
+                <span class="preview-result">{widmoRunStatus[node.id]}</span>
+              {/if}
+            {:else if node.type === "widmo/combine"}
+              <label class="field">
+                <span>Sposób łączenia</span>
+                <select class="ds-select" value={(node.params.mode as string) ?? "sum"}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setCombineMode(node, (e.target as HTMLSelectElement).value)}>
+                  {#each WIDMO_COMBINE_MODE_LIST as m}
+                    <option value={m}>{WIDMO_COMBINE_MODE_LABELS[m]}</option>
+                  {/each}
+                </select>
+              </label>
+              <div class="combine-list" onpointerdown={(e) => e.stopPropagation()}>
+                {#if inputsFor(node, "in").length === 0}
+                  <div class="combine-list-empty">brak podłączonych widm</div>
+                {:else}
+                  {#each inputsFor(node, "in") as edge (edge.id)}
+                    <div class="combine-list-item">
+                      <span class="combine-list-label">{sourceLabel(edge.from)}</span>
+                      <button class="combine-remove" onclick={() => removeEdge(edge.id)} title="Usuń połączenie">×</button>
+                    </div>
+                  {/each}
+                {/if}
+              </div>
+            {:else if node.type === "widmo/normalize"}
+              <label class="field">
+                <span>Tryb</span>
+                <select class="ds-select" value={(node.params.mode as string) ?? "tic"}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setCombineMode(node, (e.target as HTMLSelectElement).value)}>
+                  {#each WIDMO_NORMALIZE_MODE_LIST as m}
+                    <option value={m}>{WIDMO_NORMALIZE_MODE_LABELS[m]}</option>
+                  {/each}
+                </select>
+              </label>
+            {:else if node.type === "widmo/smooth" || node.type === "widmo/baseline" || node.type === "widmo/peakpick"}
+              {#each NODE_TYPES[node.type]?.params ?? [] as p (p.key)}
+                <label class="field">
+                  <span class="field-head">
+                    <input type="text" inputmode="decimal" class="param-value-input"
+                           value={node.params[p.key] ?? p.default}
+                           onpointerdown={(e) => e.stopPropagation()}
+                           onchange={(e) => {
+                             const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                             if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default); return; }
+                             setNodeParamClampedFloat(node, p.key, raw, p.min ?? raw, p.max ?? raw);
+                             (e.target as HTMLInputElement).value = String(Math.min(p.max ?? raw, Math.max(p.min ?? raw, raw)));
+                           }}
+                           onkeydown={(e) => {
+                             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                             if (e.key === "Escape") {
+                               (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default);
+                               (e.target as HTMLInputElement).blur();
+                             }
+                           }} />
+                    <span>{p.label}</span>
+                  </span>
+                  <input type="range" min={p.min} max={p.max} step={p.step}
+                         value={node.params[p.key] ?? p.default}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         oninput={(e) => setNodeParamClampedFloat(node, p.key, Number((e.target as HTMLInputElement).value), p.min ?? 0, p.max ?? 100)} />
+                </label>
+              {/each}
+              <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
+                      disabled={runningNodeId === node.id}
+                      onclick={() => runSpectrumProcessNode(node)}>
+                {runningNodeId === node.id ? "Przetwarzanie…" : "Przetwórz"}
+              </button>
+              {#if widmoRunStatus[node.id]}
+                <span class="preview-result">{widmoRunStatus[node.id]}</span>
+              {/if}
+            {:else if node.type === "widmo/compare"}
+              <div class="field" onpointerdown={(e) => e.stopPropagation()}>
+                <span>Widmo A</span>
+                <div class="combine-list">
+                  {#if inputsFor(node, "a").length === 0}
+                    <div class="combine-list-empty">podłącz widmo A</div>
+                  {:else}
+                    {#each inputsFor(node, "a") as edge (edge.id)}
+                      <div class="combine-list-item">
+                        <span class="combine-list-label">{sourceLabel(edge.from)}</span>
+                        <button class="combine-remove" onclick={() => removeEdge(edge.id)} title="Usuń połączenie">×</button>
+                      </div>
+                    {/each}
+                  {/if}
+                </div>
+              </div>
+              <div class="field" onpointerdown={(e) => e.stopPropagation()}>
+                <span>Widmo B</span>
+                <div class="combine-list">
+                  {#if inputsFor(node, "b").length === 0}
+                    <div class="combine-list-empty">podłącz widmo B</div>
+                  {:else}
+                    {#each inputsFor(node, "b") as edge (edge.id)}
+                      <div class="combine-list-item">
+                        <span class="combine-list-label">{sourceLabel(edge.from)}</span>
+                        <button class="combine-remove" onclick={() => removeEdge(edge.id)} title="Usuń połączenie">×</button>
+                      </div>
+                    {/each}
+                  {/if}
+                </div>
+              </div>
+              <label class="seg-check-item" onpointerdown={(e) => e.stopPropagation()}>
+                <input type="checkbox" class="cb-input cb-input-sm" checked={node.showDiff ?? false} onchange={() => toggleShowDiff(node)} />
+                <span class="cb-label">pokaż różnicę (A−B)</span>
+              </label>
+              {#if true}
+                {@const aEdge = graph.edges.find((e) => e.to === node.id && e.toSocket === "a")}
+                {@const bEdge = graph.edges.find((e) => e.to === node.id && e.toSocket === "b")}
+                {@const aOutcome = aEdge ? evalNode(aEdge.from) : null}
+                {@const bOutcome = bEdge ? evalNode(bEdge.from) : null}
+                {@const aVal = aOutcome?.ok && aOutcome.value.kind === "widmo" ? aOutcome.value : null}
+                {@const bVal = bOutcome?.ok && bOutcome.value.kind === "widmo" ? bOutcome.value : null}
+                <div class="mz-preview" style="height:180px">
+                  {#if aVal && bVal}
+                    {@const traces = [
+                      { mz: aVal.mz, intensity: aVal.intensity, label: "A", color: "#5b9bd5" },
+                      { mz: bVal.mz, intensity: bVal.intensity, label: "B", color: "#ffc951" },
+                      ...(node.showDiff && aVal.mz.length === bVal.mz.length
+                        ? [{ mz: aVal.mz, intensity: aVal.intensity.map((v, i) => v - bVal.intensity[i]), label: "A−B", color: "#7bc47f" }]
+                        : []),
+                    ]}
+                    <SpectrumTracesPlot {traces} compact />
+                    <button class="mz-zoom-btn" onpointerdown={(e) => e.stopPropagation()}
+                            onclick={() => (zoomWidmoTraces = traces)} title="Powiększ">⤢</button>
+                  {:else}
+                    <div class="mz-preview-empty">podłącz oba widma (A i B)</div>
+                  {/if}
+                </div>
+              {/if}
+            {:else if node.type === "widmo/save_spectrum"}
+              <label class="field" onpointerdown={(e) => e.stopPropagation()}>
+                <span>Nazwa nowego widma</span>
+                <input class="mz-name-input" type="text" placeholder="nazwa…"
+                       value={node.saveName ?? ""}
+                       oninput={(e) => setSaveName(node, (e.target as HTMLInputElement).value)} />
+              </label>
+              <button class="run-btn save-btn" onpointerdown={(e) => e.stopPropagation()}
+                      disabled={savingNodeId === node.id}
+                      onclick={() => saveSpectrumNode(node)}>
+                {savingNodeId === node.id ? "Zapisywanie…" : "Zapisz jako nowe widmo"}
+              </button>
+              {#if saveStatus[node.id]}
+                <span class="preview-result">{saveStatus[node.id]}</span>
+              {/if}
             {/if}
 
             <!-- Podgląd na żywo — {#if true} to jedyny sposób, by {@const} mógł tu
@@ -1073,7 +1737,7 @@
             {#if true}
               {@const outcome = evalNode(node.id)}
               {@const kind = outputKind(node)}
-              {#if kind === "mapa" || kind === "segmentacja"}
+              {#if kind === "mapa" || kind === "segmentacja" || kind === "segment" || kind === "widmo"}
                 <div class="mz-preview" style="height:{previewHeight(node)}px">
                   {#if outcome.ok && outcome.value.kind === "mapa"}
                     {@const mapVal = outcome.value}
@@ -1082,11 +1746,19 @@
                             onclick={() => (zoomTissue = resultTissue(mapVal))} title="Powiększ">⤢</button>
                   {:else if outcome.ok && outcome.value.kind === "segmentacja"}
                     <SegLabelCanvas labels={outcome.value.labels} legend={outcome.value.legend} />
+                  {:else if outcome.ok && outcome.value.kind === "segment"}
+                    <SegmentMaskCanvas data={outcome.value.data} mask={outcome.value.mask} />
+                  {:else if outcome.ok && outcome.value.kind === "widmo"}
+                    {@const widmoVal = outcome.value}
+                    {@const trace = { mz: widmoVal.mz, intensity: widmoVal.intensity, label: widmoVal.label, color: "#5b9bd5" }}
+                    <SpectrumTracesPlot traces={[trace]} compact />
+                    <button class="mz-zoom-btn" onpointerdown={(e) => e.stopPropagation()}
+                            onclick={() => (zoomWidmoTraces = [trace])} title="Powiększ">⤢</button>
                   {:else if !outcome.ok}
                     <div class="mz-preview-empty">{outcome.error}</div>
                   {/if}
                 </div>
-              {:else if !outcome.ok}
+              {:else if !outcome.ok && node.type !== "widmo/compare"}
                 <div class="node-status">{outcome.error}</div>
               {/if}
             {/if}
@@ -1121,18 +1793,22 @@
     <div bind:this={paletteEl} class="ctx-menu palette" style="left:{paletteRenderPos.x}px; top:{paletteRenderPos.y}px; max-height:{paletteMaxHeight}px;"
          onpointerdown={(e) => e.stopPropagation()}
          onwheel={(e) => e.stopPropagation()}>
+      {#if pendingConn}
+        <div class="ctx-conn-hint">
+          Podłącz {pendingConn.direction === "out" ? "wejście" : "wyjście"} — {PORT_KIND_LABELS[pendingConn.kind]}
+        </div>
+      {/if}
       <input class="ctx-filter" type="text" placeholder="Szukaj node'a…" bind:value={paletteFilter} autofocus />
       <div class="ctx-list">
-        {#if paletteHasFilter}
+        {#if filteredTypes.length === 0}
+          <div class="ctx-empty">{pendingConn ? "brak pasujących node'ów" : "brak wyników"}</div>
+        {:else if paletteHasFilter}
           {#each filteredTypes as t (t.id)}
             <button class="ctx-item" onclick={() => addNode(t.id)}
                     onpointerenter={(e) => onCtxItemEnter(e, t)} onpointerleave={onCtxItemLeave}>
               <span class="ctx-item-label">{t.label} <span class="ctx-item-domain">· {DOMAIN_LABELS[t.domain]}</span></span>
             </button>
           {/each}
-          {#if filteredTypes.length === 0}
-            <div class="ctx-empty">brak wyników</div>
-          {/if}
         {:else}
           {#each DOMAIN_ORDER as dom (dom)}
             {@const domItems = filteredTypes.filter((t) => t.domain === dom)}
@@ -1160,7 +1836,11 @@
   {#if nodeMenuOpen}
     <div bind:this={nodeMenuEl} class="ctx-menu node-menu" style="left:{nodeMenuRenderPos.x}px; top:{nodeMenuRenderPos.y}px;"
          onpointerdown={(e) => e.stopPropagation()}>
-      <button class="ctx-item danger" onclick={requestDeleteNode}>Usuń</button>
+      <button class="ctx-item danger" onclick={requestDeleteNode}>
+        {nodeMenuTarget && selectedNodeIds.has(nodeMenuTarget) && selectedNodeIds.size > 1
+          ? `Usuń zaznaczone (${selectedNodeIds.size})`
+          : "Usuń"}
+      </button>
     </div>
   {/if}
 </div>
@@ -1177,7 +1857,7 @@
             <div class="ng-sidebar-item" class:dragging={paletteDrag?.typeId === t.id}
                  onpointerdown={(e) => onSidebarItemPointerDown(e, t)}
                  title={t.description}>
-              <span class="ng-item-dot" style="background:{nodeTypeDotColor(t)}"></span>
+              <span class="ng-item-dot" style="background:{nodeTypeDotBackground(t)}"></span>
               <span class="ng-item-label">{t.label}</span>
             </div>
           {/each}
@@ -1204,8 +1884,8 @@
 
 <ConfirmModal
   open={confirmDeleteOpen}
-  title="Usuń node"
-  message="Czy na pewno chcesz usunąć ten node?"
+  title={deleteIds.length > 1 ? `Usuń ${deleteIds.length} node'y` : "Usuń node"}
+  message={deleteMessage}
   confirmLabel="Usuń"
   danger
   onconfirm={confirmDeleteNode}
@@ -1214,6 +1894,10 @@
 
 {#if zoomTissue}
   <PixelMapZoomModal tissue={zoomTissue} dispMin={0} dispMax={1} invertColors={false} onclose={() => (zoomTissue = null)} />
+{/if}
+
+{#if zoomWidmoTraces}
+  <SpectrumZoomModal traces={zoomWidmoTraces} onclose={() => (zoomWidmoTraces = null)} />
 {/if}
 
 <style>
@@ -1270,6 +1954,14 @@
     border-radius: 10px;
     box-shadow: 0 4px 16px rgba(0,0,0,0.35);
     user-select: none;
+    /* z-index (nawet stałe 1, nie tylko "auto") tworzy WŁASNY kontekst
+       stackowania dla tego node'a — dzięki temu kropka portu (.port,
+       z-index:5) stackuje się tylko WEWNĄTRZ swojego node'a (ponad jego
+       body/nagłówkiem), a nie ponad INNYMI node'ami, które akurat go
+       przykrywają. Bez tego z-index:5 na porcie "przebijał" globalnie
+       stackowanie wszystkich node'ów, bo .mnode samo w sobie (position
+       bez z-index) nie miało własnego kontekstu. */
+    z-index: 1;
   }
   .mnode.selected {
     border-color: rgba(255,201,81,0.6);
@@ -1697,6 +2389,16 @@
     display: flex;
     flex-direction: column;
     width: 200px;
+  }
+
+  .ctx-conn-hint {
+    flex-shrink: 0;
+    padding: 6px 10px;
+    font-size: 0.62rem;
+    font-weight: 600;
+    color: #ffc951;
+    background: rgba(255,201,81,0.08);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
   }
 
   .ctx-filter {

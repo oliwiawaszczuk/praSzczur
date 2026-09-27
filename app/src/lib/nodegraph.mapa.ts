@@ -188,9 +188,26 @@ const MAPA_NODE_TYPES: NodeTypeDef[] = [
     },
   },
   {
+    id: "mapa/invert",
+    label: "Odwrócenie kolorów",
+    description: "Odwraca intensywność mapy pikseli (v → 1 − v) — jasne miejsca stają się ciemnymi i odwrotnie.",
+    domain: "mapa", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "mapa", kind: "mapa" }],
+    outputs: [{ id: "out", label: "mapa", kind: "mapa" }],
+    params: [],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0];
+      if (!src) return { ok: false, error: "podłącz wejście" };
+      const checked = asMapa(src, "mapa");
+      if ("error" in checked) return { ok: false, error: checked.error };
+      const data = checked.data.map((row) => row.map((v) => 1 - v));
+      return { ok: true, value: { ...checked, data } };
+    },
+  },
+  {
     id: "mapa/save_output",
     label: "Zapis",
-    description: "Zapisuje mapę wynikową jako nową mapę pikseli w podzakładce \"Zapisane\". Jedyny węzeł zapisu w całym grafie — działa tak samo dla zwykłej mapy m/z, jak i dla maski wyjściowej z \"Wybór segmentów\" (domena Segmentacja).",
+    description: "Zapisuje mapę wynikową jako nową mapę pikseli w podzakładce \"Zapisane\". Działa wyłącznie dla map domeny Mapa (ciągła intensywność) — do zapisu segmentu (maska 0/1) służy osobny węzeł \"Zapis segmentu\" (domena Segmentacja), bo to inny rodzaj danych.",
     domain: "mapa", stage: "wynik",
     inputs: [{ id: "in", label: "mapa", kind: "mapa" }],
     outputs: [],

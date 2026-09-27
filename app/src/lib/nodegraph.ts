@@ -13,19 +13,33 @@
 // "segmentacja"), nie tylko pod dzisiejszy przypadek 1 wejście + 1 wyjście.
 
 import type { SavedPixelMap, SavedPixelMapSource } from "./savedPixelMaps.svelte";
+import type { SavedSpectrum, SavedSpectrumSource } from "./spectraLibrary.svelte";
 
-export type PortKind = "widmo" | "mapa" | "segmentacja";
+// "segment" to ŚWIADOMIE osobny rodzaj od "mapa" — mapa m/z to ciągła
+// intensywność, segment to zawsze binarna maska przynależności (0/1)
+// wyekstrahowana z wyniku k-means. Rozdzielenie typów uniemożliwia
+// przypadkowe podłączenie zwykłej mapy m/z tam, gdzie węzeł oczekuje
+// segmentu (i odwrotnie) — patrz "Wybór segmentów" / "Łączenie segmentów" /
+// "Odwrócenie segmentu" / "Usuwanie wysepek" w nodegraph.segmentacja.ts,
+// wszystkie operują WYŁĄCZNIE na kind "segment".
+export type PortKind = "widmo" | "mapa" | "segmentacja" | "segment";
 
+// Rozróżnialne, stałe kolory kropek per rodzaj gniazda — używane spójnie
+// wszędzie (kropki portów, krawędzie, kropka typu w prawym panelu/legendzie).
+// Każdy rodzaj ma wyraźnie inny odcień, żeby dwa rodzaje portów nigdy nie
+// wyglądały na ten sam kolor na pierwszy rzut oka.
 export const PORT_KIND_COLORS: Record<PortKind, string> = {
   widmo: "#5b9bd5",
   mapa: "#ffc951",
-  segmentacja: "#7ec8e3",
+  segmentacja: "#b48ce0",
+  segment: "#7bc47f",
 };
 
 export const PORT_KIND_LABELS: Record<PortKind, string> = {
   widmo: "Widmo",
   mapa: "Mapa",
   segmentacja: "Segmentacja",
+  segment: "Segment",
 };
 
 export type NodeStage = "dane" | "przetwarzanie" | "wynik";
@@ -113,6 +127,19 @@ export interface KmeansResult {
 
 export type MapSource = SavedPixelMapSource;
 
+/** Wynik ostatniego ręcznego przeliczenia dla węzłów widma, które wymagają
+ * wywołania backendu (widmo/smooth, widmo/baseline, widmo/peakpick,
+ * widmo/from_segment) — ten sam duch co KmeansResult: ciężka/sieciowa
+ * operacja NIE liczy się automatycznie przy każdym renderze, tylko ręcznym
+ * przyciskiem "Przetwórz", wynik cache'uje się na węźle, evaluate() czyta
+ * cache i zwraca błąd, jeśli jest pusty albo `inputSignature` nie zgadza się
+ * z aktualnym wejściem (wejście zmieniło się od ostatniego przetworzenia). */
+export interface WidmoProcessCache {
+  inputSignature: string;
+  mz: number[];
+  intensity: number[];
+}
+
 export interface GraphNode {
   id: string;
   type: string;
@@ -121,9 +148,10 @@ export interface GraphNode {
   params: Record<string, number | string>;
   // ── Pola specyficzne dla poszczególnych typów węzłów (jeden płaski kształt,
   // sprawdzony wzorzec z MzGraphNode/SegGraphNode — bez discriminated union) ──
-  /** "mapa/map_source": id wybranej zapisanej mapy. */
+  /** "mapa/map_source" / "segmentacja/segment_source": id wybranej zapisanej
+   * mapy/segmentu. */
   savedMapId?: string;
-  /** Czy sekcja ze szczegółami jest rozwinięta (map_source). */
+  /** Czy sekcja ze szczegółami jest rozwinięta (map_source/segment_source). */
   expanded?: boolean;
   /** "curve": punkty kontrolne krzywej intensywności. */
   curvePoints?: CurvePoint[];
@@ -131,8 +159,19 @@ export interface GraphNode {
   kmeansResult?: KmeansResult;
   /** "segmentacja/select_segments": zaznaczone etykiety klas. */
   selectedLabels?: number[];
-  /** "mapa/save_output": nazwa, pod jaką zapisana zostanie nowa mapa. */
+  /** "mapa/save_output" / "segmentacja/save_segment" / "widmo/save_spectrum":
+   * nazwa, pod jaką zapisany zostanie nowy wynik. */
   saveName?: string;
+  /** "widmo/spectrum_source": id wybranego zapisanego widma z biblioteki
+   * "Zapisane widma" (osobna od "Zapisane" mapy pikseli — inny rodzaj danych,
+   * patrz WidmoValue). */
+  savedSpectrumId?: string;
+  /** "widmo/compare": czy w podglądzie pokazywać też trzecią linię — różnicę
+   * (a − b) obu podłączonych widm, oprócz ich nałożenia. */
+  showDiff?: boolean;
+  /** "widmo/smooth" / "widmo/baseline" / "widmo/peakpick" / "widmo/from_segment":
+   * wynik ostatniego ręcznego przetworzenia (patrz WidmoProcessCache). */
+  widmoProcessCache?: WidmoProcessCache;
 }
 
 export interface GraphEdge {
@@ -190,11 +229,52 @@ export interface SegmentacjaValue {
   sources: MapSource[];
 }
 
-export type NodeValue = MapaValue | SegmentacjaValue;
+/** Pojedynczy wyekstrahowany segment — zawsze binarna maska (0/1), NIGDY
+ * ciągła intensywność (stąd osobny `kind` od `MapaValue`, patrz komentarz
+ * przy `PortKind`). Konwencja wizualna (patrz `SegmentMaskCanvas.svelte`,
+ * jedyne miejsce, które to rysuje) jest STAŁA i obowiązuje we wszystkich
+ * węzłach segmentowych: `data[y][x] === 1` → CZARNY (segment/zaznaczone),
+ * `data[y][x] === 0` → BIAŁY (poza segmentem, ale wciąż w obrębie tkanki),
+ * `mask[y][x] === 0` → w pełni przezroczyste (piksel poza faktycznym
+ * skanem tkanki — nie brany pod uwagę w ŻADNEJ operacji: k-means,
+ * łączenie, usuwanie wysepek itd. traktują go jak nieistniejący, nie jak
+ * "tło" o wartości 0). */
+export interface SegmentValue {
+  kind: "segment";
+  tissueId: string;
+  tissueLabel: string;
+  width: number;
+  height: number;
+  data: number[][];
+  mask?: number[][];
+  sources: MapSource[];
+}
+
+/** Widmo płynące przez graf — wektor intensywności na wspólnej osi `mz`.
+ * `sources` śledzi pochodzenie (piksel/e, tryb agregacji segmentu…) tak samo
+ * jak `MapSource` dla map, tylko w kształcie właściwym dla widm (patrz
+ * SavedSpectrumSource w spectraLibrary.svelte.ts — ten sam typ, żeby zapis do
+ * biblioteki (`widmo/save_spectrum`) nie musiał niczego konwertować). */
+export interface WidmoValue {
+  kind: "widmo";
+  tissueId: string;
+  tissueLabel: string;
+  label: string;
+  mz: number[];
+  intensity: number[];
+  mode: SavedSpectrum["mode"];
+  sources: SavedSpectrumSource[];
+}
+
+export type NodeValue = MapaValue | SegmentacjaValue | SegmentValue | WidmoValue;
 
 export interface EvalContext {
   mapCache: Record<string, SavedPixelMap>;
   savedMapExists: (id: string) => boolean;
+  /** Analogiczne do mapCache/savedMapExists, ale dla biblioteki "Zapisane
+   * widma" (widmo/spectrum_source) — osobny cache, bo inny rodzaj danych. */
+  spectrumCache: Record<string, SavedSpectrum>;
+  savedSpectrumExists: (id: string) => boolean;
 }
 
 export type EvalOutcome =

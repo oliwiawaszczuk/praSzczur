@@ -227,6 +227,45 @@ def _save_pixel_maps_registry(reg: dict, wid: str) -> None:
     _pixel_maps_registry_file(wid).write_text(json.dumps(reg, indent=2))
 
 
+# ── Zapisane widma (Node Graph — domena Widmo, oraz zakładka Widma) ─────────
+# Ten sam wzorzec co "Zapisane mapy pikseli" powyżej: lekki rejestr metadanych
+# w registry.json (bez mz/intensity, żeby lista biblioteki była lekka), pełny
+# rekord (z mz/intensity) w osobnym pliku <id>.json per zapis.
+# Struktura: workspaces/<wid>/spectra/registry.json + spectra/<id>.json
+
+def _spectra_root(wid: str) -> Path:
+    return _workspace_dir(wid) / "spectra"
+
+
+def _spectra_registry_file(wid: str) -> Path:
+    return _spectra_root(wid) / "registry.json"
+
+
+def _spectrum_data_file(sid: str, wid: str) -> Path:
+    return _spectra_root(wid) / f"{sid}.json"
+
+
+def _find_spectrum(reg: dict, sid: str) -> dict | None:
+    return next((s for s in reg["spectra"] if s["id"] == sid), None)
+
+
+def _ensure_spectra_registry(wid: str) -> dict:
+    f = _spectra_registry_file(wid)
+    try:
+        if f.exists():
+            reg = json.loads(f.read_text())
+            if "spectra" in reg:
+                return reg
+    except Exception:
+        pass
+    return {"spectra": []}
+
+
+def _save_spectra_registry(reg: dict, wid: str) -> None:
+    _spectra_root(wid).mkdir(parents=True, exist_ok=True)
+    _spectra_registry_file(wid).write_text(json.dumps(reg, indent=2))
+
+
 def _ensure_default_workspace() -> dict:
     """Wczytuje registry; jeśli brak workspace'ów, tworzy domyślny i migruje
     ewentualne stare dane z data/processed/ (poprzedni, jednoworkspace'owy model)."""
@@ -1390,6 +1429,120 @@ def preprocess_chain(body: dict) -> dict:
         raise HTTPException(500, str(e))
 
 
+@app.post("/spectrum_process")
+def spectrum_process(body: dict) -> dict:
+    """Stosuje pojedynczą metodę preprocessingu (patrz src/msi/preprocessing.py)
+    do DOWOLNEGO widma (mz/intensity podane wprost w body), nie tylko piksela
+    z imzML/datasetu jak /preprocess i /preprocess_chain — używane przez węzły
+    domeny Widmo w Node Graph (widmo/smooth, widmo/baseline, widmo/peakpick),
+    które operują na widmach obliczonych w grafie (wynik łączenia, agregacji
+    segmentu itd.), nie bezpośrednio na pikselu z dysku."""
+    method = body.get("method")
+    mz = np.asarray(body.get("mz") or [], dtype=float)
+    intensity = np.asarray(body.get("intensity") or [], dtype=float)
+    params = body.get("params") or {}
+    if mz.size == 0 or intensity.size == 0:
+        raise HTTPException(400, "Brak mz/intensity")
+
+    from src.msi.preprocessing import smooth_savgol, baseline_correction_snip, peak_pick
+
+    try:
+        if method == "smooth":
+            out = smooth_savgol(intensity, window=int(params.get("window", 15)))
+        elif method == "baseline":
+            out, _baseline = baseline_correction_snip(intensity, iterations=int(params.get("iterations", 40)))
+        elif method == "peakpick":
+            out, _n_peaks = peak_pick(mz, intensity, prominence_frac=float(params.get("prominence_frac", 0.02)))
+        else:
+            raise HTTPException(400, f"Nieznana metoda '{method}'")
+        return {"intensity": [float(v) for v in out]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/segment_spectrum")
+def segment_spectrum(body: dict) -> dict:
+    """Agreguje widma WSZYSTKICH pikseli należących do segmentu (maska 0/1 z
+    Node Graph, domena Segmentacja) w jedno widmo — używane przez węzeł
+    widmo/from_segment. Segment sam nie niesie listy pikseli, tylko maskę 2D w
+    lokalnym układzie tkanki (ten sam układ co /ion_image: wiersz = y - y_min,
+    kolumna = x - x_min) — offset do bezwzględnych (x,y) bierzemy z
+    `_tissues_meta`, bo geometria tkanki (które piksele istnieją) jest ta sama
+    niezależnie od wybranego zestawu/binningu, tylko intensywności się różnią.
+
+    Body: {tissue, source: "raw"|"binned", dataset, mask: number[][], mode}."""
+    tissue = body.get("tissue")
+    source = body.get("source", "binned")
+    dataset = body.get("dataset", "")
+    mask_grid = body.get("mask")
+    mode = body.get("mode", "sum")
+    if not tissue or not mask_grid:
+        raise HTTPException(400, "Brak tissue/mask")
+    meta = next((m for m in _tissues_meta if m["id"] == tissue), None)
+    if not meta:
+        raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
+    gx0, gy0 = meta["x_min"], meta["y_min"]
+    mask_arr = np.asarray(mask_grid, dtype=float)
+    ys_local, xs_local = np.where(mask_arr >= 0.5)
+    if len(ys_local) == 0:
+        raise HTTPException(400, "Segment jest pusty")
+    wanted = set(zip((xs_local + gx0).tolist(), (ys_local + gy0).tolist()))
+
+    try:
+        if source == "raw":
+            if not _imzml_path:
+                raise HTTPException(503, "Brak ścieżki do pliku imzML — uruchom preprocessing")
+            path = Path(_imzml_path)
+            if not path.exists():
+                raise HTTPException(404, f"Plik {path} nie istnieje")
+            p, coords_arr = _get_imzml_parser(path)
+            matched = [i for i, c in enumerate(coords_arr) if (int(c[0]), int(c[1])) in wanted]
+            if not matched:
+                raise HTTPException(404, "Brak pikseli segmentu w pliku imzML")
+            mz_arr = None
+            vectors = []
+            for i in matched:
+                mz_i, ints_i = p.getspectrum(int(i))
+                if mz_arr is None:
+                    mz_arr = np.asarray(mz_i, dtype=float)
+                vectors.append(np.asarray(ints_i, dtype=float))
+            stacked = np.vstack(vectors)
+        else:
+            cache = _get_dataset_cache(dataset)
+            if tissue not in cache:
+                raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana w wybranym zestawie")
+            d = cache[tissue]
+            coords = d["coords"]
+            sel = np.array([(int(cx), int(cy)) in wanted for cx, cy in coords])
+            if not sel.any():
+                raise HTTPException(404, "Brak pikseli segmentu w wybranym zestawie")
+            mz_arr = np.asarray(d["mz_bins"], dtype=float)
+            stacked = np.asarray(d["spectra"])[sel]
+
+        if mode == "sum":
+            out = stacked.sum(axis=0)
+        elif mode == "mean":
+            out = stacked.mean(axis=0)
+        elif mode == "max":
+            out = stacked.max(axis=0)
+        elif mode == "diff":
+            out = np.clip(stacked[0] - stacked[1:].sum(axis=0), 0, None) if len(stacked) > 1 else stacked[0].copy()
+        else:
+            raise HTTPException(400, f"Nieznany tryb '{mode}'")
+
+        return {
+            "mz": [round(float(m), 6) for m in mz_arr],
+            "intensity": [float(v) for v in out],
+            "n_pixels": int(len(stacked)),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.get("/pixel_spectrum")
 def pixel_spectrum(tissue: str, x: int, y: int, dataset: str = "") -> dict:
     """Zwraca pełne widmo binned dla piksela (x, y) w tkance (opcjonalnie z
@@ -1977,6 +2130,79 @@ def delete_pixel_map(wid: str, pmid: str) -> dict:
     preg["maps"] = [m for m in preg["maps"] if m["id"] != pmid]
     _save_pixel_maps_registry(preg, wid)
     _pixel_map_data_file(pmid, wid).unlink(missing_ok=True)
+    return {"ok": True}
+
+
+# ── Zapisane widma (biblioteka domeny Widmo) ────────────────────────────────
+
+@app.get("/workspaces/{wid}/spectra")
+def list_spectra(wid: str) -> dict:
+    reg = _load_registry()
+    if not _find_ws(reg, wid):
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    sreg = _ensure_spectra_registry(wid)
+    return {"spectra": sreg["spectra"]}
+
+
+@app.post("/workspaces/{wid}/spectra")
+def create_spectrum(wid: str, body: dict) -> dict:
+    reg = _load_registry()
+    if not _find_ws(reg, wid):
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    sreg = _ensure_spectra_registry(wid)
+    sid = uuid.uuid4().hex[:12]
+    now = _now_iso()
+    meta = {
+        "id": sid,
+        "name": (body.get("name") or "Zapisane widmo").strip() or "Zapisane widmo",
+        "tissueId": body.get("tissueId", ""),
+        "tissueLabel": body.get("tissueLabel", ""),
+        "mode": body.get("mode", "single"),
+        "sources": body.get("sources", []),
+        "createdAt": now, "updatedAt": now,
+    }
+    sreg["spectra"].append(meta)
+    _save_spectra_registry(sreg, wid)
+    full = {**meta, "mz": body.get("mz", []), "intensity": body.get("intensity", [])}
+    _spectra_root(wid).mkdir(parents=True, exist_ok=True)
+    _spectrum_data_file(sid, wid).write_text(json.dumps(full))
+    return meta
+
+
+@app.get("/workspaces/{wid}/spectra/{sid}")
+def get_spectrum(wid: str, sid: str) -> dict:
+    """Zwraca pełny rekord zapisanego widma (w tym `mz`/`intensity`) — wołane
+    leniwie per węzeł/karta, nie przy samej liście (żeby lista była lekka)."""
+    sreg = _ensure_spectra_registry(wid)
+    if not _find_spectrum(sreg, sid):
+        raise HTTPException(404, f"Widmo '{sid}' nie istnieje")
+    f = _spectrum_data_file(sid, wid)
+    if not f.exists():
+        raise HTTPException(404, f"Dane widma '{sid}' nie istnieją")
+    return json.loads(f.read_text())
+
+
+@app.put("/workspaces/{wid}/spectra/{sid}")
+def rename_spectrum(wid: str, sid: str, body: dict) -> dict:
+    sreg = _ensure_spectra_registry(wid)
+    s = _find_spectrum(sreg, sid)
+    if not s:
+        raise HTTPException(404, f"Widmo '{sid}' nie istnieje")
+    if "name" in body and body["name"].strip():
+        s["name"] = body["name"].strip()
+    s["updatedAt"] = _now_iso()
+    _save_spectra_registry(sreg, wid)
+    return s
+
+
+@app.delete("/workspaces/{wid}/spectra/{sid}")
+def delete_spectrum(wid: str, sid: str) -> dict:
+    sreg = _ensure_spectra_registry(wid)
+    if not _find_spectrum(sreg, sid):
+        raise HTTPException(404, f"Widmo '{sid}' nie istnieje")
+    sreg["spectra"] = [s for s in sreg["spectra"] if s["id"] != sid]
+    _save_spectra_registry(sreg, wid)
+    _spectrum_data_file(sid, wid).unlink(missing_ok=True)
     return {"ok": True}
 
 

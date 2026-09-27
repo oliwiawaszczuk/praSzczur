@@ -2,11 +2,25 @@
 // Przeniesione bez zmian logiki z dawnego segnodes.ts (k-means + select
 // segments) — tylko rejestr i evaluate() dopasowane do generycznego silnika.
 //
-// Segment wyekstrahowany z segmentacji (węzeł "Wybór segmentów") ma dokładnie
-// ten sam kształt co mapa m/z (MapaValue = maska 0/1), więc dalej można go
-// łączyć/odejmować przez "mapa/combine" w tym samym, wspólnym grafie.
+// Segment wyekstrahowany z segmentacji (węzeł "Wybór segmentów") jest OSOBNYM
+// rodzajem gniazda ("segment", nie "mapa") — mapa m/z to ciągła intensywność,
+// segment to zawsze binarna maska przynależności. Świadomie NIE da się więc
+// podłączyć zwykłej "Mapa m/z" wprost do "Łączenie segmentów"/"Odwrócenie
+// segmentu"/"Usuwanie wysepek" — to inny rodzaj danych (patrz komentarz przy
+// `SegmentValue` w nodegraph.ts, tam też jest ustalona konwencja kolorów
+// czarny/biały dla podglądu segmentu).
 
-import { registerNodeTypes, type NodeTypeDef, type MapaValue, type SegmentacjaValue, type EvalOutcome } from "./nodegraph";
+import { combineMasks } from "./tissueMerge";
+import { registerNodeTypes, dedupeSources, type NodeTypeDef, type MapaValue, type SegmentacjaValue, type SegmentValue, type EvalOutcome } from "./nodegraph";
+
+/** Etykiety trybu węzła "Łączenie segmentów" — operacje mnogościowe na
+ * maskach 0/1 (w odróżnieniu od "mapa/combine", które łączy ciągłą
+ * intensywność; tu wynik ma zawsze pozostać czystą maską 0/1). */
+export const MERGE_MODE_LABELS: Record<string, string> = {
+  sum: "suma (suma zbiorów)",
+  difference: "różnica (pierwszy − reszta)",
+};
+export const MERGE_MODE_LIST: string[] = ["sum", "difference"];
 
 /** Kategoryczna, dobrze rozróżnialna paleta (Tableau-like) — cykliczna dla k >
  * 12 (raczej teoretyczny przypadek, k jest ograniczone do 10). */
@@ -124,11 +138,46 @@ export function runKmeans(
   return { labels, legend: counts.map((count, label) => ({ label, count })) };
 }
 
+/** Usuwa małe, odizolowane skupiska pikseli ("wysepki") z binarnej maski
+ * (0/1) — proste łączenie składowych spójnych po 4-sąsiedztwie (bez
+ * przekątnych, "prosty algorytm" zgodnie z prośbą), każda składowa mniejsza
+ * lub równa `maxSize` pikseli zostaje wyzerowana. */
+function removeIslands(data: number[][], maxSize: number): number[][] {
+  const h = data.length;
+  const w = data[0]?.length ?? 0;
+  const visited: boolean[][] = Array.from({ length: h }, () => new Array(w).fill(false));
+  const out = data.map((row) => [...row]);
+  const isFg = (y: number, x: number) => data[y][x] >= 0.5;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!isFg(y, x) || visited[y][x]) continue;
+      const stack: [number, number][] = [[y, x]];
+      visited[y][x] = true;
+      const comp: [number, number][] = [];
+      while (stack.length) {
+        const [cy, cx] = stack.pop()!;
+        comp.push([cy, cx]);
+        const neighbors: [number, number][] = [[cy - 1, cx], [cy + 1, cx], [cy, cx - 1], [cy, cx + 1]];
+        for (const [ny, nx] of neighbors) {
+          if (ny < 0 || ny >= h || nx < 0 || nx >= w) continue;
+          if (visited[ny][nx] || !isFg(ny, nx)) continue;
+          visited[ny][nx] = true;
+          stack.push([ny, nx]);
+        }
+      }
+      if (comp.length <= maxSize) {
+        for (const [cy, cx] of comp) out[cy][cx] = 0;
+      }
+    }
+  }
+  return out;
+}
+
 const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
   {
     id: "segmentacja/kmeans",
     label: "K-means",
-    description: "Segmentuje piksele na k grup metodą k-means. Podłącz jedną mapę (klasteryzacja po intensywności) albo kilka (klasteryzacja po wektorze cech — warto je najpierw znormalizować w domenie Mapa, żeby kanały miały porównywalną skalę). Przeliczane ręcznie przyciskiem \"Przetwórz\".",
+    description: "Segmentuje piksele na k grup metodą k-means. Gniazdo wejściowe przyjmuje WIELE map naraz (każda podłączona \"Mapa m/z\" to jeden kanał cechy) — z jedną mapą klasteryzacja idzie po samej intensywności, z kilkoma po wektorze cech (np. jednocześnie po kilku m/z), co pozwala rozróżnić klasy niewidoczne na żadnym pojedynczym kanale osobno. Warto najpierw znormalizować kanały w domenie Mapa, żeby miały porównywalną skalę. Przeliczane ręcznie przyciskiem \"Przetwórz\".",
     domain: "segmentacja", stage: "przetwarzanie",
     inputs: [{ id: "in", label: "mapy", kind: "mapa", multi: true }],
     outputs: [{ id: "out", label: "segmentacja", kind: "segmentacja" }],
@@ -161,10 +210,10 @@ const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
   {
     id: "segmentacja/select_segments",
     label: "Wybór segmentów",
-    description: "Wybiera jedną lub kilka klas z wyniku segmentacji i zwraca maskę (0/1) jako zwykłą mapę pikseli — zaznaczenie kilku klas łączy je w jedną maskę.",
+    description: "Wybiera jedną lub kilka klas z wyniku segmentacji i zwraca segment (maskę 0/1) — zaznaczenie kilku klas łączy je w jeden segment.",
     domain: "segmentacja", stage: "przetwarzanie",
     inputs: [{ id: "in", label: "segmentacja", kind: "segmentacja" }],
-    outputs: [{ id: "out", label: "mapa", kind: "mapa" }],
+    outputs: [{ id: "out", label: "segment", kind: "segment" }],
     params: [],
     evaluate(node, inputs): EvalOutcome {
       const src = inputs.in[0] as SegmentacjaValue | undefined;
@@ -177,7 +226,111 @@ const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
       );
       return {
         ok: true,
-        value: { kind: "mapa", tissueId: src.tissueId, tissueLabel: src.tissueLabel, width, height, data, mask: src.mask, mode: "segment", sources: src.sources },
+        value: { kind: "segment", tissueId: src.tissueId, tissueLabel: src.tissueLabel, width, height, data, mask: src.mask, sources: src.sources },
+      };
+    },
+  },
+  {
+    id: "segmentacja/merge_segments",
+    label: "Łączenie segmentów",
+    description: "Łączy wiele segmentów w jeden zbiorem: suma (OR) albo różnica (pierwsze podłączone wejście minus wszystkie pozostałe).",
+    domain: "segmentacja", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "segmenty", kind: "segment", multi: true }],
+    outputs: [{ id: "out", label: "segment", kind: "segment" }],
+    params: [{ key: "mode", label: "Sposób łączenia", default: "sum", options: MERGE_MODE_LIST }],
+    evaluate(node, inputs): EvalOutcome {
+      const results = inputs.in as SegmentValue[];
+      if (results.length === 0) return { ok: false, error: "podłącz przynajmniej jeden segment" };
+      const { width, height, tissueId } = results[0];
+      if (results.some((r) => r.width !== width || r.height !== height)) {
+        return { ok: false, error: "podłączone segmenty mają różne wymiary" };
+      }
+      if (results.some((r) => r.tissueId !== tissueId)) {
+        return { ok: false, error: "podłączone segmenty pochodzą z różnych tkanek" };
+      }
+      const mode = (node.params.mode as string) ?? "sum";
+      const data: number[][] = Array.from({ length: height }, (_, y) =>
+        Array.from({ length: width }, (_, x) => {
+          const vals = results.map((r) => (r.data[y][x] >= 0.5 ? 1 : 0));
+          if (mode === "difference") return vals[0] && !vals.slice(1).some((v) => v) ? 1 : 0;
+          return vals.some((v) => v) ? 1 : 0;
+        }),
+      );
+      const mask = combineMasks(results.map((r) => r.mask), height, width);
+      return {
+        ok: true,
+        value: {
+          kind: "segment", tissueId, tissueLabel: results[0].tissueLabel, width, height, data, mask,
+          sources: dedupeSources(results.flatMap((r) => r.sources)),
+        },
+      };
+    },
+  },
+  {
+    id: "segmentacja/invert_segment",
+    label: "Odwrócenie segmentu",
+    description: "Odwraca segment (maskę 0/1) — zaznaczone piksele stają się niezaznaczonymi i odwrotnie.",
+    domain: "segmentacja", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "segment", kind: "segment" }],
+    outputs: [{ id: "out", label: "segment", kind: "segment" }],
+    params: [],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0] as SegmentValue | undefined;
+      if (!src) return { ok: false, error: "podłącz wejście (segment)" };
+      const data = src.data.map((row) => row.map((v) => (v >= 0.5 ? 0 : 1)));
+      return { ok: true, value: { ...src, data } };
+    },
+  },
+  {
+    id: "segmentacja/remove_islands",
+    label: "Usuwanie wysepek",
+    description: "Usuwa małe, odizolowane skupiska pikseli (\"wysepki\") z segmentu — proste łączenie składowych spójnych (4-sąsiedztwo); usuwa skupiska nie większe niż ustawiony próg. Piksele poza faktycznym skanem tkanki nie są brane pod uwagę.",
+    domain: "segmentacja", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "segment", kind: "segment" }],
+    outputs: [{ id: "out", label: "segment", kind: "segment" }],
+    params: [{ key: "islandMax", label: "Maks. rozmiar (px)", min: 1, max: 20, step: 1, default: 1 }],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0] as SegmentValue | undefined;
+      if (!src) return { ok: false, error: "podłącz wejście (segment)" };
+      const maxSize = Math.max(1, Math.round(Number(node.params.islandMax ?? 1)));
+      const data = removeIslands(src.data, maxSize);
+      return { ok: true, value: { ...src, data } };
+    },
+  },
+  {
+    id: "segmentacja/save_segment",
+    label: "Zapis segmentu",
+    description: "Zapisuje segment (maskę 0/1) jako zapis w podzakładce \"Zapisane\" (tryb: segment) — osobny węzeł od \"mapa/Zapis\", bo segment to inny rodzaj danych niż zwykła mapa m/z.",
+    domain: "segmentacja", stage: "wynik",
+    inputs: [{ id: "in", label: "segment", kind: "segment" }],
+    outputs: [],
+    params: [],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0] as SegmentValue | undefined;
+      if (!src) return { ok: false, error: "podłącz wejście" };
+      return { ok: true, value: src };
+    },
+  },
+  {
+    id: "segmentacja/segment_source",
+    label: "Zapisany segment",
+    description: "Wczytuje wcześniej zapisany segment z podzakładki \"Zapisane\" — lista pokazuje wyłącznie zapisy zapisane jako segment (węzłem \"Zapis segmentu\"), nie zwykłe mapy m/z.",
+    domain: "segmentacja", stage: "dane",
+    inputs: [],
+    outputs: [{ id: "out", label: "segment", kind: "segment" }],
+    params: [],
+    evaluate(node, _inputs, ctx): EvalOutcome {
+      const id = node.savedMapId;
+      if (!id) return { ok: false, error: "wybierz zapisany segment" };
+      if (!ctx.savedMapExists(id)) return { ok: false, error: "wybrany segment został usunięty" };
+      const full = ctx.mapCache[id];
+      if (!full) return { ok: false, error: "wczytywanie…" };
+      return {
+        ok: true,
+        value: {
+          kind: "segment", tissueId: full.tissueId, tissueLabel: full.tissueLabel,
+          width: full.width, height: full.height, data: full.data, mask: full.mask, sources: full.sources,
+        },
       };
     },
   },

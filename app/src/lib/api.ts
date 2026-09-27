@@ -153,6 +153,56 @@ export async function fetchPreprocessChain(
   return r.json();
 }
 
+export type SpectrumProcessMethod = "smooth" | "baseline" | "peakpick";
+
+/** Stosuje pojedynczą metodę preprocessingu do DOWOLNEGO widma (mz/intensity
+ * podane wprost, nie piksel z dysku) — używane przez węzły domeny Widmo w
+ * Node Graph, które operują na widmach obliczonych w grafie (patrz
+ * nodegraph.widmo.ts). Odpowiednik /preprocess_chain, ale bez odwołania do
+ * tissue/x/y/dataset. */
+export async function fetchSpectrumProcess(
+  method: SpectrumProcessMethod, mz: number[], intensity: number[],
+  params: Record<string, number> = {},
+): Promise<{ intensity: number[] }> {
+  const r = await fetch(`${BASE}/spectrum_process`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ method, mz, intensity, params }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: `API error ${r.status}` }));
+    throw new Error(err.detail ?? `API error ${r.status}`);
+  }
+  return r.json();
+}
+
+export type SegmentSpectrumMode = "sum" | "mean" | "max" | "diff";
+
+export interface SegmentSpectrumResult {
+  mz: number[]; intensity: number[]; n_pixels: number;
+}
+
+/** Agreguje widma wszystkich pikseli segmentu (maska 0/1 w lokalnym układzie
+ * tkanki, ten sam co /ion_image) w jedno widmo — używane przez węzeł
+ * "widmo/from_segment". Liczone na backendzie (nie pobieraniem tysięcy
+ * pojedynczych widm pikseli do przeglądarki), patrz komentarz przy
+ * /segment_spectrum w sidecarze. */
+export async function fetchSegmentSpectrum(
+  tissue: string, source: "raw" | "binned", dataset: string,
+  mask: number[][], mode: SegmentSpectrumMode,
+): Promise<SegmentSpectrumResult> {
+  const r = await fetch(`${BASE}/segment_spectrum`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tissue, source, dataset, mask, mode }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: `API error ${r.status}` }));
+    throw new Error(err.detail ?? `API error ${r.status}`);
+  }
+  return r.json();
+}
+
 export interface TissuePixelMap {
   tissue: string; xs: number[]; ys: number[]; values: number[];
 }
