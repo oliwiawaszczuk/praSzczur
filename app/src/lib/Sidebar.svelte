@@ -11,6 +11,7 @@
   interface Props {
     loading?: boolean;
     onquery?: (args: { mz: number; tol: number; raw?: boolean; dataset?: string }) => void;
+    oncreategroup?: (args: { mz: number; tol: number; dataset: string }) => void;
     dispMin?: number;
     dispMax?: number;
     ondisprange?: (min: number, max: number) => void;
@@ -25,6 +26,7 @@
   let {
     loading = false,
     onquery,
+    oncreategroup,
     dispMin = 0,
     dispMax = 1,
     ondisprange,
@@ -148,6 +150,20 @@
     onquery?.({ mz, tol, raw: false, dataset: queryDataset });
   }
 
+  /** Przycisk "Grupa" obok "Wczytaj" — tworzy nową grupę w podzakładce
+   * "Grupy" z bieżącymi mz/tol/zestawem danych i przełącza tam użytkownika. */
+  function submitAsGroup() {
+    const mz = validateMz(mzInput);
+    if (mz === null) {
+      const lo = mzMin > 0 ? mzMin : 0;
+      const hi = isFinite(mzMax) ? mzMax : Infinity;
+      mzError = isFinite(hi) ? `Wartość m/z: ${lo.toFixed(0)}–${hi.toFixed(0)} Da` : "Podaj prawidłową wartość m/z";
+      return;
+    }
+    mzError = "";
+    oncreategroup?.({ mz, tol, dataset: queryDataset });
+  }
+
   function onDatasetChange() {
     if (validateMz(mzInput) !== null) submit();
   }
@@ -225,6 +241,8 @@
     <button class="btn-primary" style="width:100%; margin-top:8px" onclick={() => submit()} disabled={loading || !mzInput}>
       {#if loading}<span class="spinner"></span>{:else}Wczytaj{/if}
     </button>
+    <button class="btn-secondary-group" onclick={submitAsGroup} disabled={loading || !mzInput}
+            title="Utwórz grupę z tym m/z w podzakładce Grupy">+ Grupa</button>
     {#if mzError}<span class="error-msg">{mzError}</span>{/if}
   </section>
 
@@ -405,6 +423,15 @@
     transform: translateY(-1px);
   }
   .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-secondary-group {
+    width: 100%; margin-top: 6px; padding: 7px;
+    background: rgba(255,201,81,0.1); border: 1px solid rgba(255,201,81,0.25); border-radius: 8px;
+    color: #ffc951; font-size: 0.72rem; font-weight: 600;
+    cursor: pointer; font-family: inherit; transition: background 0.15s;
+  }
+  .btn-secondary-group:hover:not(:disabled) { background: rgba(255,201,81,0.2); }
+  .btn-secondary-group:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .mz-row { display: flex; gap: 6px; align-items: flex-start; }
   .mz-input-shrink { flex: 1; min-width: 0; }

@@ -43,6 +43,9 @@ workspaces/
 # praSzczur app boards (per-user Tablica data: board.json + uploaded image assets)
 boards/
 
+# praSzczur app — globalne ustawienia (per-user, niezależne od workspace'u)
+app_settings.json
+
 # IDE
 .idea/
 .vscode/

@@ -7,6 +7,7 @@
   import { savePixelMap } from "./savedPixelMaps.svelte";
   import { windowValue, maxOf } from "./tissueMerge";
   import PixelMapZoomModal from "./PixelMapZoomModal.svelte";
+  import { requestGraphInsert } from "./graphInsert.svelte";
 
   interface Props {
     group: MzGroup;
@@ -90,33 +91,51 @@
 
   let savedFlash = $state<Set<string>>(new Set());
 
+  /** Buduje i zapisuje mapę tej karty (z bieżącym zakresem wyświetlania i
+   * odwróceniem kolorów zastosowanym PRZED zapisem — inaczej zapisana mapa
+   * ignorowałaby ustawiony zakres, jak w Łączeniu, patrz mergeTissueMaps).
+   * Współdzielone przez przycisk 💾 (onSave) i "→ Node Graph" (onSendToGraph). */
+  async function saveThisMap(tid: string): Promise<{ id: string; label: string } | undefined> {
+    const img = tissues?.[tid];
+    if (!img || group.mz === null) return undefined;
+    const label = tissueLabels[tid] ?? img.label;
+    const data = img.data.map((row) => row.map((v) => windowValue(v, dispMin, dispMax, invert)));
+    const name = `${label} · ${new Date().toLocaleString("pl-PL")}`;
+    const meta = await savePixelMap({
+      name,
+      tissueId: tid,
+      tissueLabel: label,
+      width: img.width,
+      height: img.height,
+      vmax: maxOf(data),
+      mode: "single",
+      sources: [{ groupIndex, mz: group.mz, tol: group.tol, datasetId: group.dataset, datasetLabel: datasetLabel(group.dataset) }],
+      data,
+      mask: img.mask,
+    });
+    return { id: meta.id, label: name };
+  }
+
   async function onSave(e: MouseEvent, tid: string) {
     e.stopPropagation();
-    const img = tissues?.[tid];
-    if (!img || group.mz === null) return;
-    const label = tissueLabels[tid] ?? img.label;
-    // Zastosuj bieżący zakres wyświetlania (dispMin/dispMax) i odwrócenie
-    // kolorów PRZED zapisem — inaczej zapisana mapa ignorowałaby ustawiony
-    // zakres i zawsze zapisywałaby surowe, nieprzycięte dane (jak w Łączeniu,
-    // patrz mergeTissueMaps).
-    const data = img.data.map((row) => row.map((v) => windowValue(v, dispMin, dispMax, invert)));
     try {
-      await savePixelMap({
-        name: `${label} · ${new Date().toLocaleString("pl-PL")}`,
-        tissueId: tid,
-        tissueLabel: label,
-        width: img.width,
-        height: img.height,
-        vmax: maxOf(data),
-        mode: "single",
-        sources: [{ groupIndex, mz: group.mz, tol: group.tol, datasetId: group.dataset, datasetLabel: datasetLabel(group.dataset) }],
-        data,
-        mask: img.mask,
-      });
+      const saved = await saveThisMap(tid);
+      if (!saved) return;
       savedFlash = new Set(savedFlash).add(tid);
       setTimeout(() => { const next = new Set(savedFlash); next.delete(tid); savedFlash = next; }, 1000);
     } catch {
       // cichy błąd — przycisk po prostu nie pokaże ✓
+    }
+  }
+
+  async function onSendToGraph(e: MouseEvent, tid: string) {
+    e.stopPropagation();
+    try {
+      const saved = await saveThisMap(tid);
+      if (!saved) return;
+      requestGraphInsert({ kind: "mapa", savedMapId: saved.id, label: saved.label }, "nodegraph");
+    } catch {
+      // cichy błąd — przycisk po prostu nic nie zrobi
     }
   }
 
@@ -197,6 +216,7 @@
               <button class="card-icon-btn" onclick={(e) => onSave(e, tid)} title="Zapisz tę mapę pikseli">
                 {savedFlash.has(tid) ? "✓" : "💾"}
               </button>
+              <button class="card-icon-btn" onclick={(e) => onSendToGraph(e, tid)} title="Wyślij do Node Graph">→⬡</button>
             </div>
           {/if}
           <IonCanvas

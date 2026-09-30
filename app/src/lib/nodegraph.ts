@@ -30,7 +30,10 @@ export type PortKind = "widmo" | "mapa" | "segmentacja" | "segment";
 // wyglądały na ten sam kolor na pierwszy rzut oka.
 export const PORT_KIND_COLORS: Record<PortKind, string> = {
   widmo: "#5b9bd5",
-  mapa: "#ffc951",
+  // NIE żółty accent appki (#ffc951) — kropki portów/krawędzie "mapa" zlewały
+  // się wizualnie z żółtymi obwódkami/podświetleniami reszty UI (ten sam
+  // powód co magenta marker w Widma.svelte COLORS[0]).
+  mapa: "#f2994a",
   segmentacja: "#b48ce0",
   segment: "#7bc47f",
 };
@@ -169,6 +172,12 @@ export interface GraphNode {
   /** "widmo/compare": czy w podglądzie pokazywać też trzecią linię — różnicę
    * (a − b) obu podłączonych widm, oprócz ich nałożenia. */
   showDiff?: boolean;
+  /** "segmentacja/remove_islands": gdy true, usuwa małe skupiska DRUGIEGO
+   * koloru (tła/poza segmentem) zamiast segmentu — efektywnie wypełnia małe
+   * "dziury" wewnątrz segmentu zamiast usuwać małe wysepki segmentu. Osobna,
+   * dodatkowa opcja od node'a "Odwrócenie segmentu" (invert_segment), który
+   * zostaje bez zmian jako pełne odwrócenie maski. */
+  invertIslandTarget?: boolean;
   /** "widmo/smooth" / "widmo/baseline" / "widmo/peakpick" / "widmo/from_segment":
    * wynik ostatniego ręcznego przetworzenia (patrz WidmoProcessCache). */
   widmoProcessCache?: WidmoProcessCache;
@@ -186,14 +195,34 @@ export interface GraphViewport {
   zoom: number;
 }
 
+/** Wolna notatka tekstowa na płótnie Node Graph — NIE jest typem węzła w
+ * NODE_TYPES (żadnych portów/evaluate, nie płynie przez nią żadna wartość),
+ * to czysto wizualna adnotacja, podzbiór BoardTextObject z board.svelte.ts
+ * (bez rotate/opacity/zIndex — proste nakładki, nie pełnoprawne obiekty
+ * tablicy). Dodane dopiero po naprawie wydajności grafu (patrz evalMemo w
+ * NodeGraphTab.svelte), żeby nie dokładać kolejnego elementu do już wolnego
+ * płótna. */
+export interface GraphTextNote {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  text: string;
+  color: string;
+  fontSize: number;
+  bold: boolean;
+}
+
 export interface Graph {
   nodes: GraphNode[];
   edges: GraphEdge[];
   viewport: GraphViewport;
+  notes: GraphTextNote[];
 }
 
 export function defaultGraph(): Graph {
-  return { nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } };
+  return { nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 }, notes: [] };
 }
 
 let _idCounter = 0;

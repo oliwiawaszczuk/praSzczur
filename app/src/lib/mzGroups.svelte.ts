@@ -67,6 +67,18 @@ export function addGroup(tolDefault: number): void {
   saveGroups();
 }
 
+/** Podzakładka "m/z" (pojedyncze zapytanie, Sidebar.svelte) → przycisk
+ * "Grupa" obok "Wczytaj": tworzy nową grupę od razu z podanym m/z/tol/
+ * zestawem danych i odpytuje ją, zamiast dodawać pustą kolumnę jak
+ * `addGroup`. */
+export function addGroupWithQuery(mz: number, tol: number, dataset: string): void {
+  const ds = sanitizeDatasetId(dataset);
+  const g: MzGroup = { id: crypto.randomUUID(), dataset: ds, mz, tol, dispMin: 0, dispMax: 1, invert: false };
+  groups = [...groups, g];
+  saveGroups();
+  runGroupQuery(g.id, mz, tol, ds);
+}
+
 /** Modal "Lista m/z" (WieleMz.svelte) — jedna wklejona lista m/z staje się
  * wieloma grupami naraz, jedno m/z = jedna grupa, wszystkie z tym samym
  * zestawem danych/tolerancją; dopisywane na koniec istniejących kolumn (jak

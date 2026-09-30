@@ -6,6 +6,8 @@
   import { wsGet, wsSet } from "$lib/workspace.svelte";
   import { datasets, sanitizeDatasetId, loadDatasets, datasetsLoaded, RAW_DATASET_ID } from "$lib/datasets.svelte";
   import { saveSpectrum } from "$lib/spectraLibrary.svelte";
+  import { requestGraphInsert } from "$lib/graphInsert.svelte";
+  import ConfirmModal from "$lib/ConfirmModal.svelte";
   import PixelMapPanel from "$lib/PixelMapPanel.svelte";
 
   const LS_LAYERS    = "widma_layers";
@@ -45,7 +47,11 @@
     datasetId: string; // zestaw danych źródłowy tej warstwy (lub RAW_DATASET_ID)
   }
 
-  const COLORS = ["#ffc951","#7ec8e3","#a8e6cf","#ff8b94","#c9b1ff","#ffcba4","#b5ead7","#ffdac1"];
+  // Pierwszy kolor NIE jest już żółtym accent kolorem appki (#ffc951) — kropka
+  // markera na mapie pikseli (PixelMapPanel) zlewała się wizualnie z żółtymi
+  // obwódkami/podświetleniami reszty UI, więc pierwsza warstwa dostaje teraz
+  // wyraźnie inny odcień (magenta).
+  const COLORS = ["#ff4fa8","#7ec8e3","#a8e6cf","#ff8b94","#c9b1ff","#ffcba4","#b5ead7","#ffdac1"];
 
   let selectedTissue  = $state(wsGet<string>(LS_TISSUE, tissues[0] ?? ""));
   let layers          = $state<Layer[]>([]);
@@ -174,9 +180,18 @@
     } finally { layerLoading = false; }
   }
 
-  function removeLayer(id: string) {
+  let deleteLayerTarget = $state<{ id: string; label: string } | null>(null);
+
+  function requestRemoveLayer(id: string) {
     const l = layers.find(l => l.id === id);
-    if (l?.locked) return;
+    if (!l || l.locked) return;
+    deleteLayerTarget = { id, label: l.label };
+  }
+
+  function confirmRemoveLayer() {
+    if (!deleteLayerTarget) return;
+    const { id } = deleteLayerTarget;
+    deleteLayerTarget = null;
     layers = layers.filter(l => l.id !== id);
   }
 
@@ -189,11 +204,14 @@
     return datasetId === RAW_DATASET_ID ? "Dane oryginalne" : (datasets().find(d => d.id === datasetId)?.name ?? datasetId);
   }
 
-  async function saveLayerToLibrary(layer: Layer) {
+  /** Zwraca id zapisu w bibliotece "Zapisane widma" (albo undefined przy
+   * błędzie) — wołane zarówno przez przycisk 💾, jak i "→ Node Graph"
+   * (sendLayerToNodeGraph), który potrzebuje tego id, żeby wskazać zapis. */
+  async function saveLayerToLibrary(layer: Layer): Promise<string | undefined> {
     savingLayerId = layer.id;
     saveLayerStatus = { ...saveLayerStatus, [layer.id]: "" };
     try {
-      await saveSpectrum({
+      const meta = await saveSpectrum({
         name: layer.label,
         tissueId: layer.spectrum.tissue,
         tissueLabel: tLabel(layer.spectrum.tissue),
@@ -203,11 +221,22 @@
         intensity: layer.spectrum.intensity,
       });
       saveLayerStatus = { ...saveLayerStatus, [layer.id]: "✓ zapisano" };
+      return meta.id;
     } catch (e) {
       saveLayerStatus = { ...saveLayerStatus, [layer.id]: e instanceof Error ? e.message : String(e) };
+      return undefined;
     } finally {
       savingLayerId = null;
     }
+  }
+
+  /** "→ Node Graph" — zapisuje warstwę (jeśli jeszcze nie była zapisana w tej
+   * sesji, po prostu zapisuje ponownie — proste i spójne z przyciskiem 💾,
+   * zamiast śledzić osobno "czy już zapisano") i wskazuje ten zapis w grafie. */
+  async function sendLayerToNodeGraph(layer: Layer) {
+    const id = await saveLayerToLibrary(layer);
+    if (!id) return;
+    requestGraphInsert({ kind: "widmo", savedSpectrumId: id, label: layer.label }, "nodegraph");
   }
 
   // ── Drag-to-reorder (Pointer Events) ─────────────────────────────────────
@@ -533,6 +562,12 @@
                 title={savingLayerId === layer.id ? "Zapisywanie…" : (saveLayerStatus[layer.id] || "Zapisz do biblioteki widm (do użycia w Node Graph)")}
               >{savingLayerId === layer.id ? "…" : "💾"}</button>
               <button
+                class="layer-btn"
+                onclick={() => sendLayerToNodeGraph(layer)}
+                disabled={savingLayerId === layer.id}
+                title="Wyślij do Node Graph"
+              >→⬡</button>
+              <button
                 class="layer-btn vis-btn"
                 class:vis-off={!layer.visible}
                 onclick={() => toggleVisible(layer.id)}
@@ -546,7 +581,7 @@
               ></button>
               <button
                 class="layer-btn del"
-                onclick={() => removeLayer(layer.id)}
+                onclick={() => requestRemoveLayer(layer.id)}
                 disabled={layer.locked}
                 title="Usuń"
               >×</button>
@@ -634,6 +669,16 @@
   </div>
 
 </div>
+
+<ConfirmModal
+  open={deleteLayerTarget !== null}
+  title="Usunąć warstwę?"
+  message={deleteLayerTarget ? `Usunąć warstwę "${deleteLayerTarget.label}"?` : ""}
+  confirmLabel="Usuń"
+  danger={true}
+  onconfirm={confirmRemoveLayer}
+  oncancel={() => (deleteLayerTarget = null)}
+/>
 
 <style>
   .widma-layout {

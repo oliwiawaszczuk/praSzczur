@@ -4,6 +4,7 @@
   import BoardSidebar from "$lib/BoardSidebar.svelte";
   import ShortcutsModal from "$lib/ShortcutsModal.svelte";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
+  import { getSetting } from "$lib/appSettings.svelte";
   import {
     boards, loadBoards, createBoard, renameBoard, deleteBoard,
     getBoard, scheduleSaveBoard, flushSaveBoard,
@@ -29,8 +30,10 @@
   let shapeStrokeWidth = $state(wsGet("tablica_shapeStrokeWidth", 2));
   let shapeStrokeTransparent = $state(wsGet("tablica_shapeStrokeTransparent", true));
   let shapeCornerRadius = $state(wsGet("tablica_shapeCornerRadius", 4));
-  let zoomSensitivity = $state(wsGet("tablica_zoomSensitivity", 1));
-  let panSensitivity = $state(wsGet("tablica_panSensitivity", 1));
+  // Globalne (nie per-workspace) — współdzielone ze WSZYSTKIMI Node Graphami,
+  // patrz appSettings.svelte.ts. Zmieniane wyłącznie z zakładki Ustawienia.
+  let zoomSensitivity = $derived(getSetting("canvasZoomSensitivity", 1));
+  let panSensitivity = $derived(getSetting("canvasPanSensitivity", 1));
   let shortcutsOpen = $state(false);
 
   // ── Historia (Ctrl+Z / Ctrl+Shift+Z) ──────────────────────────────────
@@ -197,15 +200,6 @@
     shapeCornerRadius = r;
     wsSet("tablica_shapeCornerRadius", r);
   }
-  function setZoomSens(v: number): void {
-    zoomSensitivity = v;
-    wsSet("tablica_zoomSensitivity", v);
-  }
-  function setPanSens(v: number): void {
-    panSensitivity = v;
-    wsSet("tablica_panSensitivity", v);
-  }
-
   function onKeydown(e: KeyboardEvent) {
     const tag = document.activeElement?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA") return;
@@ -311,8 +305,6 @@
         {shapeStrokeWidth}
         {shapeStrokeTransparent}
         {shapeCornerRadius}
-        {zoomSensitivity}
-        {panSensitivity}
         onselectboard={openBoard}
         oncreateboard={handleCreateBoard}
         onrenameboard={(id, name) => renameBoard(id, name)}
@@ -330,8 +322,6 @@
         onshapestroketransparent={setShapeStrokeTransparent}
         onshapecornerradius={setShapeCornerRadius}
         onexportpng={() => canvasApi?.exportPNG()}
-        onzoomsens={setZoomSens}
-        onpansens={setPanSens}
         onshowshortcuts={() => (shortcutsOpen = true)}
       />
     </div>

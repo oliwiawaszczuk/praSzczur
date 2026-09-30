@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { wsGet, wsSet } from "$lib/workspace.svelte";
   import ConfirmModal from "$lib/ConfirmModal.svelte";
   import DualRange from "$lib/DualRange.svelte";
@@ -15,18 +15,19 @@
   import { maxOf, combineMasks } from "$lib/tissueMerge";
   import { datasets, loadDatasets, datasetsLoaded, RAW_DATASET_ID } from "$lib/datasets.svelte";
   import {
-    savedMapsList, loadSavedMaps, savedMapsLoaded, fetchSavedMapData, savePixelMap,
+    savedMapsList, loadSavedMaps, savedMapsLoaded, fetchSavedMapData, savePixelMap, renameSavedMap,
     type SavedPixelMap, type SavedPixelMapMode,
   } from "$lib/savedPixelMaps.svelte";
   import {
-    savedSpectraList, loadSavedSpectra, savedSpectraLoaded, fetchSavedSpectrumData, saveSpectrum,
+    savedSpectraList, loadSavedSpectra, savedSpectraLoaded, fetchSavedSpectrumData, saveSpectrum, renameSavedSpectrum,
     type SavedSpectrum,
   } from "$lib/spectraLibrary.svelte";
   import {
     NODE_TYPES, nodeTypeList, defaultGraph, defaultParamsFor, makeId, evaluateGraphNode, wouldCreateCycle,
     PORT_KIND_COLORS, PORT_KIND_LABELS, DOMAIN_ORDER, DOMAIN_LABELS, STAGE_ORDER, STAGE_LABELS, DEFAULT_CURVE_POINTS,
     type Graph, type GraphNode, type GraphEdge, type GraphViewport, type PortKind, type PortSocketDef,
-    type MapaValue, type SegmentValue, type WidmoValue, type CurvePoint, type EvalOutcome, type NodeTypeDef,
+    type MapaValue, type SegmentValue, type WidmoValue, type CurvePoint, type EvalOutcome, type EvalContext, type NodeTypeDef,
+    type GraphTextNote,
   } from "$lib/nodegraph";
   import { COMBINE_MODE_LABELS, COMBINE_MODE_LIST, computeHistogram, type CombineModeExt } from "$lib/nodegraph.mapa";
   import { SEG_PALETTE, runKmeans, MERGE_MODE_LABELS, MERGE_MODE_LIST } from "$lib/nodegraph.segmentacja";
@@ -35,6 +36,12 @@
     widmoInputSignature, segmentInputSignature, maxIntensity, filterMzByIntensityBand,
   } from "$lib/nodegraph.widmo";
   import { formatMzListText } from "$lib/mzListFormat";
+  import {
+    nodeGraphs, ensureAtLeastOneGraph, createNodeGraph, getNodeGraphData,
+    scheduleSaveNodeGraph, flushSaveNodeGraph,
+  } from "$lib/nodegraphs.svelte";
+  import { getSetting } from "$lib/appSettings.svelte";
+  import { pendingGraphInsert, clearGraphInsert } from "$lib/graphInsert.svelte";
   // rejestrują swoje typy węzłów przy imporcie (side-effect na moduł) — muszą
   // być zaimportowane choćby raz, żeby NODE_TYPES nie był pusty.
   import "$lib/nodegraph.mapa";
@@ -48,13 +55,7 @@
   }
   let { visible = true }: Props = $props();
 
-  onMount(async () => {
-    if (!savedMapsLoaded()) await loadSavedMaps();
-    if (!savedSpectraLoaded()) await loadSavedSpectra();
-    if (!datasetsLoaded()) await loadDatasets();
-  });
-
-  const LS_GRAPH = "nodegraph_graph";
+  const LS_ACTIVE_GRAPH = "nodegraph_activeGraphId";
   const LS_SIDEBAR = "nodegraph_sidebarOpen";
   const SIDEBAR_WIDTH = 220;
 
@@ -62,16 +63,73 @@
     if (!g.nodes) g.nodes = [];
     if (!g.edges) g.edges = [];
     if (!g.viewport) g.viewport = { x: 0, y: 0, zoom: 1 };
+    if (!g.notes) g.notes = [];
     return g;
   }
 
-  let graph = $state<Graph>(sanitize(wsGet<Graph>(LS_GRAPH, defaultGraph())));
+  // Wiele grafów per workspace (patrz nodegraphs.svelte.ts) — dane grafu
+  // wczytywane asynchronicznie (fetch, nie sync wsGet jak dawniej), więc
+  // `graph` startuje pusty i wypełnia się po onMount/openGraph. `graphReady`
+  // blokuje auto-fit/render dopóki faktyczny graf nie jest wczytany.
+  let graph = $state<Graph>(defaultGraph());
+  let graphReady = $state(false);
+  let activeGraphId = $state("");
 
-  let saveTimer: ReturnType<typeof setTimeout> | null = null;
   function persist() {
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => { wsSet(LS_GRAPH, graph); }, 300);
+    if (!activeGraphId) return;
+    scheduleSaveNodeGraph(activeGraphId, graph);
   }
+
+  async function openGraph(id: string) {
+    if (id === activeGraphId && graphReady) return;
+    await flushSaveNodeGraph();
+    const data = await getNodeGraphData(id);
+    graph = sanitize(data);
+    activeGraphId = id;
+    wsSet(LS_ACTIVE_GRAPH, id);
+    selectedNodeIds = new Set();
+    graphReady = true;
+    queueFitAll();
+  }
+
+  async function switchGraph(id: string) {
+    if (id !== activeGraphId) await openGraph(id);
+  }
+
+  // Aktywny graf mógł zostać zmieniony (usunięty) z zakładki Ustawienia
+  // (patrz WorkspaceSettings.svelte, karta "Node Graphy") — lista `nodeGraphs()`
+  // jest współdzielonym stanem, więc to wykrywamy reaktywnie i przełączamy się
+  // na inny istniejący graf zamiast zostać z martwym id.
+  $effect(() => {
+    if (!graphReady || !activeGraphId) return;
+    const list = nodeGraphs();
+    if (list.some((g) => g.id === activeGraphId)) return;
+    if (list.length > 0) openGraph(list[0].id);
+    else ensureAtLeastOneGraph().then((g) => openGraph(g.id));
+  });
+
+  async function newGraph() {
+    const g = await createNodeGraph(`Graf ${nodeGraphs().length + 1}`);
+    await openGraph(g.id);
+  }
+
+  onMount(async () => {
+    if (!savedMapsLoaded()) await loadSavedMaps();
+    if (!savedSpectraLoaded()) await loadSavedSpectra();
+    if (!datasetsLoaded()) await loadDatasets();
+    await ensureAtLeastOneGraph();
+    const list = nodeGraphs();
+    const saved = wsGet<string>(LS_ACTIVE_GRAPH, "");
+    const id = list.some((g) => g.id === saved) ? saved : list[0].id;
+    await openGraph(id);
+    window.addEventListener("beforeunload", onBeforeUnload);
+  });
+
+  onDestroy(() => {
+    flushSaveNodeGraph();
+    window.removeEventListener("beforeunload", onBeforeUnload);
+  });
+  function onBeforeUnload() { flushSaveNodeGraph(); }
 
   // ── Panel node'ów (prawy sidebar) ───────────────────────────────────
   let sidebarOpen = $state(wsGet(LS_SIDEBAR, true));
@@ -136,6 +194,51 @@
       addNode(paletteDrag.typeId, screenToWorld({ x: e.clientX, y: e.clientY }));
     }
     paletteDrag = null;
+  }
+
+  // ── "Wyślij do Node Graph" z innych zakładek (pkt 11/13/14) — patrz
+  // graphInsert.svelte.ts. Ten sam duch co paletteDrag powyżej (duszek pod
+  // kursorem, klik na płótnie wstawia), ale aktywowane z ZEWNĄTRZ (inna
+  // zakładka ustawiła pendingGraphInsert), nie przeciąganiem z palety. ─────
+  let insertGhostPos = $state<{ x: number; y: number } | null>(null);
+
+  $effect(() => {
+    const pending = pendingGraphInsert();
+    if (!pending || !visible) { insertGhostPos = null; return; }
+    window.addEventListener("pointermove", onInsertGhostMove);
+    window.addEventListener("pointerdown", onInsertGhostClick, { capture: true });
+    window.addEventListener("keydown", onInsertGhostKeydown);
+    return () => {
+      window.removeEventListener("pointermove", onInsertGhostMove);
+      window.removeEventListener("pointerdown", onInsertGhostClick, { capture: true });
+      window.removeEventListener("keydown", onInsertGhostKeydown);
+      insertGhostPos = null;
+    };
+  });
+
+  function onInsertGhostMove(e: PointerEvent) {
+    insertGhostPos = { x: e.clientX, y: e.clientY };
+  }
+
+  function onInsertGhostKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") clearGraphInsert();
+  }
+
+  function onInsertGhostClick(e: PointerEvent) {
+    const pending = pendingGraphInsert();
+    if (!pending) return;
+    const rect = container?.getBoundingClientRect();
+    if (!rect || e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const worldPos = screenToWorld({ x: e.clientX, y: e.clientY });
+    const typeId = pending.kind === "mapa" ? "mapa/map_source"
+      : pending.kind === "segment" ? "segmentacja/segment_source" : "widmo/spectrum_source";
+    addNode(typeId, worldPos);
+    const created = graph.nodes[graph.nodes.length - 1];
+    if (pending.kind === "widmo") setNodeSpectrumSource(created, pending.savedSpectrumId);
+    else setNodeSavedMap(created, pending.savedMapId);
+    clearGraphInsert();
   }
 
   // ── Dane zapisanych map — pełne 2D array wczytywane leniwie per node ─────
@@ -204,8 +307,20 @@
   let nonSegmentSavedMaps = $derived(savedMapsList().filter((m) => m.mode !== "segment"));
   let segmentSavedMaps = $derived(savedMapsList().filter((m) => m.mode === "segment"));
 
+  // Wydajność: dawniej evalNode() wołał evaluateGraphNode() z NOWĄ, pustą mapą
+  // memo za każdym wywołaniem — a jest wołany osobno dla każdego node'a
+  // (wielokrotnie per node: nodeHeight/previewHeight/podgląd), więc koszt
+  // liczenia całego grafu rósł do O(N²) (albo gorzej) przy każdym renderze.
+  // Jedna współdzielona mapa memo, przeliczana raz per zmianę grafu/danych
+  // wejściowych, sprowadza to do O(N+E) — każdy node liczony dokładnie raz.
+  let evalMemo = $derived.by(() => {
+    const memo = new Map<string, EvalOutcome>();
+    const ctx: EvalContext = { mapCache: mapData, savedMapExists, spectrumCache: spectrumData, savedSpectrumExists };
+    for (const n of graph.nodes) evaluateGraphNode(graph, n.id, ctx, memo);
+    return memo;
+  });
   function evalNode(nodeId: string): EvalOutcome {
-    return evaluateGraphNode(graph, nodeId, { mapCache: mapData, savedMapExists, spectrumCache: spectrumData, savedSpectrumExists });
+    return evalMemo.get(nodeId) ?? { ok: false, error: "brak węzła" };
   }
 
   function resultTissue(r: MapaValue): TissueImage {
@@ -242,6 +357,11 @@
     return { x: (p.x - viewport.x) / viewport.zoom, y: (p.y - viewport.y) / viewport.zoom };
   }
 
+  // Globalne (nie per-workspace), współdzielone ze WSZYSTKIMI Node Graphami
+  // oraz Tablicą — patrz appSettings.svelte.ts, zmieniane z zakładki Ustawienia.
+  let zoomSensitivity = $derived(getSetting("canvasZoomSensitivity", 1));
+  let panSensitivity = $derived(getSetting("canvasPanSensitivity", 1));
+
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     const rect = container?.getBoundingClientRect();
@@ -250,10 +370,10 @@
       const oldScale = viewport.zoom;
       const pointTo = { x: (pointer.x - viewport.x) / oldScale, y: (pointer.y - viewport.y) / oldScale };
       const dir = e.deltaY > 0 ? -1 : 1;
-      const newScale = Math.max(0.2, Math.min(3, oldScale * (1 + dir * 0.08)));
+      const newScale = Math.max(0.2, Math.min(3, oldScale * (1 + dir * 0.08 * zoomSensitivity)));
       setViewport({ zoom: newScale, x: pointer.x - pointTo.x * newScale, y: pointer.y - pointTo.y * newScale });
     } else {
-      setViewport({ ...viewport, x: viewport.x - e.deltaX, y: viewport.y - e.deltaY });
+      setViewport({ ...viewport, x: viewport.x - e.deltaX * panSensitivity, y: viewport.y - e.deltaY * panSensitivity });
     }
   }
 
@@ -277,6 +397,7 @@
     if (node.type === "segmentacja/kmeans") return 250;
     if (node.type === "segmentacja/select_segments") return 230;
     if (node.type === "segmentacja/merge_segments") return 240;
+    if (node.type === "segmentacja/segments_to_segmentation") return 240;
     if (node.type === "segmentacja/remove_islands") return 230;
     if (node.type === "segmentacja/segment_source") return 240;
     if (node.type === "segmentacja/save_segment") return 230;
@@ -301,8 +422,20 @@
     return 130;
   }
 
+  // Wydajność: jak evalMemo powyżej — dawniej filtrowało całą tablicę
+  // graph.edges przy KAŻDYM wywołaniu (wołane wielokrotnie per node), O(N·E)
+  // łącznie. Budowane raz per zmianę grafu, odczyt jest O(1).
+  let edgesByTarget = $derived.by(() => {
+    const m = new Map<string, GraphEdge[]>();
+    for (const e of graph.edges) {
+      const key = `${e.to}:${e.toSocket}`;
+      const arr = m.get(key);
+      if (arr) arr.push(e); else m.set(key, [e]);
+    }
+    return m;
+  });
   function inputsFor(node: GraphNode, socketId: string): GraphEdge[] {
-    return graph.edges.filter((e) => e.to === node.id && e.toSocket === socketId);
+    return edgesByTarget.get(`${node.id}:${socketId}`) ?? [];
   }
 
   function nodeHeight(node: GraphNode): number {
@@ -329,8 +462,10 @@
       h += Math.max(1, kCount) * 22 + 10;
     } else if (node.type === "segmentacja/merge_segments") {
       h += 34 + Math.max(1, inputsFor(node, "in").length) * 24;
+    } else if (node.type === "segmentacja/segments_to_segmentation") {
+      h += 10 + Math.max(1, inputsFor(node, "in").length) * 24;
     } else if (node.type === "segmentacja/remove_islands") {
-      h += 40;
+      h += 40 + 26; // suwak + checkbox "odwróć kolory"
     } else if (node.type === "segmentacja/segment_source") {
       h += 30 + 22;
       if (node.expanded) h += 70;
@@ -433,6 +568,7 @@
   function onNodeHeaderPointerDown(e: PointerEvent, node: GraphNode) {
     if ((e.target as HTMLElement).closest(".node-info, .node-menu-trigger")) return;
     e.stopPropagation();
+    if (!e.shiftKey) selectedNoteIds = new Set();
     if (e.shiftKey) {
       const next = new Set(selectedNodeIds);
       if (next.has(node.id)) next.delete(node.id); else next.add(node.id);
@@ -462,6 +598,84 @@
     if (dragNodeId) persist();
     dragNodeId = null;
     dragGroupOrigin = new Map();
+    if (dragNoteId) persist();
+    dragNoteId = null;
+  }
+
+  // ── Notatki tekstowe (pkt 8) — proste, niezależne od typu węzła adnotacje
+  // na płótnie (patrz GraphTextNote w nodegraph.ts). Osobne, prostsze
+  // zaznaczanie/przeciąganie niż node'y (bez przeciągania grupy naraz —
+  // to rzadka, dodatkowa funkcja adnotacji, nie główny przepływ). ─────────
+  let selectedNoteIds = $state<Set<string>>(new Set());
+  let dragNoteId = $state<string | null>(null);
+  let dragNoteStart = { x: 0, y: 0 };
+  let dragNoteOrigin = { x: 0, y: 0 };
+
+  function onNoteHeaderPointerDown(e: PointerEvent, note: GraphTextNote) {
+    e.stopPropagation();
+    if (!e.shiftKey) selectedNodeIds = new Set();
+    if (e.shiftKey) {
+      const next = new Set(selectedNoteIds);
+      if (next.has(note.id)) next.delete(note.id); else next.add(note.id);
+      selectedNoteIds = next;
+    } else if (!selectedNoteIds.has(note.id)) {
+      selectedNoteIds = new Set([note.id]);
+    }
+    dragNoteId = note.id;
+    dragNoteStart = { x: e.clientX, y: e.clientY };
+    dragNoteOrigin = { x: note.x, y: note.y };
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  }
+  function onNoteHeaderPointerMove(e: PointerEvent) {
+    if (!dragNoteId) return;
+    const dx = (e.clientX - dragNoteStart.x) / viewport.zoom;
+    const dy = (e.clientY - dragNoteStart.y) / viewport.zoom;
+    const idx = graph.notes.findIndex((n) => n.id === dragNoteId);
+    if (idx === -1) return;
+    graph.notes[idx] = { ...graph.notes[idx], x: dragNoteOrigin.x + dx, y: dragNoteOrigin.y + dy };
+  }
+
+  function setNoteText(note: GraphTextNote, text: string) {
+    const idx = graph.notes.findIndex((n) => n.id === note.id);
+    if (idx === -1) return;
+    graph.notes[idx] = { ...graph.notes[idx], text };
+    persist();
+  }
+
+  /** Rozmiar zmienia się przez natywny uchwyt `resize:both` przeglądarki na
+   * <textarea> — `ResizeObserver` (zamiast np. "mouseup") łapie to NATYCHMIAST,
+   * w trakcie przeciągania uchwytu, nie dopiero po puszczeniu przycisku (stąd
+   * wcześniej trzeba było kliknąć gdzie indziej i z powrotem, żeby wygląd się
+   * odświeżył). Szuka po `noteId`, nie po zamkniętej referencji `note` — ta
+   * może być nieaktualna (obiekt zastępowany przy każdej edycji), a id się
+   * nie zmienia. */
+  function observeNoteResize(el: HTMLTextAreaElement, noteId: string) {
+    const ro = new ResizeObserver(() => syncNoteSize(noteId, el));
+    ro.observe(el);
+    return { destroy() { ro.disconnect(); } };
+  }
+
+  function syncNoteSize(noteId: string, el: HTMLTextAreaElement) {
+    const idx = graph.notes.findIndex((n) => n.id === noteId);
+    if (idx === -1) return;
+    const w = Math.round(el.clientWidth);
+    const h = Math.round(el.clientHeight);
+    if (w === graph.notes[idx].width && h === graph.notes[idx].height) return;
+    graph.notes[idx] = { ...graph.notes[idx], width: w, height: h };
+    persist();
+  }
+
+  function addTextNote() {
+    const rect = container?.getBoundingClientRect();
+    const center = rect ? containerRelToWorld({ x: rect.width / 2, y: rect.height / 2 }) : { x: 0, y: 0 };
+    const note: GraphTextNote = {
+      id: makeId("note"), x: center.x - 90, y: center.y - 40, width: 180, height: 80,
+      text: "", color: "#ffffff", fontSize: 14, bold: false,
+    };
+    graph.notes.push(note);
+    selectedNodeIds = new Set();
+    selectedNoteIds = new Set([note.id]);
+    persist();
   }
 
   function onCanvasPointerDown(e: PointerEvent) {
@@ -483,7 +697,7 @@
       // Zwykłe kliknięcie pustego płótna (bez ruchu) — odznacza grupę, chyba
       // że trzymano shift (wtedy nic nie robimy, żeby nie skasować zaznaczenia
       // przez przypadkowy mikro-ruch podczas shift-klikania).
-      if (!marqueeShift) selectedNodeIds = new Set();
+      if (!marqueeShift) { selectedNodeIds = new Set(); selectedNoteIds = new Set(); }
       return;
     }
     const a = containerRelToWorld(marqueeStartScreen);
@@ -495,7 +709,13 @@
         .filter((n) => n.x < maxX && n.x + nodeWidth(n) > minX && n.y < maxY && n.y + nodeHeight(n) > minY)
         .map((n) => n.id),
     );
+    const foundNotes = new Set(
+      graph.notes
+        .filter((n) => n.x < maxX && n.x + n.width > minX && n.y < maxY && n.y + n.height > minY)
+        .map((n) => n.id),
+    );
     selectedNodeIds = marqueeShift ? new Set([...selectedNodeIds, ...found]) : found;
+    selectedNoteIds = marqueeShift ? new Set([...selectedNoteIds, ...foundNotes]) : foundNotes;
   }
 
   // ── Połączenia — gniazda typowane, łączy się tylko ten sam `kind` ───────
@@ -542,6 +762,7 @@
     lastMouseClient = { x: e.clientX, y: e.clientY };
     cursorWorld = screenToWorld(lastMouseClient);
     if (dragNodeId) onNodeHeaderPointerMove(e);
+    if (dragNoteId) onNoteHeaderPointerMove(e);
     if (marqueeActive) {
       const rect = container?.getBoundingClientRect();
       marqueeCurScreen = { x: e.clientX - (rect?.left ?? 0), y: e.clientY - (rect?.top ?? 0) };
@@ -805,10 +1026,11 @@
     closeMenus();
   }
 
-  // ── Usuwanie — pojedynczego node'a ALBO całego zaznaczenia naraz, zawsze z
-  // potwierdzeniem pokazującym WSZYSTKIE node'y, które faktycznie znikną. ──
+  // ── Usuwanie — pojedynczego node'a/notatki ALBO całego zaznaczenia naraz,
+  // zawsze z potwierdzeniem pokazującym WSZYSTKIE elementy, które znikną. ──
   let confirmDeleteOpen = $state(false);
   let deleteIds = $state<string[]>([]);
+  let deleteNoteIds = $state<string[]>([]);
 
   function deleteNodeLabel(id: string): string {
     const n = graph.nodes.find((x) => x.id === id);
@@ -816,11 +1038,14 @@
   }
 
   let deleteMessage = $derived.by(() => {
-    if (deleteIds.length <= 1) {
-      return deleteIds[0] ? `Czy na pewno chcesz usunąć node "${deleteNodeLabel(deleteIds[0])}"?` : "";
+    const total = deleteIds.length + deleteNoteIds.length;
+    if (total === 0) return "";
+    if (total === 1) {
+      if (deleteIds.length === 1) return `Czy na pewno chcesz usunąć node "${deleteNodeLabel(deleteIds[0])}"?`;
+      return "Czy na pewno chcesz usunąć notatkę tekstową?";
     }
-    const labels = deleteIds.map((id) => deleteNodeLabel(id)).join(", ");
-    return `Czy na pewno chcesz usunąć ${deleteIds.length} zaznaczone node'y: ${labels}?`;
+    const labels = [...deleteIds.map((id) => deleteNodeLabel(id)), ...deleteNoteIds.map(() => "notatka tekstowa")];
+    return `Czy na pewno chcesz usunąć ${total} zaznaczone elementy: ${labels.join(", ")}?`;
   });
 
   /** Wywołane z menu prawego klawisza na node'ie (nodeMenuTarget). Jeśli
@@ -831,37 +1056,98 @@
     const id = nodeMenuTarget;
     if (!id) return;
     deleteIds = selectedNodeIds.has(id) && selectedNodeIds.size > 1 ? [...selectedNodeIds] : [id];
+    deleteNoteIds = [];
     confirmDeleteOpen = true;
   }
 
-  /** Wywołane z klawisza Delete/Backspace — usuwa całe bieżące zaznaczenie,
-   * a jeśli nic nie jest zaznaczone, node pod kursorem (jak wcześniej). */
+  /** Wywołane z klawisza Delete/Backspace — usuwa całe bieżące zaznaczenie
+   * (node'y i/albo notatki), a jeśli nic nie jest zaznaczone, node pod
+   * kursorem (jak wcześniej). */
   function requestDeleteSelection() {
-    if (selectedNodeIds.size > 0) deleteIds = [...selectedNodeIds];
-    else if (hoveredNodeId) deleteIds = [hoveredNodeId];
-    else return;
+    if (selectedNodeIds.size > 0 || selectedNoteIds.size > 0) {
+      deleteIds = [...selectedNodeIds];
+      deleteNoteIds = [...selectedNoteIds];
+    } else if (hoveredNodeId) {
+      deleteIds = [hoveredNodeId];
+      deleteNoteIds = [];
+    } else return;
     confirmDeleteOpen = true;
   }
 
   function confirmDeleteNode() {
     const ids = new Set(deleteIds);
+    const noteIds = new Set(deleteNoteIds);
     if (ids.size > 0) {
       graph.nodes = graph.nodes.filter((n) => !ids.has(n.id));
       graph.edges = graph.edges.filter((e) => !ids.has(e.from) && !ids.has(e.to));
-      persist();
     }
+    if (noteIds.size > 0) {
+      graph.notes = graph.notes.filter((n) => !noteIds.has(n.id));
+    }
+    if (ids.size > 0 || noteIds.size > 0) persist();
     selectedNodeIds = new Set([...selectedNodeIds].filter((id) => !ids.has(id)));
+    selectedNoteIds = new Set([...selectedNoteIds].filter((id) => !noteIds.has(id)));
     confirmDeleteOpen = false;
     deleteIds = [];
+    deleteNoteIds = [];
     nodeMenuTarget = null;
   }
   function cancelDeleteNode() {
     confirmDeleteOpen = false;
     deleteIds = [];
+    deleteNoteIds = [];
     nodeMenuTarget = null;
   }
 
   let hoveredNodeId = $state<string | null>(null);
+
+  // ── Kopiuj/wklej/wytnij (Ctrl/Cmd+C/V/X) — schowek w pamięci modułu, NIE
+  // systemowy — wklejanie ma sens tylko w obrębie tego samego grafu, ten sam
+  // duch co Tablica (BoardCanvas.svelte) dla swoich obiektów. ─────────────
+  let nodeClipboard: GraphNode[] = [];
+
+  function copySelection() {
+    const ids = selectedNodeIds.size > 0 ? selectedNodeIds : (hoveredNodeId ? new Set([hoveredNodeId]) : new Set<string>());
+    if (ids.size === 0) return;
+    nodeClipboard = graph.nodes.filter((n) => ids.has(n.id)).map((n) => structuredClone(n));
+  }
+
+  /** Wkleja skopiowane node'y przesunięte o stały offset, duplikując też
+   * krawędzie MIĘDZY nimi (nie krawędzie do node'ów spoza kopii — wejścia
+   * wklejonych node'ów z takich krawędzi zostają puste). Nowo wklejone
+   * node'y stają się nowym zaznaczeniem — I zastępują schowek, żeby kolejne
+   * Ctrl+V (bez ponownego kopiowania) przesuwało się dalej po przekątnej
+   * zamiast wklejać dokładnie w to samo miejsce co poprzednio. */
+  function pasteClipboard() {
+    if (nodeClipboard.length === 0) return;
+    const idMap = new Map<string, string>();
+    const copiedIds = new Set(nodeClipboard.map((n) => n.id));
+    const pasted: GraphNode[] = nodeClipboard.map((n) => {
+      const id = makeId("node");
+      idMap.set(n.id, id);
+      return { ...structuredClone(n), id, x: n.x + 30, y: n.y + 30 };
+    });
+    const newEdges: GraphEdge[] = graph.edges
+      .filter((e) => copiedIds.has(e.from) && copiedIds.has(e.to))
+      .map((e) => ({ id: makeId("edge"), from: idMap.get(e.from)!, fromSocket: e.fromSocket, to: idMap.get(e.to)!, toSocket: e.toSocket }));
+    graph.nodes.push(...pasted);
+    graph.edges.push(...newEdges);
+    nodeClipboard = pasted.map((n) => structuredClone(n));
+    selectedNodeIds = new Set(pasted.map((n) => n.id));
+    persist();
+  }
+
+  /** Wycięcie usuwa BEZ modala potwierdzenia (inaczej niż Delete) — schowek
+   * pozwala cofnąć wycięcie przez wklejenie. */
+  function cutSelection() {
+    copySelection();
+    if (nodeClipboard.length === 0) return;
+    const ids = new Set(nodeClipboard.map((n) => n.id));
+    graph.nodes = graph.nodes.filter((n) => !ids.has(n.id));
+    graph.edges = graph.edges.filter((e) => !ids.has(e.from) && !ids.has(e.to));
+    selectedNodeIds = new Set([...selectedNodeIds].filter((id) => !ids.has(id)));
+    persist();
+  }
 
   function onWindowKeydown(e: KeyboardEvent) {
     const target = e.target as HTMLElement | null;
@@ -872,9 +1158,15 @@
       e.preventDefault();
       openPaletteAt(lastMouseClient.x, lastMouseClient.y);
     }
-    if (!typing && (e.key === "Delete" || e.key === "Backspace") && (selectedNodeIds.size > 0 || hoveredNodeId)) {
+    if (!typing && (e.key === "Delete" || e.key === "Backspace") && (selectedNodeIds.size > 0 || selectedNoteIds.size > 0 || hoveredNodeId)) {
       e.preventDefault();
       requestDeleteSelection();
+    }
+    if (!typing && visible && (e.ctrlKey || e.metaKey)) {
+      const k = e.key.toLowerCase();
+      if (k === "c") { e.preventDefault(); copySelection(); }
+      else if (k === "x") { e.preventDefault(); cutSelection(); }
+      else if (k === "v") { e.preventDefault(); pasteClipboard(); }
     }
   }
 
@@ -933,6 +1225,13 @@
     const idx = graph.nodes.findIndex((n) => n.id === node.id);
     if (idx === -1) return;
     graph.nodes[idx] = { ...graph.nodes[idx], showDiff: !graph.nodes[idx].showDiff };
+    persist();
+  }
+
+  function toggleInvertIslandTarget(node: GraphNode) {
+    const idx = graph.nodes.findIndex((n) => n.id === node.id);
+    if (idx === -1) return;
+    graph.nodes[idx] = { ...graph.nodes[idx], invertIslandTarget: !graph.nodes[idx].invertIslandTarget };
     persist();
   }
 
@@ -1320,7 +1619,9 @@
               </button>
               {#if node.expanded && meta}
                 <div class="mz-details" onpointerdown={(e) => e.stopPropagation()}>
-                  <div class="mz-details-name">{meta.name}</div>
+                  <input class="mz-details-name-input" value={meta.name}
+                         onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                         onblur={(e) => renameSavedMap(meta.id, (e.target as HTMLInputElement).value)} />
                   <div class="saved-meta-row">
                     <span class="mode-tag">{savedMapModeLabel[meta.mode] ?? meta.mode}</span>
                   </div>
@@ -1349,7 +1650,9 @@
               </button>
               {#if node.expanded && meta}
                 <div class="mz-details" onpointerdown={(e) => e.stopPropagation()}>
-                  <div class="mz-details-name">{meta.name}</div>
+                  <input class="mz-details-name-input" value={meta.name}
+                         onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                         onblur={(e) => renameSavedMap(meta.id, (e.target as HTMLInputElement).value)} />
                   <div class="saved-sources">
                     {#each meta.sources as s, i (i)}
                       <span class="source-tag">m/z {s.mz.toFixed(2)} ±{s.tol} · {s.datasetLabel}</span>
@@ -1442,14 +1745,11 @@
               </label>
               <div class="combine-list" onpointerdown={(e) => e.stopPropagation()}>
                 {#if inputsFor(node, "in").length === 0}
-                  <div class="combine-list-empty">brak podłączonych map</div>
+                  <div class="combine-list-empty">brak podłączonej mapy</div>
                 {:else}
-                  {#each inputsFor(node, "in") as edge (edge.id)}
-                    <div class="combine-list-item">
-                      <span class="combine-list-label">{sourceLabel(edge.from)}</span>
-                      <button class="combine-remove" onclick={() => removeEdge(edge.id)} title="Usuń połączenie">×</button>
-                    </div>
-                  {/each}
+                  <div class="combine-list-item">
+                    <span class="combine-list-label">{sourceLabel(inputsFor(node, "in")[0].from)}</span>
+                  </div>
                 {/if}
               </div>
               <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
@@ -1465,7 +1765,6 @@
               {@const inOutcome = inEdge ? evalNode(inEdge.from) : null}
               <div class="seg-checklist" onpointerdown={(e) => e.stopPropagation()}>
                 {#if inOutcome?.ok && inOutcome.value.kind === "segmentacja"}
-                  {@const bgCount = inOutcome.value.width * inOutcome.value.height - inOutcome.value.legend.reduce((a, l) => a + l.count, 0)}
                   {#each inOutcome.value.legend as l (l.label)}
                     <label class="seg-check-item">
                       <input type="checkbox" class="cb-input cb-input-sm"
@@ -1475,12 +1774,6 @@
                       <span class="cb-label">klasa {l.label} ({l.count}px)</span>
                     </label>
                   {/each}
-                  {#if bgCount > 0}
-                    <div class="seg-check-bg" title="Piksele poza faktycznym skanem tkanki — wykluczone z k-means, nigdy niewybieralne">
-                      <span class="seg-swatch seg-swatch-bg"></span>
-                      <span>tło ({bgCount}px, wykluczone)</span>
-                    </div>
-                  {/if}
                 {:else}
                   <div class="combine-list-empty">podłącz wynik k-means</div>
                 {/if}
@@ -1502,6 +1795,20 @@
                 {:else}
                   {#each inputsFor(node, "in") as edge (edge.id)}
                     <div class="combine-list-item">
+                      <span class="combine-list-label">{sourceLabel(edge.from)}</span>
+                      <button class="combine-remove" onclick={() => removeEdge(edge.id)} title="Usuń połączenie">×</button>
+                    </div>
+                  {/each}
+                {/if}
+              </div>
+            {:else if node.type === "segmentacja/segments_to_segmentation"}
+              <div class="combine-list" onpointerdown={(e) => e.stopPropagation()}>
+                {#if inputsFor(node, "in").length === 0}
+                  <div class="combine-list-empty">brak podłączonych segmentów</div>
+                {:else}
+                  {#each inputsFor(node, "in") as edge, i (edge.id)}
+                    <div class="combine-list-item">
+                      <span class="seg-swatch" style="background:{SEG_PALETTE[i % SEG_PALETTE.length]}"></span>
                       <span class="combine-list-label">{sourceLabel(edge.from)}</span>
                       <button class="combine-remove" onclick={() => removeEdge(edge.id)} title="Usuń połączenie">×</button>
                     </div>
@@ -1533,6 +1840,10 @@
                        value={Number(node.params.islandMax ?? 1)}
                        onpointerdown={(e) => e.stopPropagation()}
                        oninput={(e) => setNodeParamClamped(node, "islandMax", Number((e.target as HTMLInputElement).value), 1, 20)} />
+              </label>
+              <label class="seg-check-item" onpointerdown={(e) => e.stopPropagation()}>
+                <input type="checkbox" class="cb-input cb-input-sm" checked={node.invertIslandTarget ?? false} onchange={() => toggleInvertIslandTarget(node)} />
+                <span class="cb-label">Odwróć kolory (usuń wysepki poza segmentem)</span>
               </label>
             {:else if node.type === "segmentacja/save_segment"}
               <label class="field" onpointerdown={(e) => e.stopPropagation()}>
@@ -1567,7 +1878,9 @@
               </button>
               {#if node.expanded && meta}
                 <div class="mz-details" onpointerdown={(e) => e.stopPropagation()}>
-                  <div class="mz-details-name">{meta.name}</div>
+                  <input class="mz-details-name-input" value={meta.name}
+                         onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                         onblur={(e) => renameSavedSpectrum(meta.id, (e.target as HTMLInputElement).value)} />
                   <div class="saved-sources">
                     {#each meta.sources as s, i (i)}
                       <span class="source-tag">{s.note ?? `(${s.x},${s.y}) · ${s.datasetLabel ?? s.datasetId ?? "?"}`}</span>
@@ -1864,6 +2177,25 @@
         </div>
       {/if}
     {/each}
+
+    <!-- Notatki tekstowe (pkt 8) -->
+    {#each graph.notes as note (note.id)}
+      <div class="gnote" class:selected={selectedNoteIds.has(note.id)}
+           style="left:{note.x}px; top:{note.y}px;">
+        <div class="gnote-handle"
+             onpointerdown={(e) => onNoteHeaderPointerDown(e, note)}
+             onpointerup={onNodeHeaderPointerUp}>⠿</div>
+        <textarea
+          class="gnote-text"
+          style="width:{note.width}px; height:{note.height}px; color:{note.color}; font-size:{note.fontSize}px; font-weight:{note.bold ? 700 : 400};"
+          placeholder="Notatka…"
+          value={note.text}
+          onpointerdown={(e) => e.stopPropagation()}
+          oninput={(e) => setNoteText(note, (e.target as HTMLTextAreaElement).value)}
+          use:observeNoteResize={note.id}
+        ></textarea>
+      </div>
+    {/each}
   </div>
 
   {#if marqueeActive}
@@ -1932,6 +2264,17 @@
 
 <aside class="ng-sidebar" class:collapsed={!sidebarOpen}>
   <div class="ng-sidebar-inner">
+    <div class="ng-graph-switcher">
+      <select class="ng-graph-select" value={activeGraphId}
+              onchange={(e) => switchGraph((e.target as HTMLSelectElement).value)}
+              title="Przełącz graf">
+        {#each nodeGraphs() as g (g.id)}
+          <option value={g.id}>{g.name}</option>
+        {/each}
+      </select>
+      <button class="ng-graph-new" onclick={newGraph} title="Nowy graf">+</button>
+    </div>
+    <button class="ng-add-text" onclick={addTextNote}>+ Tekst</button>
     <div class="ng-sidebar-title">Node'y</div>
     <div class="ng-sidebar-list">
       {#each groupedNodeTypes as g (g.domain)}
@@ -1960,6 +2303,12 @@
 
 {#if paletteDrag}
   <div class="palette-drag-ghost" style="left:{paletteDrag.x}px; top:{paletteDrag.y}px;">{paletteDrag.label}</div>
+{/if}
+
+{#if insertGhostPos && pendingGraphInsert()}
+  <div class="palette-drag-ghost" style="left:{insertGhostPos.x}px; top:{insertGhostPos.y}px;">
+    ↓ {pendingGraphInsert()?.label} — kliknij, aby wstawić (Esc anuluje)
+  </div>
 {/if}
 
 {#if hoveredTip}
@@ -2031,6 +2380,61 @@
     pointer-events: none;
     z-index: 6;
   }
+
+  .gnote {
+    /* ŚWIADOMIE bez ustawionej szerokości/wysokości na tym wrapperze — to
+       <textarea> w środku (poniżej) niesie faktyczny rozmiar i ma natywny
+       uchwyt `resize:both`. Gdyby ten div miał sztywne width/height (jak
+       poprzednio) i textarea było `flex:1` w jego wnętrzu, przeciąganie
+       uchwytu w pionie nie mogło przebić fixed-height rodzica — stąd nie dało
+       się zrobić wyższego tekstu. Wrapper po prostu "oblepia" textarea. */
+    position: absolute;
+    display: inline-flex;
+    flex-direction: column;
+    background: rgba(255,255,255,0.03);
+    border: 1px dashed rgba(255,255,255,0.15);
+    border-radius: 6px;
+    z-index: 1;
+  }
+  .gnote.selected { border-color: rgba(255,201,81,0.6); border-style: solid; }
+  .gnote-handle {
+    flex-shrink: 0;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.6rem;
+    color: rgba(255,255,255,0.25);
+    cursor: grab;
+  }
+  .gnote-handle:active { cursor: grabbing; }
+  .gnote-text {
+    display: block;
+    box-sizing: border-box;
+    background: transparent;
+    border: none;
+    outline: none;
+    resize: both;
+    padding: 4px 8px 8px;
+    font-family: inherit;
+    line-height: 1.35;
+  }
+  .gnote-text::placeholder { color: rgba(255,255,255,0.25); }
+
+  .ng-add-text {
+    width: 100%;
+    margin-bottom: 12px;
+    padding: 6px 0;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 7px;
+    color: rgba(255,255,255,0.6);
+    font-size: 0.68rem;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .ng-add-text:hover { border-color: rgba(255,201,81,0.3); color: #ffc951; }
 
   .mnode {
     position: absolute;
@@ -2247,12 +2651,27 @@
     border: 1px solid rgba(255,255,255,0.07);
     border-radius: 8px;
   }
-  .mz-details-name {
+  .mz-details-name-input {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
     font-size: 0.7rem;
     font-weight: 700;
     letter-spacing: 0.03em;
     color: #ffc951;
     text-transform: uppercase;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 2px 4px;
+    margin: -2px -4px 0;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .mz-details-name-input:hover, .mz-details-name-input:focus {
+    border-color: rgba(255,201,81,0.3);
+    background: rgba(255,255,255,0.03);
   }
 
   .saved-meta-row { display: flex; gap: 6px; }
@@ -2334,19 +2753,6 @@
     display: inline-block;
     flex-shrink: 0;
   }
-  .seg-check-bg {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.62rem;
-    color: rgba(255,255,255,0.35);
-    padding-left: 20px;
-  }
-  .seg-swatch-bg {
-    background: repeating-linear-gradient(45deg, rgba(255,255,255,0.15) 0 2px, transparent 2px 4px);
-    border: 1px solid rgba(255,255,255,0.2);
-  }
-
   /* Jednolity styl checkboxów — 1:1 ze .cb-input w Sidebar.svelte (m/z),
      tylko mniejszy (13px), żeby zmieścił się w wąskiej karcie node'a. */
   .cb-input {
@@ -2597,6 +3003,39 @@
     padding: 12px 10px;
     overflow-y: auto;
   }
+
+  .ng-graph-switcher {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+  .ng-graph-select {
+    flex: 1;
+    min-width: 0;
+    background: #1a1a1a;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 7px;
+    color: #e0e0e0;
+    font-size: 0.7rem;
+    padding: 5px 6px;
+    font-family: inherit;
+    outline: none;
+  }
+  .ng-graph-select:hover { border-color: rgba(255,201,81,0.3); color: #ffc951; }
+  .ng-graph-select option { background: #1a1a1a; color: #e0e0e0; }
+  .ng-graph-new {
+    flex-shrink: 0;
+    width: 26px;
+    background: rgba(255,201,81,0.12);
+    border: 1px solid rgba(255,201,81,0.3);
+    border-radius: 7px;
+    color: #ffc951;
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .ng-graph-new:hover { background: rgba(255,201,81,0.22); }
 
   .ng-sidebar-title {
     font-size: 0.66rem;

@@ -134,6 +134,40 @@ pub fn run() {
             // do którego DODAJEMY własne menu Workspace — żeby nie stracić domyślnych
             // skrótów (np. Cmd+Q) po podmianie całego paska menu.
             let menu = tauri::menu::Menu::default(app.handle())?;
+
+            // Domyślne menu "Edytuj" wiąże Cofnij/Ponów/Wytnij/Kopiuj/Wklej pod
+            // NATYWNE skróty Cmd+Z/Shift+Z/X/C/V na poziomie systemowego paska menu —
+            // to przechwytuje te kombinacje klawiszy ZANIM dotrą jako zdarzenie
+            // 'keydown' do webview, więc własna obsługa kopiuj/wklej/wytnij/cofnij
+            // w Tablicy (BoardCanvas.svelte) i Node Graphie (NodeGraphTab.svelte),
+            // zaimplementowana w JS, nigdy nie dostawała tych zdarzeń. Usuwamy te
+            // konkretne pozycje z domyślnego menu "Edytuj" (zostawiamy resztę, np.
+            // "Zaznacz wszystko") — zwykłe pola tekstowe (input/textarea w innych
+            // zakładkach) nadal obsługują Cmd+C/V/X/Z natywnie przez WKWebView,
+            // niezależnie od skrótów zdefiniowanych na pasku menu.
+            //
+            // UWAGA: usuwamy po POZYCJI, nie po tekście — natywne
+            // PredefinedMenuItem (Cofnij/Ponów/Wytnij/Kopiuj/Wklej) dostają
+            // etykietę ZLOKALIZOWANĄ przez system (np. "Wytnij" na polskim
+            // macOS), więc dopasowanie po angielskim tekście ("Cut" itd.)
+            // po prostu nic by nie znalazło na spolszczonym systemie — stąd
+            // wcześniejsza wersja tej poprawki nie działała. Kolejność
+            // budowania Menu::default()'s "Edit" submenu (zweryfikowana
+            // wprost w źródle tauri = 2.11.5, patrz Cargo.lock) jest STAŁA:
+            // [0]Cofnij [1]Ponów [2]separator [3]Wytnij [4]Kopiuj [5]Wklej
+            // [6]Zaznacz wszystko — usuwamy 0..=5, zostawiamy tylko 6.
+            if let Some(tauri::menu::MenuItemKind::Submenu(edit_menu)) = menu
+                .items()?
+                .into_iter()
+                .find(|item| matches!(item, tauri::menu::MenuItemKind::Submenu(s) if s.text().map(|t| t == "Edit").unwrap_or(false)))
+            {
+                if edit_menu.items()?.len() == 7 {
+                    for i in (0..=5).rev() {
+                        edit_menu.remove_at(i)?;
+                    }
+                }
+            }
+
             let workspace_menu = SubmenuBuilder::new(app, "Workspace")
                 .text("ws_new", "Nowy workspace…")
                 .text("ws_open", "Otwórz…")

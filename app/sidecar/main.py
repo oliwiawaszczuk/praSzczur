@@ -266,6 +266,73 @@ def _save_spectra_registry(reg: dict, wid: str) -> None:
     _spectra_registry_file(wid).write_text(json.dumps(reg, indent=2))
 
 
+# ── Node Graphs (zakładka Node Graph) — per workspace, WIELE grafów naraz ───
+# Ten sam wzorzec co "Zapisane mapy pikseli"/"Zapisane widma" powyżej (lekki
+# rejestr metadanych + pełne dane per <id>.json), ale dane grafu (nodes/edges/
+# viewport/notes) zmieniają się ciągle (autozapis), więc mają osobny endpoint
+# /data do odczytu/zapisu — jak boards/<id>/data, nie jak niezmienne dane
+# zapisanej mapy/widma.
+# Struktura: workspaces/<wid>/nodegraphs/registry.json + nodegraphs/<id>.json
+
+def _nodegraphs_root(wid: str) -> Path:
+    return _workspace_dir(wid) / "nodegraphs"
+
+
+def _nodegraphs_registry_file(wid: str) -> Path:
+    return _nodegraphs_root(wid) / "registry.json"
+
+
+def _nodegraph_data_file(gid: str, wid: str) -> Path:
+    return _nodegraphs_root(wid) / f"{gid}.json"
+
+
+def _find_nodegraph(reg: dict, gid: str) -> dict | None:
+    return next((g for g in reg["graphs"] if g["id"] == gid), None)
+
+
+_EMPTY_NODEGRAPH = {"nodes": [], "edges": [], "viewport": {"x": 0, "y": 0, "zoom": 1}, "notes": []}
+
+
+def _ensure_nodegraphs_registry(wid: str) -> dict:
+    f = _nodegraphs_registry_file(wid)
+    try:
+        if f.exists():
+            reg = json.loads(f.read_text())
+            if "graphs" in reg:
+                return reg
+    except Exception:
+        pass
+    return {"graphs": []}
+
+
+def _save_nodegraphs_registry(reg: dict, wid: str) -> None:
+    _nodegraphs_root(wid).mkdir(parents=True, exist_ok=True)
+    _nodegraphs_registry_file(wid).write_text(json.dumps(reg, indent=2))
+
+
+def _migrate_legacy_nodegraph(wid: str, reg: dict) -> dict:
+    """Jednorazowa migracja starego modelu (jeden graf w kluczu
+    `nodegraph_graph` wewnątrz workspace.json) na nowy — wołane tylko gdy
+    rejestr grafów jeszcze nie istnieje na dysku, żeby nie zgubić grafu
+    zbudowanego przed wprowadzeniem wielu grafów per workspace."""
+    if _nodegraphs_registry_file(wid).exists():
+        return reg
+    try:
+        settings = json.loads(_settings_file(wid).read_text())
+    except Exception:
+        return reg
+    legacy = settings.get("nodegraph_graph")
+    if not legacy or not isinstance(legacy, dict) or not legacy.get("nodes"):
+        return reg
+    gid = uuid.uuid4().hex[:12]
+    now = _now_iso()
+    reg["graphs"].append({"id": gid, "name": "Graf 1", "createdAt": now, "updatedAt": now})
+    _nodegraphs_root(wid).mkdir(parents=True, exist_ok=True)
+    _nodegraph_data_file(gid, wid).write_text(json.dumps(legacy))
+    _save_nodegraphs_registry(reg, wid)
+    return reg
+
+
 def _ensure_default_workspace() -> dict:
     """Wczytuje registry; jeśli brak workspace'ów, tworzy domyślny i migruje
     ewentualne stare dane z data/processed/ (poprzedni, jednoworkspace'owy model)."""
@@ -2203,6 +2270,107 @@ def delete_spectrum(wid: str, sid: str) -> dict:
     sreg["spectra"] = [s for s in sreg["spectra"] if s["id"] != sid]
     _save_spectra_registry(sreg, wid)
     _spectrum_data_file(sid, wid).unlink(missing_ok=True)
+    return {"ok": True}
+
+
+# ── Node Graphs (per workspace) ─────────────────────────────────────────────
+
+@app.get("/workspaces/{wid}/nodegraphs")
+def list_nodegraphs(wid: str) -> dict:
+    reg = _load_registry()
+    if not _find_ws(reg, wid):
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    greg = _migrate_legacy_nodegraph(wid, _ensure_nodegraphs_registry(wid))
+    return {"graphs": greg["graphs"]}
+
+
+@app.post("/workspaces/{wid}/nodegraphs")
+def create_nodegraph(wid: str, body: dict) -> dict:
+    reg = _load_registry()
+    if not _find_ws(reg, wid):
+        raise HTTPException(404, f"Workspace '{wid}' nie istnieje")
+    name = (body.get("name") or "Nowy graf").strip() or "Nowy graf"
+    greg = _ensure_nodegraphs_registry(wid)
+    gid = uuid.uuid4().hex[:12]
+    now = _now_iso()
+    g = {"id": gid, "name": name, "createdAt": now, "updatedAt": now}
+    greg["graphs"].append(g)
+    _save_nodegraphs_registry(greg, wid)
+    _nodegraphs_root(wid).mkdir(parents=True, exist_ok=True)
+    _nodegraph_data_file(gid, wid).write_text(json.dumps(_EMPTY_NODEGRAPH))
+    return g
+
+
+@app.put("/workspaces/{wid}/nodegraphs/{gid}")
+def rename_nodegraph(wid: str, gid: str, body: dict) -> dict:
+    greg = _ensure_nodegraphs_registry(wid)
+    g = _find_nodegraph(greg, gid)
+    if not g:
+        raise HTTPException(404, f"Graf '{gid}' nie istnieje")
+    if "name" in body and body["name"].strip():
+        g["name"] = body["name"].strip()
+    g["updatedAt"] = _now_iso()
+    _save_nodegraphs_registry(greg, wid)
+    return g
+
+
+@app.delete("/workspaces/{wid}/nodegraphs/{gid}")
+def delete_nodegraph(wid: str, gid: str) -> dict:
+    greg = _ensure_nodegraphs_registry(wid)
+    if not _find_nodegraph(greg, gid):
+        raise HTTPException(404, f"Graf '{gid}' nie istnieje")
+    greg["graphs"] = [g for g in greg["graphs"] if g["id"] != gid]
+    _save_nodegraphs_registry(greg, wid)
+    _nodegraph_data_file(gid, wid).unlink(missing_ok=True)
+    return {"ok": True}
+
+
+@app.get("/workspaces/{wid}/nodegraphs/{gid}/data")
+def get_nodegraph_data(wid: str, gid: str) -> dict:
+    f = _nodegraph_data_file(gid, wid)
+    if not f.exists():
+        raise HTTPException(404, f"Graf '{gid}' nie istnieje")
+    try:
+        return json.loads(f.read_text())
+    except Exception:
+        return dict(_EMPTY_NODEGRAPH)
+
+
+@app.put("/workspaces/{wid}/nodegraphs/{gid}/data")
+def save_nodegraph_data(wid: str, gid: str, body: dict) -> dict:
+    greg = _ensure_nodegraphs_registry(wid)
+    g = _find_nodegraph(greg, gid)
+    if not g:
+        raise HTTPException(404, f"Graf '{gid}' nie istnieje")
+    _nodegraphs_root(wid).mkdir(parents=True, exist_ok=True)
+    _nodegraph_data_file(gid, wid).write_text(json.dumps(body))
+    g["updatedAt"] = _now_iso()
+    _save_nodegraphs_registry(greg, wid)
+    return {"ok": True}
+
+
+# ── Ustawienia globalne appki (niezależne od workspace'u) ───────────────────
+# Dziś tylko czułość zoomu/przesuwania płótna — współdzielona przez WSZYSTKIE
+# płótna appki (każdy Node Graph ORAZ Tablica), jeden plik globalny zamiast
+# per-workspace wsGet/wsSet (dawniej Tablica trzymała to jako
+# "tablica_zoomSensitivity"/"tablica_panSensitivity" w workspace.json —
+# przeniesione tutaj, żeby jedna zmiana w Ustawieniach działała wszędzie).
+_APP_SETTINGS_FILE = ROOT / "app_settings.json"
+
+
+@app.get("/app_settings")
+def get_app_settings() -> dict:
+    if not _APP_SETTINGS_FILE.exists():
+        return {}
+    try:
+        return json.loads(_APP_SETTINGS_FILE.read_text())
+    except Exception:
+        return {}
+
+
+@app.put("/app_settings")
+def put_app_settings(body: dict) -> dict:
+    _APP_SETTINGS_FILE.write_text(json.dumps(body))
     return {"ok": True}
 
 

@@ -141,13 +141,19 @@ export function runKmeans(
 /** Usuwa małe, odizolowane skupiska pikseli ("wysepki") z binarnej maski
  * (0/1) — proste łączenie składowych spójnych po 4-sąsiedztwie (bez
  * przekątnych, "prosty algorytm" zgodnie z prośbą), każda składowa mniejsza
- * lub równa `maxSize` pikseli zostaje wyzerowana. */
-function removeIslands(data: number[][], maxSize: number): number[][] {
+ * lub równa `maxSize` pikseli zostaje wyzerowana (albo zjedynkowana, gdy
+ * `invert` — patrz niżej). */
+function removeIslands(data: number[][], maxSize: number, invert: boolean): number[][] {
   const h = data.length;
   const w = data[0]?.length ?? 0;
   const visited: boolean[][] = Array.from({ length: h }, () => new Array(w).fill(false));
   const out = data.map((row) => [...row]);
-  const isFg = (y: number, x: number) => data[y][x] >= 0.5;
+  // `invert`: szukamy małych skupisk DRUGIEGO koloru (tła/poza segmentem,
+  // wartość 0) zamiast segmentu (1) — usunięcie takiego skupiska oznacza
+  // wypełnienie go jedynką (1), czyli "zalatanie" małej dziury w segmencie.
+  const target = invert ? 0 : 1;
+  const fillValue = invert ? 1 : 0;
+  const isFg = (y: number, x: number) => (data[y][x] >= 0.5 ? 1 : 0) === target;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       if (!isFg(y, x) || visited[y][x]) continue;
@@ -166,7 +172,7 @@ function removeIslands(data: number[][], maxSize: number): number[][] {
         }
       }
       if (comp.length <= maxSize) {
-        for (const [cy, cx] of comp) out[cy][cx] = 0;
+        for (const [cy, cx] of comp) out[cy][cx] = fillValue;
       }
     }
   }
@@ -177,9 +183,9 @@ const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
   {
     id: "segmentacja/kmeans",
     label: "K-means",
-    description: "Segmentuje piksele na k grup metodą k-means. Gniazdo wejściowe przyjmuje WIELE map naraz (każda podłączona \"Mapa m/z\" to jeden kanał cechy) — z jedną mapą klasteryzacja idzie po samej intensywności, z kilkoma po wektorze cech (np. jednocześnie po kilku m/z), co pozwala rozróżnić klasy niewidoczne na żadnym pojedynczym kanale osobno. Warto najpierw znormalizować kanały w domenie Mapa, żeby miały porównywalną skalę. Przeliczane ręcznie przyciskiem \"Przetwórz\".",
+    description: "Segmentuje piksele na k grup metodą k-means na podstawie JEDNEJ podłączonej mapy m/z (intensywności). Warto najpierw znormalizować/przekształcić mapę w domenie Mapa (krzywa, zakres intensywności), żeby segmentacja lepiej rozróżniała klasy. Przeliczane ręcznie przyciskiem \"Przetwórz\".",
     domain: "segmentacja", stage: "przetwarzanie",
-    inputs: [{ id: "in", label: "mapy", kind: "mapa", multi: true }],
+    inputs: [{ id: "in", label: "mapa", kind: "mapa" }],
     outputs: [{ id: "out", label: "segmentacja", kind: "segmentacja" }],
     params: [{ key: "k", label: "k (liczba grup)", min: 2, max: 10, step: 1, default: 3 }],
     evaluate(node, inputs): EvalOutcome {
@@ -267,6 +273,58 @@ const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
     },
   },
   {
+    id: "segmentacja/segments_to_segmentation",
+    label: "Kolorowanie segmentów",
+    description: "Łączy wiele segmentów w jeden wynik segmentacji, nadając każdemu podłączonemu segmentowi osobną klasę/kolor (jak wynik K-means) — przydatne, żeby zobaczyć kilka niezależnie zbudowanych/przetworzonych segmentów naraz na jednej mapie klas. Działa jak warstwy — mogą na siebie nachodzić, a piksel należący do kilku podłączonych segmentów naraz dostaje klasę tego podłączonego NAJPÓŹNIEJ (niżej na liście połączeń = wyżej w stosie warstw, tak jak w Tablicy).",
+    domain: "segmentacja", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "segmenty", kind: "segment", multi: true }],
+    outputs: [{ id: "out", label: "segmentacja", kind: "segmentacja" }],
+    params: [],
+    evaluate(node, inputs): EvalOutcome {
+      const results = inputs.in as SegmentValue[];
+      if (results.length === 0) return { ok: false, error: "podłącz przynajmniej jeden segment" };
+      const { width, height, tissueId } = results[0];
+      if (results.some((r) => r.width !== width || r.height !== height)) {
+        return { ok: false, error: "podłączone segmenty mają różne wymiary" };
+      }
+      if (results.some((r) => r.tissueId !== tissueId)) {
+        return { ok: false, error: "podłączone segmenty pochodzą z różnych tkanek" };
+      }
+      // Warstwy: segment podłączony PÓŹNIEJ (wyższy indeks = niżej na liście
+      // połączeń w UI) przykrywa te podłączone wcześniej tam, gdzie się
+      // nakładają — stąd szukamy od KOŃCA, nie findIndex (który dawałby
+      // pierwszeństwo najwcześniej podłączonemu, "pod spodem" pozostałych).
+      const mask = combineMasks(results.map((r) => r.mask), height, width);
+      // WAŻNE: piksele poza faktycznym skanem tkanki (mask===0) muszą dostać
+      // sentinel -1 WPROST tutaj — tak jak runKmeans robi to dla swojego
+      // `labels` (patrz komentarz przy SegmentValue w nodegraph.ts). Inaczej
+      // SegLabelCanvas (który NIE dostaje osobno `mask`, tylko `labels` —
+      // ocenia wyłącznie `label < 0`) koloruje też róg poza tkanką, jeśli
+      // `data` akurat miało tam wartość ≥0.5 — stąd podgląd bez owalnego
+      // wycięcia tkanki, wypełniony kolorem aż po same rogi prostokąta.
+      const counts = new Array(results.length).fill(0);
+      const labels: number[][] = Array.from({ length: height }, (_, y) =>
+        Array.from({ length: width }, (_, x) => {
+          if (mask && mask[y][x] === 0) return -1;
+          let idx = -1;
+          for (let k = results.length - 1; k >= 0; k--) {
+            if (results[k].data[y][x] >= 0.5) { idx = k; break; }
+          }
+          if (idx >= 0) counts[idx]++;
+          return idx;
+        }),
+      );
+      return {
+        ok: true,
+        value: {
+          kind: "segmentacja", tissueId, tissueLabel: results[0].tissueLabel, width, height,
+          k: results.length, labels, legend: counts.map((count, label) => ({ label, count })), mask,
+          sources: dedupeSources(results.flatMap((r) => r.sources)),
+        },
+      };
+    },
+  },
+  {
     id: "segmentacja/invert_segment",
     label: "Odwrócenie segmentu",
     description: "Odwraca segment (maskę 0/1) — zaznaczone piksele stają się niezaznaczonymi i odwrotnie.",
@@ -284,7 +342,7 @@ const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
   {
     id: "segmentacja/remove_islands",
     label: "Usuwanie wysepek",
-    description: "Usuwa małe, odizolowane skupiska pikseli (\"wysepki\") z segmentu — proste łączenie składowych spójnych (4-sąsiedztwo); usuwa skupiska nie większe niż ustawiony próg. Piksele poza faktycznym skanem tkanki nie są brane pod uwagę.",
+    description: "Usuwa małe, odizolowane skupiska pikseli (\"wysepki\") z segmentu — proste łączenie składowych spójnych (4-sąsiedztwo); usuwa skupiska nie większe niż ustawiony próg. Piksele poza faktycznym skanem tkanki nie są brane pod uwagę. Checkbox \"Odwróć kolory\" przełącza usuwanie wysepek na drugi kolor (tło/poza segmentem) — efektywnie zalatuje małe dziury wewnątrz segmentu zamiast usuwać jego małe wysepki.",
     domain: "segmentacja", stage: "przetwarzanie",
     inputs: [{ id: "in", label: "segment", kind: "segment" }],
     outputs: [{ id: "out", label: "segment", kind: "segment" }],
@@ -293,7 +351,7 @@ const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
       const src = inputs.in[0] as SegmentValue | undefined;
       if (!src) return { ok: false, error: "podłącz wejście (segment)" };
       const maxSize = Math.max(1, Math.round(Number(node.params.islandMax ?? 1)));
-      const data = removeIslands(src.data, maxSize);
+      const data = removeIslands(src.data, maxSize, node.invertIslandTarget ?? false);
       return { ok: true, value: { ...src, data } };
     },
   },

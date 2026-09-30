@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import MzColumn from "./MzColumn.svelte";
   import MzListModal from "./MzListModal.svelte";
+  import ConfirmModal from "./ConfirmModal.svelte";
   import { allGroups, loadWieleMz, addGroup, removeGroup, reorderGroups, clearSelection, hasAnySelection } from "./mzGroups.svelte";
 
   interface Props {
@@ -27,6 +28,13 @@
   const groups = $derived(allGroups());
 
   let mzListModalOpen = $state(false);
+  let deleteGroupTarget = $state<{ id: string; index: number } | null>(null);
+
+  function confirmRemoveGroup() {
+    if (!deleteGroupTarget) return;
+    removeGroup(deleteGroupTarget.id);
+    deleteGroupTarget = null;
+  }
 
   // ── Drag-to-reorder (Pointer Events) — natywny HTML5 DnD jest niestabilny
   // w webview Tauri, więc ten sam wzorzec co przy przeciąganiu warstw widma
@@ -75,6 +83,16 @@
 
   <MzListModal open={mzListModalOpen} {tolDefault} onclose={() => (mzListModalOpen = false)} />
 
+  <ConfirmModal
+    open={deleteGroupTarget !== null}
+    title="Usunąć kolumnę?"
+    message={deleteGroupTarget ? `Usunąć kolumnę "Grupa ${deleteGroupTarget.index + 1}"?` : ""}
+    confirmLabel="Usuń"
+    danger={true}
+    onconfirm={confirmRemoveGroup}
+    oncancel={() => (deleteGroupTarget = null)}
+  />
+
   <div class="wmz-wrap" bind:this={colsListEl}>
     {#each groups as group, i (group.id)}
       <div
@@ -93,7 +111,7 @@
             tabindex="0"
           >⠿</span>
           <span class="wmz-col-title">Grupa {i + 1}</span>
-          <button class="wmz-remove" onclick={() => removeGroup(group.id)} title="Usuń kolumnę">×</button>
+          <button class="wmz-remove" onclick={() => (deleteGroupTarget = { id: group.id, index: i })} title="Usuń kolumnę">×</button>
         </div>
         <MzColumn
           {group}

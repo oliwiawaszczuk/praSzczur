@@ -60,7 +60,7 @@ export async function loadSavedMaps(): Promise<void> {
   _loaded = true;
 }
 
-export async function savePixelMap(input: Omit<SavedPixelMap, "id" | "createdAt" | "updatedAt">): Promise<void> {
+export async function savePixelMap(input: Omit<SavedPixelMap, "id" | "createdAt" | "updatedAt">): Promise<SavedPixelMapMeta> {
   const wid = activeWorkspaceId();
   const r = await fetch(`${BASE}/workspaces/${wid}/pixel_maps`, {
     method: "POST",
@@ -71,7 +71,9 @@ export async function savePixelMap(input: Omit<SavedPixelMap, "id" | "createdAt"
     const err = await r.json().catch(() => ({ detail: "Błąd zapisu mapy" }));
     throw new Error(err.detail ?? "Błąd zapisu mapy");
   }
+  const meta = await r.json();
   await loadSavedMaps();
+  return meta;
 }
 
 export async function renameSavedMap(id: string, name: string): Promise<void> {

@@ -2,10 +2,12 @@
   import { onMount } from "svelte";
   import IonCanvas from "./IonCanvas.svelte";
   import PixelMapZoomModal from "./PixelMapZoomModal.svelte";
+  import ConfirmModal from "./ConfirmModal.svelte";
   import {
     savedMapsList, loadSavedMaps, renameSavedMap, deleteSavedMap, fetchSavedMapData,
     type SavedPixelMap,
   } from "./savedPixelMaps.svelte";
+  import { requestGraphInsert } from "./graphInsert.svelte";
 
   let mapData = $state<Record<string, SavedPixelMap>>({});
   let loadingIds = $state<Set<string>>(new Set());
@@ -44,7 +46,16 @@
     renameDrafts = rest;
   }
 
-  async function onDelete(id: string) {
+  let deleteTarget = $state<{ id: string; name: string } | null>(null);
+
+  function askDelete(id: string, name: string) {
+    deleteTarget = { id, name };
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    const { id } = deleteTarget;
+    deleteTarget = null;
     await deleteSavedMap(id);
     const { [id]: _drop, ...rest } = mapData;
     mapData = rest;
@@ -80,8 +91,9 @@
             />
             {#if mapData[m.id]}
               <button class="card-icon-btn" onclick={() => (zoomedId = m.id)} title="Powiększ">⤢</button>
+              <button class="card-icon-btn" onclick={() => requestGraphInsert({ kind: m.mode === "segment" ? "segment" : "mapa", savedMapId: m.id, label: m.name }, "nodegraph")} title="Wyślij do Node Graph">→⬡</button>
             {/if}
-            <button class="saved-remove" onclick={() => onDelete(m.id)} title="Usuń zapisaną mapę">×</button>
+            <button class="saved-remove" onclick={() => askDelete(m.id, m.name)} title="Usuń zapisaną mapę">×</button>
           </div>
           <div class="saved-meta-row">
             <span class="tissue-tag">{m.tissueLabel || m.tissueId}</span>
@@ -122,6 +134,16 @@
     onclose={() => (zoomedId = null)}
   />
 {/if}
+
+<ConfirmModal
+  open={deleteTarget !== null}
+  title="Usunąć zapisaną mapę?"
+  message={deleteTarget ? `Usunąć zapisaną mapę "${deleteTarget.name}"? Tej operacji nie można cofnąć.` : ""}
+  confirmLabel="Usuń"
+  danger={true}
+  onconfirm={confirmDelete}
+  oncancel={() => (deleteTarget = null)}
+/>
 
 <style>
   .saved-wrap {

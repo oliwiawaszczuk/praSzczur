@@ -17,6 +17,9 @@
   import WorkspaceSettings from "$lib/WorkspaceSettings.svelte";
   import Tablica from "$lib/Tablica.svelte";
   import { loadWorkspaces, wsGet, wsSet } from "$lib/workspace.svelte";
+  import { loadAppSettings } from "$lib/appSettings.svelte";
+  import { consumeTabRequest } from "$lib/graphInsert.svelte";
+  import { addGroupWithQuery } from "$lib/mzGroups.svelte";
   import "@fontsource/jetbrains-mono/400.css";
   import "@fontsource/jetbrains-mono/600.css";
 
@@ -82,6 +85,14 @@
   $effect(() => { if (restored) wsSet("app_dispMin", dispMin); });
   $effect(() => { if (restored) wsSet("app_dispMax", dispMax); });
 
+  // "Wyślij do Node Graph" z innych zakładek (pkt 11/13/14) — patrz
+  // graphInsert.svelte.ts; NodeGraphTab.svelte samo reaguje na
+  // pendingGraphInsert(), tu tylko przełączamy widoczną zakładkę.
+  $effect(() => {
+    const t = consumeTabRequest();
+    if (t) activeTab = t as Tab;
+  });
+
   onMount(async () => {
     const tick = setInterval(() => {
       bootProgress = Math.min(bootProgress + 3, 85);
@@ -89,6 +100,7 @@
     try {
       await waitForSidecar();
       await loadWorkspaces();
+      await loadAppSettings();
 
       // Load all persisted state — dopiero po wczytaniu workspace
       activeTab    = wsGet<Tab>("app_activeTab", "dane");
@@ -249,7 +261,8 @@
         <ZestawDanych visible={activeTab === "zestawDanych"} />
       </main>
       <main class="content content-mz" class:hidden={!(activeTab === "mz" && mzSubTab === "mz")}>
-        <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} error={queryError} {tissueLabels} {tissueColors} {invertColors} />
+        <IonGrid {tissues} loading={queryLoading} {dispMin} {dispMax} error={queryError} {tissueLabels} {tissueColors} {invertColors}
+                 mz={lastMz} tol={lastTol} dataset={sanitizeDatasetId(wsGet<string>("sidebar_queryDataset", RAW_DATASET_ID))} />
         <div class="sidebar-panel">
           <Sidebar
             loading={queryLoading}
@@ -263,6 +276,10 @@
             oninvert={(v) => { invertColors = v; }}
             currentMz={lastMz}
             currentTol={lastTol}
+            oncreategroup={({ mz, tol, dataset }) => {
+              addGroupWithQuery(mz, tol, dataset);
+              mzSubTab = "grupy";
+            }}
           />
         </div>
       </main>

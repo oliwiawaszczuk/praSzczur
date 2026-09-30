@@ -54,7 +54,7 @@ export async function loadSavedSpectra(): Promise<void> {
   _loaded = true;
 }
 
-export async function saveSpectrum(input: Omit<SavedSpectrum, "id" | "createdAt" | "updatedAt">): Promise<void> {
+export async function saveSpectrum(input: Omit<SavedSpectrum, "id" | "createdAt" | "updatedAt">): Promise<SavedSpectrumMeta> {
   const wid = activeWorkspaceId();
   const r = await fetch(`${BASE}/workspaces/${wid}/spectra`, {
     method: "POST",
@@ -65,7 +65,9 @@ export async function saveSpectrum(input: Omit<SavedSpectrum, "id" | "createdAt"
     const err = await r.json().catch(() => ({ detail: "Błąd zapisu widma" }));
     throw new Error(err.detail ?? "Błąd zapisu widma");
   }
+  const meta = await r.json();
   await loadSavedSpectra();
+  return meta;
 }
 
 export async function renameSavedSpectrum(id: string, name: string): Promise<void> {

@@ -30,7 +30,10 @@
 
   interface Pixel { tissue: string; x: number; y: number; }
 
-  const COLOR_L = "#ffc951";
+  // COLOR_L NIE jest już żółtym accent kolorem appki (#ffc951) — kropka
+  // markera na mapie pikseli zlewała się z żółtymi obwódkami/podświetleniami
+  // reszty UI (ten sam powód co pierwszy kolor w Widma.svelte COLORS).
+  const COLOR_L = "#ff4fa8";
   const COLOR_R = "#7ec8e3";
 
   let selectedTissueLeft  = $state(wsGet<string>(LS_TISSUE_L, tissues[0] ?? ""));

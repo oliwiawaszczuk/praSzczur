@@ -17,8 +17,9 @@ src/msi/         # biblioteka analityczna (loader.py, ...)
 scripts/         # jednorazowe skrypty analityczne
 praOutputs/      # raporty i wykresy dla użytkownika (.md + .png)
 docs/            # dokumentacja techniczna (dataset.md, ...)
-workspaces/      # dane per-workspace aplikacji praSzczur (patrz sekcja Workspace)
+workspaces/      # dane per-workspace aplikacji praSzczur (patrz sekcja Workspace), w tym Node Graphy
 boards/          # dane tablic (Tablica, Miro-like) aplikacji praSzczur (patrz sekcja Tablica)
+app_settings.json # globalne ustawienia appki, niezależne od workspace'u (patrz sekcja Workspace)
 ```
 
 ## Dataset
@@ -60,6 +61,38 @@ trybów wyświetlania, zapisane zapytania m/z, itp.) **musi** być zapisywany pr
 (debounced) do sidecara per aktywny workspace — dzięki temu przełączenie/eksport/import
 workspace'u przenosi też te ustawienia. Zobacz istniejące wzorce w `DaneTab.svelte`,
 `Sidebar.svelte`, `Widma.svelte` (np. `wsGet("dane_binSize", 0.3)`).
+
+**Ustawienia GLOBALNE (nie per-workspace)** — rzadkie, tylko gdy coś naprawdę ma być wspólne dla
+całej appki niezależnie od workspace'u (dziś: czułość zoomu/przesuwania płótna, wspólna dla
+wszystkich Node Graphów i Tablicy) — idą przez `getSetting(key, fallback)` / `setSetting(key,
+value)` z `$lib/appSettings.svelte`, zapisywane do `app_settings.json` w rootcie (endpointy
+`/app_settings` w sidecarze), NIE przez `wsGet/wsSet`.
+
+## Node Graph (wiele grafów per workspace)
+
+Zakładka **Node Graph** ma **wiele niezależnych grafów per workspace** (w odróżnieniu od Tablicy —
+grafy SĄ per-workspace, nie globalne), zarządzane przez `app/src/lib/nodegraphs.svelte.ts` +
+endpointy `/workspaces/{wid}/nodegraphs/*` w sidecarze (ten sam wzorzec co "Zapisane mapy
+pikseli"/"Zapisane widma": lekki rejestr metadanych + osobny plik danych per graf, plus osobny
+endpoint `/data` do odczytu/zapisu pełnej treści grafu — jak boards).
+
+- Struktura na dysku: `workspaces/<wid>/nodegraphs/registry.json` (lista grafów),
+  `workspaces/<wid>/nodegraphs/<gid>.json` (nodes/edges/viewport/notes, autozapis debounced 300ms).
+- Workspace zapamiętuje **ID ostatnio otwartego grafu** (`wsGet/wsSet("nodegraph_activeGraphId", ...)`)
+  — jeśli żaden graf nie istnieje, aplikacja tworzy pusty automatycznie (ten sam wzorzec co Tablica).
+- Przełącznik/tworzenie nowego grafu: dropdown + "+" w prawym sidebarze `NodeGraphTab.svelte`
+  (nad listą typów node'ów). Zarządzanie (zmiana nazwy/usuwanie) — zakładka Ustawienia
+  (`WorkspaceSettings.svelte`, karta "Node Graphy").
+- Silnik grafu (typy node'ów, ewaluacja, node'y vs proste notatki tekstowe `Graph.notes`) —
+  `app/src/lib/nodegraph.ts` + domenowe `nodegraph.mapa.ts` / `.segmentacja.ts` / `.widmo.ts`.
+- **Wydajność:** ewaluacja grafu (`evaluateGraphNode`) i mapa krawędzi-po-celu MUSZĄ być liczone
+  raz per zmianę grafu przez współdzielony `$derived.by` (patrz `evalMemo`/`edgesByTarget` w
+  `NodeGraphTab.svelte`), NIGDY osobno per node/per odczyt — inaczej koszt renderu rośnie do O(N²)
+  z liczbą node'ów.
+- "Wyślij do Node Graph" z innych zakładek (m/z, Widma, Zapisane) — most `$lib/graphInsert.svelte.ts`
+  (`requestGraphInsert`/`pendingGraphInsert`): zapisuje obiekt do biblioteki (Zapisane
+  mapy/Zapisane widma), przełącza zakładkę, `NodeGraphTab.svelte` pokazuje "duszka" pod kursorem
+  do kliknięcia na płótnie (ten sam mechanizm co przeciąganie node'a z palety).
 
 ## Tablica (freeform whiteboard, Miro-like)
 

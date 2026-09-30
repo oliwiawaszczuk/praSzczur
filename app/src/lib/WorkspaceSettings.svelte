@@ -11,6 +11,17 @@
     datasets, activeDatasetId, loadDatasets, datasetsLoaded,
     createDataset, renameDataset, deleteDataset, activateDataset,
   } from "$lib/datasets.svelte";
+  import {
+    nodeGraphs, loadNodeGraphs, nodeGraphsLoaded, createNodeGraph, renameNodeGraph, deleteNodeGraph,
+  } from "$lib/nodegraphs.svelte";
+  import { getSetting, setSetting } from "$lib/appSettings.svelte";
+
+  // ── Czułość zoomu/przesuwania płótna — GLOBALNA, współdzielona przez
+  // wszystkie Node Graphy oraz Tablicę (patrz appSettings.svelte.ts). ────────
+  let canvasZoomSensitivity = $derived(getSetting("canvasZoomSensitivity", 1));
+  let canvasPanSensitivity = $derived(getSetting("canvasPanSensitivity", 1));
+  function setCanvasZoomSens(v: number) { setSetting("canvasZoomSensitivity", v); }
+  function setCanvasPanSens(v: number) { setSetting("canvasPanSensitivity", v); }
 
   let creating   = $state(false);
   let newName    = $state("");
@@ -93,6 +104,51 @@
   let dsDeleteTarget   = $state<{ id: string; name: string } | null>(null);
 
   onMount(async () => { if (!datasetsLoaded()) await loadDatasets(); });
+
+  // ── Node Graphy (per workspace, jak Zestawy danych powyżej) ─────────────
+  let ngCreating    = $state(false);
+  let ngNewName     = $state("");
+  let ngBusy        = $state(false);
+  let ngError       = $state("");
+  let ngRenamingId  = $state<string | null>(null);
+  let ngRenameVal   = $state("");
+  let ngDeleteTarget = $state<{ id: string; name: string } | null>(null);
+
+  onMount(async () => { if (!nodeGraphsLoaded()) await loadNodeGraphs(); });
+
+  async function ngDoCreate() {
+    if (!ngNewName.trim()) return;
+    ngBusy = true; ngError = "";
+    try { await createNodeGraph(ngNewName.trim()); ngNewName = ""; ngCreating = false; }
+    catch (e) { ngError = (e as Error).message; }
+    finally { ngBusy = false; }
+  }
+
+  function ngStartRename(id: string, current: string) {
+    ngRenamingId = id; ngRenameVal = current;
+  }
+
+  async function ngCommitRename() {
+    if (!ngRenamingId || !ngRenameVal.trim()) { ngRenamingId = null; return; }
+    ngBusy = true; ngError = "";
+    try { await renameNodeGraph(ngRenamingId, ngRenameVal.trim()); }
+    catch (e) { ngError = (e as Error).message; }
+    finally { ngRenamingId = null; ngBusy = false; }
+  }
+
+  function ngAskDelete(id: string, name: string) {
+    ngDeleteTarget = { id, name };
+  }
+
+  async function ngConfirmDelete() {
+    if (!ngDeleteTarget) return;
+    const { id } = ngDeleteTarget;
+    ngDeleteTarget = null;
+    ngBusy = true; ngError = "";
+    try { await deleteNodeGraph(id); }
+    catch (e) { ngError = (e as Error).message; }
+    finally { ngBusy = false; }
+  }
 
   async function dsDoCreate() {
     if (!dsNewName.trim()) return;
@@ -238,6 +294,62 @@
       {/each}
     </div>
   </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Node Graphy</span>
+      <div class="header-actions">
+        <button class="btn-primary-sm" onclick={() => (ngCreating = !ngCreating)} disabled={ngBusy}>+ Nowy</button>
+      </div>
+    </div>
+
+    {#if ngCreating}
+      <div class="create-row">
+        <input class="field-input" type="text" placeholder="nazwa grafu" bind:value={ngNewName}
+               onkeydown={(e) => e.key === "Enter" && ngDoCreate()} />
+        <button class="btn-primary-sm" onclick={ngDoCreate} disabled={ngBusy || !ngNewName.trim()}>Utwórz</button>
+        <button class="btn-secondary" onclick={() => { ngCreating = false; ngNewName = ""; }}>Anuluj</button>
+      </div>
+    {/if}
+
+    {#if ngError}<div class="error-msg">⚠ {ngError}</div>{/if}
+
+    <div class="ws-list">
+      {#each nodeGraphs() as g (g.id)}
+        <div class="ws-row">
+          {#if ngRenamingId === g.id}
+            <input class="field-input rename-input" type="text" bind:value={ngRenameVal}
+                   onkeydown={(e) => e.key === "Enter" && ngCommitRename()}
+                   onblur={ngCommitRename} />
+          {:else}
+            <span class="ws-name">{g.name}</span>
+          {/if}
+          <span class="ws-meta">zmieniony {fmtDate(g.updatedAt)}</span>
+          <div class="ws-actions">
+            <button class="icon-btn" title="Zmień nazwę" onclick={() => ngStartRename(g.id, g.name)}>✎</button>
+            <button class="icon-btn del" title="Usuń" onclick={() => ngAskDelete(g.id, g.name)}>×</button>
+          </div>
+        </div>
+      {/each}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Widok płótna</span>
+    </div>
+    <div class="field-group">
+      <label class="field-label" for="canvas-zoom-sens">Czułość zoomu</label>
+      <input id="canvas-zoom-sens" type="range" min="0.3" max="3" step="0.1" value={canvasZoomSensitivity}
+             oninput={(e) => setCanvasZoomSens(Number((e.target as HTMLInputElement).value))} />
+    </div>
+    <div class="field-group">
+      <label class="field-label" for="canvas-pan-sens">Czułość przesuwania</label>
+      <input id="canvas-pan-sens" type="range" min="0.3" max="3" step="0.1" value={canvasPanSensitivity}
+             oninput={(e) => setCanvasPanSens(Number((e.target as HTMLInputElement).value))} />
+    </div>
+    <div class="canvas-hint">Dotyczy wszystkich Node Graphów oraz Tablicy.</div>
+  </div>
 </div>
 
 <ConfirmModal
@@ -258,6 +370,16 @@
   danger={true}
   onconfirm={dsConfirmDelete}
   oncancel={() => (dsDeleteTarget = null)}
+/>
+
+<ConfirmModal
+  open={ngDeleteTarget !== null}
+  title="Usunąć graf?"
+  message={ngDeleteTarget ? `Graf "${ngDeleteTarget.name}" zostanie trwale usunięty razem z wszystkimi node'ami. Tej operacji nie można cofnąć.` : ""}
+  confirmLabel="Usuń"
+  danger={true}
+  onconfirm={ngConfirmDelete}
+  oncancel={() => (ngDeleteTarget = null)}
 />
 
 <style>
@@ -333,4 +455,26 @@
   .icon-btn:hover:not(:disabled) { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.8); }
   .icon-btn.del:hover:not(:disabled) { color: #ff6b6b; }
   .icon-btn:disabled { opacity: 0.2; cursor: not-allowed; }
+
+  .field-group { margin-bottom: 12px; }
+  .field-label {
+    display: block; font-size: 0.62rem; font-weight: 600; letter-spacing: 0.08em;
+    text-transform: uppercase; color: rgba(255,255,255,0.35); margin-bottom: 5px;
+  }
+  .canvas-hint { font-size: 0.66rem; color: rgba(255,255,255,0.3); }
+
+  /* Suwaki — ten sam cienki track + okrągły uchwyt co w BoardSidebar/m/z. */
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 16px;
+    background: transparent; outline: none; border: none; padding: 0; margin: 0; cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-runnable-track { background: rgba(255,255,255,0.1); border-radius: 3px; height: 6px; }
+  input[type="range"]::-moz-range-track { background: rgba(255,255,255,0.1); border-radius: 3px; height: 6px; }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+    background: #ffc951; border: 2px solid #1a1a1a; box-shadow: 0 1px 6px rgba(0,0,0,0.5);
+    cursor: pointer; margin-top: -5px; transition: transform 0.1s, box-shadow 0.1s;
+  }
+  input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); box-shadow: 0 0 0 4px rgba(255,201,81,0.2); }
+  input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: #ffc951; border: 2px solid #1a1a1a; cursor: pointer; }
 </style>

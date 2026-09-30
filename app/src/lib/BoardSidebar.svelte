@@ -19,8 +19,6 @@
     shapeStrokeWidth: number;
     shapeStrokeTransparent: boolean;
     shapeCornerRadius: number;
-    zoomSensitivity: number;
-    panSensitivity: number;
     onselectboard?: (id: string) => void;
     oncreateboard?: (name: string) => void;
     onrenameboard?: (id: string, name: string) => void;
@@ -38,8 +36,6 @@
     onshapestroketransparent?: (v: boolean) => void;
     onshapecornerradius?: (r: number) => void;
     onexportpng?: () => void;
-    onzoomsens?: (v: number) => void;
-    onpansens?: (v: number) => void;
     onshowshortcuts?: () => void;
   }
 
@@ -47,12 +43,11 @@
     boardList, activeBoardId, selected, tool, drawColor, drawStrokeWidth,
     shapeKind, shapeFillColor, shapeFillTransparent, shapeStrokeColor, shapeStrokeWidth, shapeStrokeTransparent,
     shapeCornerRadius,
-    zoomSensitivity, panSensitivity,
     onselectboard, oncreateboard, onrenameboard, ondeleteboard, onpropchange,
     onaddimagefiles, onsettool, ondrawcolor, ondrawwidth,
     onshapekind, onshapefillcolor, onshapefilltransparent, onshapestrokecolor, onshapestrokewidth, onshapestroketransparent,
     onshapecornerradius,
-    onexportpng, onzoomsens, onpansens, onshowshortcuts,
+    onexportpng, onshowshortcuts,
   }: Props = $props();
 
   let creating = $state(false);
@@ -398,16 +393,6 @@
   <div class="panel">
     <div class="panel-header">
       <span class="panel-title">Ustawienia</span>
-    </div>
-    <div class="field-group">
-      <label class="field-label" for="zoom-sens">Czułość zoomu</label>
-      <input id="zoom-sens" type="range" min="0.3" max="3" step="0.1" value={zoomSensitivity}
-             oninput={(e) => onzoomsens?.(Number((e.target as HTMLInputElement).value))} />
-    </div>
-    <div class="field-group">
-      <label class="field-label" for="pan-sens">Czułość przesuwania</label>
-      <input id="pan-sens" type="range" min="0.3" max="3" step="0.1" value={panSensitivity}
-             oninput={(e) => onpansens?.(Number((e.target as HTMLInputElement).value))} />
     </div>
     <button class="btn-export" onclick={() => onshowshortcuts?.()}>⌘ Wyświetl skróty</button>
   </div>
