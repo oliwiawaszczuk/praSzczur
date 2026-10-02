@@ -20,6 +20,7 @@ docs/            # dokumentacja techniczna (dataset.md, ...)
 workspaces/      # dane per-workspace aplikacji praSzczur (patrz sekcja Workspace), w tym Node Graphy
 boards/          # dane tablic (Tablica, Miro-like) aplikacji praSzczur (patrz sekcja Tablica)
 app_settings.json # globalne ustawienia appki, niezależne od workspace'u (patrz sekcja Workspace)
+app_docs.json    # treść zakładki Dokumentacja appki — poradnik + opisy node'ów (patrz sekcja Dokumentacja)
 ```
 
 ## Dataset
@@ -110,6 +111,27 @@ zoom/pan, multi-select, kopiuj-wklej) zbudowana na **Konva.js** (`app/src/lib/Bo
   render obiektów, zoom/pan myszką, multi-select rubber-band, resize/rotate przez `Transformer`, edycja
   tekstu przez overlay `<textarea>`), `BoardSidebar.svelte` (lista tablic gdy brak zaznaczenia, właściwości
   obiektu — kolor/rozmiar/bold dla tekstu, przezroczystość dla obrazu — gdy coś zaznaczone).
+
+## Dokumentacja (zakładka — poradnik użytkownika, nie dokumentacja kodu)
+
+Zakładka **Dokumentacja** to poradnik + opis DZIAŁANIA appki (nie kodu), globalny — NIE
+per-workspace (ten sam duch co Tablica/Notatki). Lewy panel: spis zakładek appki + typów node'ów
+Node Grapha (pogrupowanych tak samo jak paleta w `NodeGraphTab.svelte`). Prawy panel: pełna treść
+wybranej sekcji + przycisk "Edytuj" (`Dokumentacja.svelte`).
+
+- **Dane globalne**: `app_docs.json` w rootcie (endpointy `/app_docs` w sidecarze, ten sam wzorzec
+  co `app_settings.json`), czytane/zapisywane przez `app/src/lib/appdocs.svelte.ts`
+  (`getTabDoc`/`setTabDoc`, `getNodeDoc`/`setNodeDoc`). Domyślna (seed) treść sekcji per zakładka
+  jest w `app/src/lib/docsSeed.ts` — `app_docs.json` trzyma tylko NADPISANIA tego, co user
+  faktycznie edytował.
+- **Synchronizacja z ikonką "(i)" na node'ach Node Grapha**: opis node'a NIE jest duplikowany —
+  `NodeGraphTab.svelte` i `Dokumentacja.svelte` czytają dokładnie to samo przez
+  `getNodeDoc(typeId, def.description)` (nadpisanie z `app_docs.json`, inaczej domyślny
+  `NodeTypeDef.description` z kodu). Edycja w jednym miejscu natychmiast zmienia drugie, bo to
+  jedno źródło danych, nie dwa zsynchronizowane.
+- Klik ikonki "(i)" na node'ie przełącza zakładkę na Dokumentację i otwiera sekcję tego node'a —
+  przez most `app/src/lib/docsNav.svelte.ts` (`requestDocsSection`/`consumePendingDocsSection`),
+  ten sam wzorzec co "Wyślij do Node Graph" (`graphInsert.svelte.ts`), tylko w drugą stronę.
 
 ## Konwencje
 

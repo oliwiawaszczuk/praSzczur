@@ -2481,6 +2481,35 @@ def put_app_settings(body: dict) -> dict:
     return {"ok": True}
 
 
+# ── Dokumentacja appki (zakładka "Dokumentacja") ────────────────────────────
+# Globalna, niezależna od workspace'u (ten sam duch co Tablica/Notatki) —
+# poradnik użytkownika + opis zakładek, oraz opisy typów node'ów Node Grapha
+# współdzielone z tooltipem "(i)" na node'ach (patrz appdocs.svelte.ts +
+# NodeGraphTab.svelte: "nodes" poniżej to NADPISANIA domyślnego
+# NodeTypeDef.description — edycja w dowolnym miejscu pisze do tego samego
+# pliku, więc widok w Dokumentacji i tooltip na node'ie są zawsze zgodne).
+_APP_DOCS_FILE = ROOT / "app_docs.json"
+
+
+@app.get("/app_docs")
+def get_app_docs() -> dict:
+    if not _APP_DOCS_FILE.exists():
+        return {"tabs": {}, "nodes": {}}
+    try:
+        data = json.loads(_APP_DOCS_FILE.read_text())
+    except Exception:
+        return {"tabs": {}, "nodes": {}}
+    data.setdefault("tabs", {})
+    data.setdefault("nodes", {})
+    return data
+
+
+@app.put("/app_docs")
+def put_app_docs(body: dict) -> dict:
+    _APP_DOCS_FILE.write_text(json.dumps(body, ensure_ascii=False, indent=2))
+    return {"ok": True}
+
+
 # ── Boards (Tablica) ──────────────────────────────────────────────────────
 # Tablice są niezależne od workspace'ów — jedna wspólna lista, osobny folder
 # na dysku (boards/), widoczna niezależnie od aktywnego workspace'u.

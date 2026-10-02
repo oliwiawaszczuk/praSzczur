@@ -46,6 +46,9 @@ boards/
 # praSzczur app — globalne ustawienia (per-user, niezależne od workspace'u)
 app_settings.json
 
+# praSzczur app — treść zakładki Dokumentacja (per-user, edytowalna przez usera)
+app_docs.json
+
 # IDE
 .idea/
 .vscode/

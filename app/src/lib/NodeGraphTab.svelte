@@ -42,6 +42,8 @@
   } from "$lib/nodegraphs.svelte";
   import { getSetting } from "$lib/appSettings.svelte";
   import { pendingGraphInsert, clearGraphInsert } from "$lib/graphInsert.svelte";
+  import { getNodeDoc } from "$lib/appdocs.svelte";
+  import { requestDocsSection } from "$lib/docsNav.svelte";
   // rejestrują swoje typy węzłów przy imporcie (side-effect na moduł) — muszą
   // być zaimportowane choćby raz, żeby NODE_TYPES nie był pusty.
   import "$lib/nodegraph.mapa";
@@ -202,6 +204,15 @@
    * pokazują kolor swojego wyjścia zamiast tego. Gdy węzeł ma kilka RÓŻNYCH
    * rodzajów wejść naraz, kropka dzieli się równo między te kolory
    * (conic-gradient) zamiast pokazywać tylko jeden z nich. */
+  // Opis node'a do wyświetlenia (tooltip "(i)", podpowiedź w palecie) —
+  // userowe nadpisanie z zakładki Dokumentacja (appdocs.svelte.ts), jeśli
+  // istnieje, inaczej domyślny NodeTypeDef.description z kodu. To jedyne
+  // miejsce rozwiązujące tę wartość, żeby tooltip i Dokumentacja ZAWSZE
+  // pokazywały dokładnie to samo.
+  function nodeDescription(t: NodeTypeDef): string {
+    return getNodeDoc(t.id, t.description);
+  }
+
   function nodeTypeDotBackground(t: NodeTypeDef): string {
     const kinds = [...new Set(t.inputs.map((s) => s.kind))];
     if (kinds.length === 0) {
@@ -1146,7 +1157,7 @@
     if (tipTimer) clearTimeout(tipTimer);
     const overflowsRight = rect.right + 8 + TIP_WIDTH > window.innerWidth;
     const x = overflowsRight ? rect.left - 8 - TIP_WIDTH : rect.right + 8;
-    tipTimer = setTimeout(() => { hoveredTip = { text: t.description, x, y: rect.top }; }, TIP_DELAY_MS);
+    tipTimer = setTimeout(() => { hoveredTip = { text: nodeDescription(t), x, y: rect.top }; }, TIP_DELAY_MS);
   }
   function onCtxItemLeave() {
     if (tipTimer) clearTimeout(tipTimer);
@@ -1865,9 +1876,13 @@
                onpointerdown={(e) => onNodeHeaderPointerDown(e, node)}
                onpointerup={onNodeHeaderPointerUp}>
             <span class="mnode-title">{def.label}</span>
-            <span class="node-info" tabindex="0" role="note">
+            <span class="node-info" tabindex="0" role="button"
+                  title="Otwórz w Dokumentacji"
+                  onpointerdown={(e) => e.stopPropagation()}
+                  onclick={(e) => { e.stopPropagation(); requestDocsSection({ kind: "node", typeId: node.type }); }}
+                  onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); requestDocsSection({ kind: "node", typeId: node.type }); } }}>
               <span class="node-info-icon">i</span>
-              <span class="node-info-tip">{def.description}</span>
+              <span class="node-info-tip">{nodeDescription(def)}</span>
             </span>
           </div>
 
@@ -2826,7 +2841,7 @@
           {#each s.items as t (t.id)}
             <div class="ng-sidebar-item" class:dragging={paletteDrag?.typeId === t.id}
                  onpointerdown={(e) => onSidebarItemPointerDown(e, t)}
-                 title={t.description}>
+                 title={nodeDescription(t)}>
               <span class="ng-item-dot" style="background:{nodeTypeDotBackground(t)}"></span>
               <span class="ng-item-label">{t.label}</span>
             </div>
@@ -3038,7 +3053,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    cursor: help;
+    cursor: pointer;
   }
   .node-info-tip {
     display: none;

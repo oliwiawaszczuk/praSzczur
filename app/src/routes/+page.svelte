@@ -17,16 +17,19 @@
   import WorkspaceSettings from "$lib/WorkspaceSettings.svelte";
   import Tablica from "$lib/Tablica.svelte";
   import NotatkiTab from "$lib/NotatkiTab.svelte";
+  import Dokumentacja from "$lib/Dokumentacja.svelte";
   import FloatingNotePad from "$lib/FloatingNotePad.svelte";
   import { loadWorkspaces, wsGet, wsSet } from "$lib/workspace.svelte";
   import { loadAppSettings } from "$lib/appSettings.svelte";
+  import { loadAppDocs } from "$lib/appdocs.svelte";
   import { consumeTabRequest } from "$lib/graphInsert.svelte";
+  import { consumeDocsTabRequest } from "$lib/docsNav.svelte";
   import { addGroupWithQuery } from "$lib/mzGroups.svelte";
   import "@fontsource/jetbrains-mono/400.css";
   import "@fontsource/jetbrains-mono/600.css";
 
   type AppState = "booting" | "ready" | "error";
-  type Tab = "dane" | "zestawDanych" | "mz" | "preprocessing" | "widma" | "prewidma" | "nodegraph" | "tablica" | "notatki" | "settings";
+  type Tab = "dane" | "zestawDanych" | "mz" | "preprocessing" | "widma" | "prewidma" | "nodegraph" | "tablica" | "notatki" | "dokumentacja" | "settings";
   type MzSubTab = "mz" | "grupy" | "laczenie" | "zapisane";
 
   const TABS: { key: Tab; label: string }[] = [
@@ -39,6 +42,7 @@
     { key: "nodegraph",     label: "Node Graph" },
     { key: "tablica",       label: "Tablica" },
     { key: "notatki",       label: "Notatki" },
+    { key: "dokumentacja",  label: "Dokumentacja" },
     { key: "settings",   label: "Ustawienia" },
   ];
 
@@ -96,6 +100,13 @@
     if (t) activeTab = t as Tab;
   });
 
+  // Klik ikonki "(i)" na node'ie w Node Graphu (docsNav.svelte) —
+  // analogicznie do consumeTabRequest() powyżej, tylko w drugą stronę.
+  $effect(() => {
+    const t = consumeDocsTabRequest();
+    if (t) activeTab = t as Tab;
+  });
+
   onMount(async () => {
     const tick = setInterval(() => {
       bootProgress = Math.min(bootProgress + 3, 85);
@@ -104,6 +115,7 @@
       await waitForSidecar();
       await loadWorkspaces();
       await loadAppSettings();
+      await loadAppDocs();
 
       // Load all persisted state — dopiero po wczytaniu workspace
       activeTab    = wsGet<Tab>("app_activeTab", "dane");
@@ -316,6 +328,9 @@
       </main>
       <main class="content" class:hidden={activeTab !== "notatki"}>
         <NotatkiTab />
+      </main>
+      <main class="content" class:hidden={activeTab !== "dokumentacja"}>
+        <Dokumentacja />
       </main>
       <main class="content" class:hidden={activeTab !== "settings"}>
         <WorkspaceSettings />
