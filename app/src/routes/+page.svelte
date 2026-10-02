@@ -16,6 +16,8 @@
   import PreWidma from "$lib/PreWidma.svelte";
   import WorkspaceSettings from "$lib/WorkspaceSettings.svelte";
   import Tablica from "$lib/Tablica.svelte";
+  import NotatkiTab from "$lib/NotatkiTab.svelte";
+  import FloatingNotePad from "$lib/FloatingNotePad.svelte";
   import { loadWorkspaces, wsGet, wsSet } from "$lib/workspace.svelte";
   import { loadAppSettings } from "$lib/appSettings.svelte";
   import { consumeTabRequest } from "$lib/graphInsert.svelte";
@@ -24,7 +26,7 @@
   import "@fontsource/jetbrains-mono/600.css";
 
   type AppState = "booting" | "ready" | "error";
-  type Tab = "dane" | "zestawDanych" | "mz" | "preprocessing" | "widma" | "prewidma" | "nodegraph" | "tablica" | "settings";
+  type Tab = "dane" | "zestawDanych" | "mz" | "preprocessing" | "widma" | "prewidma" | "nodegraph" | "tablica" | "notatki" | "settings";
   type MzSubTab = "mz" | "grupy" | "laczenie" | "zapisane";
 
   const TABS: { key: Tab; label: string }[] = [
@@ -36,6 +38,7 @@
     { key: "preprocessing", label: "Preprocessing" },
     { key: "nodegraph",     label: "Node Graph" },
     { key: "tablica",       label: "Tablica" },
+    { key: "notatki",       label: "Notatki" },
     { key: "settings",   label: "Ustawienia" },
   ];
 
@@ -311,6 +314,9 @@
       <main class="content" class:hidden={activeTab !== "tablica"}>
         <Tablica />
       </main>
+      <main class="content" class:hidden={activeTab !== "notatki"}>
+        <NotatkiTab />
+      </main>
       <main class="content" class:hidden={activeTab !== "settings"}>
         <WorkspaceSettings />
       </main>
@@ -318,6 +324,7 @@
     </div>
 
   </div>
+  <FloatingNotePad />
 {/if}
 
 <style>

@@ -140,30 +140,32 @@ pub fn run() {
             // to przechwytuje te kombinacje klawiszy ZANIM dotrą jako zdarzenie
             // 'keydown' do webview, więc własna obsługa kopiuj/wklej/wytnij/cofnij
             // w Tablicy (BoardCanvas.svelte) i Node Graphie (NodeGraphTab.svelte),
-            // zaimplementowana w JS, nigdy nie dostawała tych zdarzeń. Usuwamy te
-            // konkretne pozycje z domyślnego menu "Edytuj" (zostawiamy resztę, np.
-            // "Zaznacz wszystko") — zwykłe pola tekstowe (input/textarea w innych
-            // zakładkach) nadal obsługują Cmd+C/V/X/Z natywnie przez WKWebView,
-            // niezależnie od skrótów zdefiniowanych na pasku menu.
+            // zaimplementowana w JS, nigdy nie dostawała tych zdarzeń. Usuwamy
+            // WSZYSTKIE natywne predefiniowane pozycje z menu "Edytuj" (Cofnij/
+            // Ponów/separatory/Wytnij/Kopiuj/Wklej/Zaznacz wszystko) — zwykłe pola
+            // tekstowe (input/textarea w innych zakładkach) nadal obsługują
+            // Cmd+C/V/X/Z natywnie przez WKWebView, niezależnie od zawartości
+            // paska menu.
             //
-            // UWAGA: usuwamy po POZYCJI, nie po tekście — natywne
-            // PredefinedMenuItem (Cofnij/Ponów/Wytnij/Kopiuj/Wklej) dostają
-            // etykietę ZLOKALIZOWANĄ przez system (np. "Wytnij" na polskim
-            // macOS), więc dopasowanie po angielskim tekście ("Cut" itd.)
-            // po prostu nic by nie znalazło na spolszczonym systemie — stąd
-            // wcześniejsza wersja tej poprawki nie działała. Kolejność
-            // budowania Menu::default()'s "Edit" submenu (zweryfikowana
-            // wprost w źródle tauri = 2.11.5, patrz Cargo.lock) jest STAŁA:
-            // [0]Cofnij [1]Ponów [2]separator [3]Wytnij [4]Kopiuj [5]Wklej
-            // [6]Zaznacz wszystko — usuwamy 0..=5, zostawiamy tylko 6.
+            // UWAGA: usuwamy po RODZAJU (MenuItemKind::Predefined), NIE po
+            // pozycji/indeksie ani po tekście etykiety. Wcześniejsza wersja
+            // usuwała indeksy 0..=5 TYLKO gdy submenu miało dokładnie 7 pozycji
+            // — jeśli z jakiegokolwiek powodu (wersja macOS, lokalizacja,
+            // przyszła wersja Tauri) liczba pozycji była inna, warunek cicho nie
+            // usuwał NICZEGO i skróty klawiszowe wracały do przechwytywania
+            // przez pasek menu bez żadnego komunikatu o błędzie. Dopasowanie po
+            // tekście etykiety też nie działa — natywne PredefinedMenuItem
+            // dostają etykietę ZLOKALIZOWANĄ przez system (np. "Wytnij" na
+            // polskim macOS). Filtrowanie po `MenuItemKind::Predefined` działa
+            // niezależnie od liczby pozycji i języka systemu.
             if let Some(tauri::menu::MenuItemKind::Submenu(edit_menu)) = menu
                 .items()?
                 .into_iter()
                 .find(|item| matches!(item, tauri::menu::MenuItemKind::Submenu(s) if s.text().map(|t| t == "Edit").unwrap_or(false)))
             {
-                if edit_menu.items()?.len() == 7 {
-                    for i in (0..=5).rev() {
-                        edit_menu.remove_at(i)?;
+                for item in edit_menu.items()?.into_iter().rev() {
+                    if let tauri::menu::MenuItemKind::Predefined(predefined) = item {
+                        edit_menu.remove(&predefined)?;
                     }
                 }
             }

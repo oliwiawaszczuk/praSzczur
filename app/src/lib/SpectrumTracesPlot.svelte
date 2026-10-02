@@ -22,6 +22,7 @@
   // przeciążania tamtego.
   import Plotly from "plotly.js-dist-min";
   import { normalizeVector, type WidmoNormalizeMode } from "$lib/nodegraph.widmo";
+  import { attachCopyOnModifierClick } from "./plotlyCopy";
 
   interface Props {
     traces: SpectrumTrace[];
@@ -94,8 +95,18 @@
 
     Plotly.react(plotDiv, data, layout, config).then(() => {
       Plotly.Plots.resize(plotDiv!);
+      attachCopyOnModifierClick(plotDiv, flashCopyStatus);
     });
   });
+
+  let copyStatus = $state("");
+  let copyStatusTimer: ReturnType<typeof setTimeout> | null = null;
+  function flashCopyStatus(text: string) {
+    if (compact) return;
+    copyStatus = `skopiowano: ${text}`;
+    if (copyStatusTimer) clearTimeout(copyStatusTimer);
+    copyStatusTimer = setTimeout(() => { copyStatus = ""; }, 1500);
+  }
 
   $effect(() => {
     if (!plotDiv) return;
@@ -105,11 +116,35 @@
   });
 </script>
 
-<div class="spectrum-plot-wrap" bind:this={plotDiv}></div>
+<div class="spectrum-plot-outer">
+  <div class="spectrum-plot-wrap" bind:this={plotDiv}></div>
+  {#if copyStatus}
+    <div class="copy-toast">{copyStatus}</div>
+  {/if}
+</div>
 
 <style>
+  .spectrum-plot-outer {
+    width: 100%;
+    height: 100%;
+    position: relative;
+  }
+
   .spectrum-plot-wrap {
     width: 100%;
     height: 100%;
+  }
+
+  .copy-toast {
+    position: absolute;
+    bottom: 6px;
+    right: 8px;
+    background: rgba(255,201,81,0.15);
+    border: 1px solid rgba(255,201,81,0.4);
+    color: #ffc951;
+    font-size: 0.68rem;
+    padding: 2px 7px;
+    border-radius: 6px;
+    pointer-events: none;
   }
 </style>

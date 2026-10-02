@@ -9,6 +9,7 @@
   import { requestGraphInsert } from "$lib/graphInsert.svelte";
   import ConfirmModal from "$lib/ConfirmModal.svelte";
   import PixelMapPanel from "$lib/PixelMapPanel.svelte";
+  import { attachCopyOnModifierClick } from "$lib/plotlyCopy";
 
   const LS_LAYERS    = "widma_layers";
   const LS_NORM      = "widma_norm";
@@ -455,8 +456,17 @@
     Plotly.react(plotDiv, traces, layout, config).then(() => {
       // Wymuś resize przy pierwszym renderze (Plotly nie zna rozmiaru kontenera przed mount)
       Plotly.Plots.resize(plotDiv!);
+      attachCopyOnModifierClick(plotDiv, flashCopyStatus);
     });
   });
+
+  let copyStatus = $state("");
+  let copyStatusTimer: ReturnType<typeof setTimeout> | null = null;
+  function flashCopyStatus(text: string) {
+    copyStatus = `skopiowano: ${text}`;
+    if (copyStatusTimer) clearTimeout(copyStatusTimer);
+    copyStatusTimer = setTimeout(() => { copyStatus = ""; }, 1500);
+  }
 
   // ResizeObserver — Plotly reaguje na zmianę rozmiaru kontenera
   $effect(() => {
@@ -664,6 +674,9 @@
         <div class="plot-loading">
           <span class="loading-dot">●</span> Wczytuję widmo…
         </div>
+      {/if}
+      {#if copyStatus}
+        <div class="copy-toast">{copyStatus}</div>
       {/if}
     {/if}
   </div>
@@ -923,6 +936,19 @@
     flex: 1;
     min-height: 0;
     width: 100%;
+  }
+
+  .copy-toast {
+    position: absolute;
+    bottom: 6px;
+    right: 10px;
+    background: rgba(255,201,81,0.15);
+    border: 1px solid rgba(255,201,81,0.4);
+    color: #ffc951;
+    font-size: 0.68rem;
+    padding: 2px 7px;
+    border-radius: 6px;
+    pointer-events: none;
   }
 
   .plot-loading {

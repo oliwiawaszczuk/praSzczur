@@ -240,8 +240,13 @@
   }
 
   async function handlePasteImage(e: ClipboardEvent) {
-    const tag = document.activeElement?.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA") return;
+    // Blokujemy wklejanie TYLKO podczas faktycznej edycji tekstu na płótnie
+    // (patrz BoardCanvas.svelte:isTextEditing) — blankietowe sprawdzanie
+    // document.activeElement.tagName fałszywie blokowało wklejanie na stałe,
+    // gdy fokus zostawał w jakimkolwiek polu BoardSidebar (np. po edycji
+    // przezroczystości obiektu), bo Konva <canvas> nie przejmuje fokusu z
+    // powrotem samo z siebie po kliknięciu w płótno.
+    if (canvasApi?.isTextEditing?.()) return;
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of items) {

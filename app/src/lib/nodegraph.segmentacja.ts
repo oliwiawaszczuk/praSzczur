@@ -22,6 +22,23 @@ export const MERGE_MODE_LABELS: Record<string, string> = {
 };
 export const MERGE_MODE_LIST: string[] = ["sum", "difference"];
 
+/** Wybór algorytmu klastrowania dla node'a "Segmentacja" (mapa) — cztery
+ * najczęściej używane w literaturze MSI (k-means, hierarchiczne, GMM,
+ * DBSCAN — patrz np. przegląd metod nienadzorowanych dla MSI,
+ * nature.com/articles/s41598-022-19365-4) plus prosta kwantylowa jako
+ * szybka, deterministyczna alternatywa. */
+export const KMEANS_ALGORITHM_LABELS: Record<string, string> = {
+  kmeans: "k-means (minimalizacja wariancji)",
+  hierarchical: "hierarchiczne (aglomeracyjne)",
+  gmm: "GMM (mieszanina Gaussów)",
+  dbscan: "DBSCAN (gęstościowe)",
+  quantile: "kwantyle (równe liczebności grup)",
+};
+export const KMEANS_ALGORITHM_LIST: string[] = ["kmeans", "hierarchical", "gmm", "dbscan", "quantile"];
+/** DBSCAN nie bierze `k` (liczba grup wynika z gęstości danych) — ma własne
+ * parametry `eps`/`minPts`. Reszta algorytmów używa wspólnego `k`. */
+export const DBSCAN_ALGORITHMS = new Set(["dbscan"]);
+
 /** Kategoryczna, dobrze rozróżnialna paleta (Tableau-like) — cykliczna dla k >
  * 12 (raczej teoretyczny przypadek, k jest ograniczone do 10). */
 export const SEG_PALETTE: string[] = [
@@ -92,12 +109,15 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-/** Uruchamia k-means na `channels` (lista map, po jednej na kanał cechy) i
- * zwraca mapę etykiet 0..k-1 + legendę. `validMask` (0/1, opcjonalna) —
- * piksele tła są CAŁKOWICIE wykluczone z klasteryzacji i dostają etykietę
- * sentinel -1. Patrz oryginalny opis w dawnym segnodes.ts. */
-export function runKmeans(
-  channels: number[][][], k: number, validMask?: number[][], restarts = 5,
+type ClusterOnceFn = (points: number[][], k: number, rng: () => number) => { labels: number[]; centers: number[][]; inertia: number };
+
+/** Wspólny szkielet k-means/k-medoids: ekstrakcja punktów z `channels`
+ * (wykluczając tło przez `validMask`), kilka restartów z różnym seedem (bierzemy
+ * wynik o najmniejszej inercji), przemapowanie etykiet tak, żeby klasa 0 miała
+ * najniższą średnią (stabilna, powtarzalna kolejność kolorów), złożenie
+ * z powrotem w mapę `labels[y][x]` + legenda. */
+function runClustering(
+  channels: number[][][], k: number, onceFn: ClusterOnceFn, validMask?: number[][], restarts = 5,
 ): { labels: number[][]; legend: { label: number; count: number }[] } {
   const h = channels[0].length;
   const w = channels[0][0].length;
@@ -117,7 +137,7 @@ export function runKmeans(
   let best: { labels: number[]; centers: number[][]; inertia: number } | null = null;
   for (let r = 0; r < restarts; r++) {
     const rng = mulberry32(12345 + r * 7919);
-    const res = kmeansOnce(points, k, rng);
+    const res = onceFn(points, k, rng);
     if (!best || res.inertia < best.inertia) best = res;
   }
 
@@ -132,6 +152,461 @@ export function runKmeans(
   for (let i = 0; i < points.length; i++) {
     const [y, x] = pointCoords[i];
     const lbl = remap[best!.labels[i]];
+    labels[y][x] = lbl;
+    counts[lbl]++;
+  }
+  return { labels, legend: counts.map((count, label) => ({ label, count })) };
+}
+
+/** Uruchamia k-means na `channels` (lista map, po jednej na kanał cechy) i
+ * zwraca mapę etykiet 0..k-1 + legendę. `validMask` (0/1, opcjonalna) —
+ * piksele tła są CAŁKOWICIE wykluczone z klasteryzacji i dostają etykietę
+ * sentinel -1. Patrz oryginalny opis w dawnym segnodes.ts. */
+export function runKmeans(
+  channels: number[][][], k: number, validMask?: number[][], restarts = 5,
+): { labels: number[][]; legend: { label: number; count: number }[] } {
+  return runClustering(channels, k, kmeansOnce, validMask, restarts);
+}
+
+/** Segmentacja kwantylowa — ZAMIAST minimalizacji wariancji (jak k-means),
+ * dzieli piksele na k grup o (prawie) RÓWNEJ LICZEBNOŚCI, posortowanych wg
+ * skalarnego wyniku (suma kanałów wejściowych). Dla typowych, skośnych
+ * histogramów intensywności MSI daje wyraźnie INNY podział niż k-means (stąd
+ * sensowna druga opcja w dropboxie — wcześniejsza wersja, k-medoids, dawała
+ * praktycznie te same granice co k-means, bo medoid ≈ średnia przy zwartych
+ * klastrach). Deterministyczna, bez restartów/losowości — sortowanie O(N log N). */
+export function runQuantile(
+  channels: number[][][], k: number, validMask?: number[][],
+): { labels: number[][]; legend: { label: number; count: number }[] } {
+  const h = channels[0].length;
+  const w = channels[0][0].length;
+  const scores: number[] = [];
+  const pointCoords: Array<[number, number]> = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (validMask && validMask[y][x] === 0) continue;
+      let score = 0;
+      for (const ch of channels) score += ch[y][x];
+      scores.push(score);
+      pointCoords.push([y, x]);
+    }
+  }
+
+  const labels: number[][] = Array.from({ length: h }, () => new Array(w).fill(-1));
+  if (scores.length === 0) return { labels, legend: [] };
+
+  const order = scores.map((_, i) => i).sort((a, b) => scores[a] - scores[b]);
+  const n = order.length;
+  const counts = new Array(k).fill(0);
+  for (let rank = 0; rank < n; rank++) {
+    const label = Math.min(k - 1, Math.floor((rank * k) / n));
+    const [y, x] = pointCoords[order[rank]];
+    labels[y][x] = label;
+    counts[label]++;
+  }
+  return { labels, legend: counts.map((count, label) => ({ label, count })) };
+}
+
+/** Klastrowanie hierarchiczne (aglomeracyjne, linkage="average", ważone
+ * liczebnością) — ZAMIAST iteracyjnego dopasowania do centroidów (k-means),
+ * zaczyna od wielu małych grup i łączy najbliższe pary, aż zostanie
+ * dokładnie k grup. Pełne O(n³) aglomeracyjne łączenie na dziesiątkach
+ * tysięcy pikseli byłoby za wolne, więc dane są najpierw ZGRUBIANE do co
+ * najwyżej `COARSEN_M` mikroklastrów przez szybki k-means — właściwe
+ * łączenie najbliższych par dzieje się już tylko NA NICH (O(M³), trywialne
+ * dla M≈150), a każdy piksel dziedziczy finalną etykietę swojego
+ * mikroklastra. */
+const COARSEN_M = 150;
+
+export function runHierarchical(
+  channels: number[][][], k: number, validMask?: number[][],
+): { labels: number[][]; legend: { label: number; count: number }[] } {
+  const h = channels[0].length;
+  const w = channels[0][0].length;
+  const points: number[][] = [];
+  const pointCoords: Array<[number, number]> = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (validMask && validMask[y][x] === 0) continue;
+      points.push(channels.map((ch) => ch[y][x]));
+      pointCoords.push([y, x]);
+    }
+  }
+  const labels: number[][] = Array.from({ length: h }, () => new Array(w).fill(-1));
+  if (points.length === 0) return { labels, legend: [] };
+  const dim = points[0].length;
+  const kEff = Math.max(1, Math.min(k, points.length));
+
+  // Krok 1: zgrubienie do mikroklastrów (pomijane, gdy danych jest mało).
+  let microOf: number[];
+  let centers: number[][];
+  let weights: number[];
+  if (points.length <= COARSEN_M) {
+    microOf = points.map((_, i) => i);
+    centers = points.map((p) => [...p]);
+    weights = points.map(() => 1);
+  } else {
+    const rng = mulberry32(555);
+    const res = kmeansOnce(points, COARSEN_M, rng, 25);
+    microOf = res.labels;
+    centers = Array.from({ length: COARSEN_M }, () => new Array(dim).fill(0));
+    weights = new Array(COARSEN_M).fill(0);
+    for (let i = 0; i < points.length; i++) {
+      const m = microOf[i];
+      weights[m]++;
+      for (let d = 0; d < dim; d++) centers[m][d] += points[i][d];
+    }
+    for (let m = 0; m < COARSEN_M; m++) {
+      if (weights[m] > 0) centers[m] = centers[m].map((s) => s / weights[m]);
+    }
+  }
+
+  // Krok 2: aglomeracyjne łączenie najbliższych par (average linkage, ważone).
+  const microIds = centers.map((_, i) => i).filter((i) => weights[i] > 0);
+  const mergeOf = new Map<number, number>();
+  microIds.forEach((id) => mergeOf.set(id, id));
+  const clusterCentroid = new Map<number, { centroid: number[]; weight: number }>();
+  microIds.forEach((id) => clusterCentroid.set(id, { centroid: centers[id], weight: weights[id] }));
+
+  let clusters = [...clusterCentroid.keys()];
+  while (clusters.length > kEff) {
+    let bi = 0, bj = 1, bd = Infinity;
+    for (let i = 0; i < clusters.length; i++) {
+      for (let j = i + 1; j < clusters.length; j++) {
+        const d = dist2(clusterCentroid.get(clusters[i])!.centroid, clusterCentroid.get(clusters[j])!.centroid);
+        if (d < bd) { bd = d; bi = i; bj = j; }
+      }
+    }
+    const a = clusterCentroid.get(clusters[bi])!;
+    const b = clusterCentroid.get(clusters[bj])!;
+    const totalW = a.weight + b.weight;
+    const merged = a.centroid.map((v, d) => (v * a.weight + b.centroid[d] * b.weight) / totalW);
+    const keepId = clusters[bi];
+    const dropId = clusters[bj];
+    clusterCentroid.set(keepId, { centroid: merged, weight: totalW });
+    clusterCentroid.delete(dropId);
+    for (const [microId, curClusterId] of mergeOf) {
+      if (curClusterId === dropId) mergeOf.set(microId, keepId);
+    }
+    clusters = [...clusterCentroid.keys()];
+  }
+
+  // Finalne etykiety 0..kEff-1 wg rosnącej średniej (ta sama konwencja
+  // "kolor = ranga wartości" co w pozostałych algorytmach).
+  const order = clusters
+    .map((id) => {
+      const c = clusterCentroid.get(id)!.centroid;
+      return { id, mean: c.reduce((a, b) => a + b, 0) / c.length };
+    })
+    .sort((a, b) => a.mean - b.mean)
+    .map((o) => o.id);
+  const remap = new Map<number, number>();
+  order.forEach((id, idx) => remap.set(id, idx));
+
+  const counts = new Array(order.length).fill(0);
+  for (let i = 0; i < points.length; i++) {
+    const microId = points.length <= COARSEN_M ? i : microOf[i];
+    const clusterId = mergeOf.get(microId)!;
+    const lbl = remap.get(clusterId)!;
+    const [y, x] = pointCoords[i];
+    labels[y][x] = lbl;
+    counts[lbl]++;
+  }
+  return { labels, legend: counts.map((count, label) => ({ label, count })) };
+}
+
+/** Gaussian Mixture Model (EM, diagonalna macierz kowariancji per klaster) —
+ * w przeciwieństwie do k-means (sferyczne, jednakowej "wielkości" skupiska)
+ * dopasowuje każdemu klastrowi WŁASNĄ wariancję per kanał, więc lepiej
+ * radzi sobie z klastrami o różnym rozrzucie — wg przeglądu metod dla MSI
+ * (nature.com/articles/s41598-022-19365-4) GMM dawało najlepsze wyniki
+ * spośród porównywanych metod nienadzorowanych. Inicjalizacja jak w
+ * k-means (k-means++), kilka restartów (bierzemy najwyższe
+ * log-likelihood), twarde przypisanie do klasy o najwyższym
+ * prawdopodobieństwie post-hoc — ta appka zawsze przechowuje pojedynczą
+ * etykietę per piksel, nie rozkład prawdopodobieństwa. */
+function gmmOnce(points: number[][], k: number, rng: () => number, maxIter: number): { labels: number[]; resp: number[][]; logLik: number } {
+  const dim = points[0].length;
+  const n = points.length;
+  let means = kmeansPlusPlusInit(points, k, rng).map((c) => [...c]);
+  let variances: number[][] = Array.from({ length: k }, () => new Array(dim).fill(1));
+  {
+    const globalMean = new Array(dim).fill(0);
+    for (const p of points) for (let d = 0; d < dim; d++) globalMean[d] += p[d] / n;
+    const globalVar = new Array(dim).fill(0);
+    for (const p of points) for (let d = 0; d < dim; d++) globalVar[d] += (p[d] - globalMean[d]) ** 2 / n;
+    for (let c = 0; c < k; c++) variances[c] = globalVar.map((v) => Math.max(v, 1e-6));
+  }
+  let weights = new Array(k).fill(1 / k);
+
+  const EPS_VAR = 1e-6;
+  function gaussLogPdf(p: number[], mean: number[], variance: number[]): number {
+    let s = 0;
+    for (let d = 0; d < dim; d++) {
+      const v = Math.max(variance[d], EPS_VAR);
+      s += -0.5 * Math.log(2 * Math.PI * v) - ((p[d] - mean[d]) ** 2) / (2 * v);
+    }
+    return s;
+  }
+
+  const resp: number[][] = Array.from({ length: n }, () => new Array(k).fill(0));
+  let logLik = -Infinity;
+  for (let iter = 0; iter < maxIter; iter++) {
+    let newLogLik = 0;
+    for (let i = 0; i < n; i++) {
+      const logProbs = new Array(k);
+      let maxLog = -Infinity;
+      for (let c = 0; c < k; c++) {
+        logProbs[c] = Math.log(Math.max(weights[c], 1e-12)) + gaussLogPdf(points[i], means[c], variances[c]);
+        if (logProbs[c] > maxLog) maxLog = logProbs[c];
+      }
+      let sumExp = 0;
+      for (let c = 0; c < k; c++) sumExp += Math.exp(logProbs[c] - maxLog);
+      const logSumExp = maxLog + Math.log(sumExp);
+      newLogLik += logSumExp;
+      for (let c = 0; c < k; c++) resp[i][c] = Math.exp(logProbs[c] - logSumExp);
+    }
+    const nk = new Array(k).fill(0);
+    for (let i = 0; i < n; i++) for (let c = 0; c < k; c++) nk[c] += resp[i][c];
+    const newMeans = Array.from({ length: k }, () => new Array(dim).fill(0));
+    for (let i = 0; i < n; i++) for (let c = 0; c < k; c++) for (let d = 0; d < dim; d++) newMeans[c][d] += resp[i][c] * points[i][d];
+    for (let c = 0; c < k; c++) if (nk[c] > 1e-9) for (let d = 0; d < dim; d++) newMeans[c][d] /= nk[c];
+    const newVariances = Array.from({ length: k }, () => new Array(dim).fill(0));
+    for (let i = 0; i < n; i++) for (let c = 0; c < k; c++) for (let d = 0; d < dim; d++) newVariances[c][d] += resp[i][c] * (points[i][d] - newMeans[c][d]) ** 2;
+    for (let c = 0; c < k; c++) if (nk[c] > 1e-9) for (let d = 0; d < dim; d++) newVariances[c][d] = Math.max(newVariances[c][d] / nk[c], EPS_VAR);
+
+    means = newMeans.map((m, c) => (nk[c] > 1e-9 ? m : means[c]));
+    variances = variances.map((v, c) => (nk[c] > 1e-9 ? newVariances[c] : v));
+    weights = nk.map((v) => Math.max(v / n, 1e-6));
+
+    if (iter > 0 && Math.abs(newLogLik - logLik) < 1e-4 * Math.abs(logLik || 1)) { logLik = newLogLik; break; }
+    logLik = newLogLik;
+  }
+
+  const labels = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    let best = 0, bestP = -Infinity;
+    for (let c = 0; c < k; c++) if (resp[i][c] > bestP) { bestP = resp[i][c]; best = c; }
+    labels[i] = best;
+  }
+  return { labels, resp, logLik };
+}
+
+export function runGMM(
+  channels: number[][][], k: number, validMask?: number[][], restarts = 3,
+): { labels: number[][]; legend: { label: number; count: number }[] } {
+  const h = channels[0].length;
+  const w = channels[0][0].length;
+  const points: number[][] = [];
+  const pointCoords: Array<[number, number]> = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (validMask && validMask[y][x] === 0) continue;
+      points.push(channels.map((ch) => ch[y][x]));
+      pointCoords.push([y, x]);
+    }
+  }
+  const labels: number[][] = Array.from({ length: h }, () => new Array(w).fill(-1));
+  if (points.length === 0) return { labels, legend: [] };
+  const kEff = Math.max(1, Math.min(k, points.length));
+
+  let best: { labels: number[]; logLik: number } | null = null;
+  for (let r = 0; r < restarts; r++) {
+    const rng = mulberry32(99999 + r * 613);
+    const res = gmmOnce(points, kEff, rng, 30);
+    if (!best || res.logLik > best.logLik) best = res;
+  }
+
+  const dim = points[0].length;
+  const sums = Array.from({ length: kEff }, () => new Array(dim).fill(0));
+  const rawCounts = new Array(kEff).fill(0);
+  for (let i = 0; i < points.length; i++) {
+    rawCounts[best!.labels[i]]++;
+    for (let d = 0; d < dim; d++) sums[best!.labels[i]][d] += points[i][d];
+  }
+  const order = sums
+    .map((s, i) => ({ i, mean: rawCounts[i] > 0 ? s.reduce((a, b) => a + b, 0) / (dim * rawCounts[i]) : 0 }))
+    .sort((a, b) => a.mean - b.mean)
+    .map((o) => o.i);
+  const remap = new Array(kEff);
+  order.forEach((origIdx, newIdx) => { remap[origIdx] = newIdx; });
+
+  const counts = new Array(kEff).fill(0);
+  for (let i = 0; i < points.length; i++) {
+    const [y, x] = pointCoords[i];
+    const lbl = remap[best!.labels[i]];
+    labels[y][x] = lbl;
+    counts[lbl]++;
+  }
+  return { labels, legend: counts.map((count, label) => ({ label, count })) };
+}
+
+/** 1D DBSCAN, DOKŁADNY (nie przybliżony) i O(n log n) — dla pojedynczego
+ * kanału (najczęstszy przypadek: jedna podłączona mapa) eps-sąsiedztwo
+ * punktu w POSORTOWANEJ tablicy to zawsze CIĄGŁY przedział (bo odległość =
+ * |różnica wartości|), więc dwuwskaźnikowym przesuwnym oknem liczymy w O(n)
+ * zasięg [lo,hi] KAŻDEGO punktu zamiast porównywać go z każdym innym. Core
+ * points (zasięg ≥ minPts) łączone są w klastry przez scalanie nachodzących
+ * na siebie przedziałów (jeden przebieg po posortowanych punktach); punkty
+ * brzegowe (non-core) szukają najbliższego core punktu WYŁĄCZNIE w swoim
+ * (z definicji < minPts elementów) oknie — stąd ten krok jest tani mimo
+ * pozornie zagnieżdżonej pętli. Siatka haszująca (poprzednia wersja) miała
+ * degenerujący się do O(n²) przypadek, gdy duży, gęsty klaster mieścił się
+ * w jednej/dwóch sąsiadujących komórkach (typowe dla MSI — rozległe,
+ * jednorodne obszary tkanki) — przy ~44k pikseli to było ponad 8s, tu <10ms. */
+function dbscan1D(sortedValues: number[], eps: number, minPts: number): number[] {
+  const n = sortedValues.length;
+  const loIdx = new Array(n), hiIdx = new Array(n);
+  { let l = 0; for (let i = 0; i < n; i++) { while (sortedValues[i] - sortedValues[l] > eps) l++; loIdx[i] = l; } }
+  { let r = n - 1; for (let i = n - 1; i >= 0; i--) { while (sortedValues[r] - sortedValues[i] > eps) r--; hiIdx[i] = r; } }
+  const isCore = new Array(n);
+  for (let i = 0; i < n; i++) isCore[i] = (hiIdx[i] - loIdx[i] + 1) >= minPts;
+
+  const clusterOf = new Array(n).fill(-1);
+  let cid = -1, reach = -1;
+  for (let i = 0; i < n; i++) {
+    if (!isCore[i]) continue;
+    if (loIdx[i] > reach) cid++;
+    clusterOf[i] = cid;
+    reach = Math.max(reach, hiIdx[i]);
+  }
+  for (let i = 0; i < n; i++) {
+    if (isCore[i] || clusterOf[i] !== -1) continue;
+    for (let j = loIdx[i]; j <= hiIdx[i]; j++) { if (isCore[j]) { clusterOf[i] = clusterOf[j]; break; } }
+  }
+  return clusterOf;
+}
+
+/** Ogólny (wielowymiarowy) DBSCAN przez siatkę haszującą (cell size = eps) —
+ * używany tylko gdy podłączono WIĘCEJ niż jedną mapę jako kanały cech (dim >
+ * 1), gdzie dokładna sztuczka 1D się nie stosuje. Rzadszy przypadek użycia
+ * niż pojedyncza mapa, więc degenerujący się do O(n²) scenariusz gęstych,
+ * jednokomórkowych skupisk jest tu zaakceptowanym kompromisem. */
+function dbscanGridND(points: number[][], eps: number, minPts: number): number[] {
+  const dim = points[0].length;
+  const epsSq = eps * eps;
+  const grid = new Map<string, number[]>();
+  const cellKey = (cell: number[]) => cell.join(",");
+  points.forEach((p, i) => {
+    const cell = p.map((v) => Math.floor(v / eps));
+    const key = cellKey(cell);
+    const arr = grid.get(key);
+    if (arr) arr.push(i); else grid.set(key, [i]);
+  });
+
+  function neighbors(i: number): number[] {
+    const p = points[i];
+    const base = p.map((v) => Math.floor(v / eps));
+    const out: number[] = [];
+    const cur = new Array(dim).fill(0);
+    function recurse(dIdx: number) {
+      if (dIdx === dim) {
+        const arr = grid.get(cellKey(cur));
+        if (arr) for (const j of arr) if (dist2(p, points[j]) <= epsSq) out.push(j);
+        return;
+      }
+      for (const o of [-1, 0, 1]) { cur[dIdx] = base[dIdx] + o; recurse(dIdx + 1); }
+    }
+    recurse(0);
+    return out;
+  }
+
+  const visited = new Array(points.length).fill(false);
+  const clusterOf = new Array(points.length).fill(-1);
+  let nextCluster = 0;
+  for (let i = 0; i < points.length; i++) {
+    if (visited[i]) continue;
+    visited[i] = true;
+    const neigh = neighbors(i);
+    if (neigh.length < minPts) continue;
+    const cid = nextCluster++;
+    clusterOf[i] = cid;
+    const queue = [...neigh];
+    while (queue.length > 0) {
+      const j = queue.pop()!;
+      if (!visited[j]) {
+        visited[j] = true;
+        const jNeigh = neighbors(j);
+        if (jNeigh.length >= minPts) queue.push(...jNeigh.filter((x) => !visited[x]));
+      }
+      if (clusterOf[j] < 0) clusterOf[j] = cid;
+    }
+  }
+  return clusterOf;
+}
+
+/** DBSCAN (gęstościowe grupowanie) — ZAMIAST ustalonej liczby grup k,
+ * znajduje gęste skupiska automatycznie na podstawie promienia sąsiedztwa
+ * `eps` (w znormalizowanej [0,1] przestrzeni cech — każdy kanał osobno
+ * min-max, żeby parametr był przenośny między mapami o różnej skali) i
+ * minimalnej liczby sąsiadów `minPts`. Piksele nienależące do żadnego
+ * gęstego skupiska ("szum") dostają etykietę sentinel -1 — DOKŁADNIE tę
+ * samą, którą reszta kodu już traktuje jako "poza tkanką/przezroczyste"
+ * (patrz SegLabelCanvas.svelte oraz komentarz przy SegmentValue w
+ * nodegraph.ts), więc szum po prostu znika z podglądu zamiast dostawać
+ * mylący, dodatkowy kolor. */
+export function runDBSCAN(
+  channels: number[][][], eps: number, minPts: number, validMask?: number[][],
+): { labels: number[][]; legend: { label: number; count: number }[] } {
+  const h = channels[0].length;
+  const w = channels[0][0].length;
+  const rawPoints: number[][] = [];
+  const pointCoords: Array<[number, number]> = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (validMask && validMask[y][x] === 0) continue;
+      rawPoints.push(channels.map((ch) => ch[y][x]));
+      pointCoords.push([y, x]);
+    }
+  }
+  const labels: number[][] = Array.from({ length: h }, () => new Array(w).fill(-1));
+  if (rawPoints.length === 0) return { labels, legend: [] };
+
+  const dim = rawPoints[0].length;
+  const mins = new Array(dim).fill(Infinity);
+  const maxs = new Array(dim).fill(-Infinity);
+  for (const p of rawPoints) for (let d = 0; d < dim; d++) { if (p[d] < mins[d]) mins[d] = p[d]; if (p[d] > maxs[d]) maxs[d] = p[d]; }
+  const points = rawPoints.map((p) => p.map((v, d) => (maxs[d] > mins[d] ? (v - mins[d]) / (maxs[d] - mins[d]) : 0)));
+  const epsSafe = Math.max(0.001, eps);
+
+  let clusterOf: number[];
+  let nextCluster: number;
+  if (dim === 1) {
+    const order = points.map((_, i) => i).sort((a, b) => points[a][0] - points[b][0]);
+    const sortedValues = order.map((i) => points[i][0]);
+    const clusterOfSorted = dbscan1D(sortedValues, epsSafe, minPts);
+    clusterOf = new Array(points.length).fill(-1);
+    order.forEach((origIdx, sortedPos) => { clusterOf[origIdx] = clusterOfSorted[sortedPos]; });
+    nextCluster = clusterOfSorted.reduce((m, c) => Math.max(m, c + 1), 0);
+  } else {
+    clusterOf = dbscanGridND(points, epsSafe, minPts);
+    nextCluster = clusterOf.reduce((m, c) => Math.max(m, c + 1), 0);
+  }
+
+  if (nextCluster === 0) return { labels, legend: [] };
+
+  // Przemapuj etykiety klastrów wg rosnącej średniej (ta sama konwencja co w
+  // pozostałych algorytmach) — szum zostaje -1 (już domyślna wartość w `labels`).
+  const sums = Array.from({ length: nextCluster }, () => new Array(dim).fill(0));
+  const rawCounts = new Array(nextCluster).fill(0);
+  for (let i = 0; i < points.length; i++) {
+    if (clusterOf[i] < 0) continue;
+    rawCounts[clusterOf[i]]++;
+    for (let d = 0; d < dim; d++) sums[clusterOf[i]][d] += points[i][d];
+  }
+  const order = sums
+    .map((s, i) => ({ i, mean: rawCounts[i] > 0 ? s.reduce((a, b) => a + b, 0) / (dim * rawCounts[i]) : 0 }))
+    .filter((o) => rawCounts[o.i] > 0)
+    .sort((a, b) => a.mean - b.mean)
+    .map((o) => o.i);
+  const remap = new Map<number, number>();
+  order.forEach((origIdx, newIdx) => remap.set(origIdx, newIdx));
+
+  const counts = new Array(order.length).fill(0);
+  for (let i = 0; i < points.length; i++) {
+    if (clusterOf[i] < 0) continue;
+    const [y, x] = pointCoords[i];
+    const lbl = remap.get(clusterOf[i])!;
     labels[y][x] = lbl;
     counts[lbl]++;
   }
@@ -182,12 +657,18 @@ function removeIslands(data: number[][], maxSize: number, invert: boolean): numb
 const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
   {
     id: "segmentacja/kmeans",
-    label: "K-means",
-    description: "Segmentuje piksele na k grup metodą k-means na podstawie JEDNEJ podłączonej mapy m/z (intensywności). Warto najpierw znormalizować/przekształcić mapę w domenie Mapa (krzywa, zakres intensywności), żeby segmentacja lepiej rozróżniała klasy. Przeliczane ręcznie przyciskiem \"Przetwórz\".",
+    label: "Segmentacja",
+    detail: "k-means / hierarchiczne / GMM / DBSCAN / kwantyle",
+    description: "Segmentuje piksele na grupy na podstawie podłączonej mapy/map m/z (intensywności) — wybór algorytmu w dropboxie (k-means, hierarchiczne aglomeracyjne, GMM, DBSCAN, kwantyle). Warto najpierw znormalizować/przekształcić mapę w domenie Mapa (krzywa, zakres intensywności), żeby segmentacja lepiej rozróżniała klasy. Przeliczane ręcznie przyciskiem \"Przetwórz\".",
     domain: "segmentacja", stage: "przetwarzanie",
-    inputs: [{ id: "in", label: "mapa", kind: "mapa" }],
+    inputs: [{ id: "in", label: "mapa", kind: "mapa", multi: true }],
     outputs: [{ id: "out", label: "segmentacja", kind: "segmentacja" }],
-    params: [{ key: "k", label: "k (liczba grup)", min: 2, max: 10, step: 1, default: 3 }],
+    params: [
+      { key: "algorithm", label: "Algorytm", default: "kmeans", options: KMEANS_ALGORITHM_LIST },
+      { key: "k", label: "k (liczba grup)", min: 2, max: 10, step: 1, default: 3 },
+      { key: "eps", label: "eps (promień sąsiedztwa, 0–1)", min: 0.01, max: 1, step: 0.01, default: 0.1 },
+      { key: "minPts", label: "minPts (min. liczba sąsiadów)", min: 2, max: 50, step: 1, default: 4 },
+    ],
     evaluate(node, inputs): EvalOutcome {
       const results = inputs.in as MapaValue[];
       if (results.length === 0) return { ok: false, error: "podłącz przynajmniej jedną mapę" };
@@ -223,7 +704,7 @@ const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
     params: [],
     evaluate(node, inputs): EvalOutcome {
       const src = inputs.in[0] as SegmentacjaValue | undefined;
-      if (!src) return { ok: false, error: "podłącz wejście (wynik k-means)" };
+      if (!src) return { ok: false, error: "podłącz wejście (wynik segmentacji)" };
       const selected = node.selectedLabels ?? [];
       if (selected.length === 0) return { ok: false, error: "zaznacz przynajmniej jedną klasę" };
       const { width, height, labels } = src;
@@ -275,7 +756,7 @@ const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
   {
     id: "segmentacja/segments_to_segmentation",
     label: "Kolorowanie segmentów",
-    description: "Łączy wiele segmentów w jeden wynik segmentacji, nadając każdemu podłączonemu segmentowi osobną klasę/kolor (jak wynik K-means) — przydatne, żeby zobaczyć kilka niezależnie zbudowanych/przetworzonych segmentów naraz na jednej mapie klas. Działa jak warstwy — mogą na siebie nachodzić, a piksel należący do kilku podłączonych segmentów naraz dostaje klasę tego podłączonego NAJPÓŹNIEJ (niżej na liście połączeń = wyżej w stosie warstw, tak jak w Tablicy).",
+    description: "Łączy wiele segmentów w jeden wynik segmentacji, nadając każdemu podłączonemu segmentowi osobną klasę/kolor (jak wynik segmentacji) — przydatne, żeby zobaczyć kilka niezależnie zbudowanych/przetworzonych segmentów naraz na jednej mapie klas. Działa jak warstwy — mogą na siebie nachodzić, a piksel należący do kilku podłączonych segmentów naraz dostaje klasę tego podłączonego NAJPÓŹNIEJ (niżej na liście połączeń = wyżej w stosie warstw, tak jak w Tablicy).",
     domain: "segmentacja", stage: "przetwarzanie",
     inputs: [{ id: "in", label: "segmenty", kind: "segment", multi: true }],
     outputs: [{ id: "out", label: "segmentacja", kind: "segmentacja" }],

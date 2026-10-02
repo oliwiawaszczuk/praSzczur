@@ -24,6 +24,7 @@ from fastapi.responses import StreamingResponse, FileResponse
 ROOT           = Path(os.environ.get("PRASZCZUR_ROOT", Path(__file__).resolve().parents[2]))
 WORKSPACES_DIR = ROOT / "workspaces"
 BOARDS_DIR     = ROOT / "boards"
+NOTES_DIR      = ROOT / "notes"
 SRC_DIR        = ROOT / "src"
 sys.path.insert(0, str(ROOT))
 
@@ -2505,6 +2506,121 @@ def get_board_asset(bid: str, filename: str):
     if ".." in filename or not path.exists():
         raise HTTPException(404, "Brak pliku")
     return FileResponse(path)
+
+
+# ── Notatki ────────────────────────────────────────────────────────────────
+# Zakładka "Notatki" — swobodne notatki tekstowe, niezależne od workspace'ów
+# (ten sam duch co Boards/Tablica powyżej): jedna wspólna lista, osobny folder
+# na dysku (notes/).
+_NOTES_REGISTRY_FILE = NOTES_DIR / "registry.json"
+
+
+def _load_notes_registry() -> dict:
+    try:
+        if _NOTES_REGISTRY_FILE.exists():
+            return json.loads(_NOTES_REGISTRY_FILE.read_text())
+    except Exception:
+        pass
+    return {"notes": []}
+
+
+def _save_notes_registry(reg: dict) -> None:
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    _NOTES_REGISTRY_FILE.write_text(json.dumps(reg, indent=2))
+
+
+def _note_json_file(nid: str) -> Path:
+    return NOTES_DIR / f"{nid}.json"
+
+
+def _find_note(reg: dict, nid: str) -> dict | None:
+    return next((n for n in reg["notes"] if n["id"] == nid), None)
+
+
+_EMPTY_NOTE = {"text": ""}
+
+
+def _title_from_text(text: str, fallback: str) -> str:
+    first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    return first_line[:80] if first_line else fallback
+
+
+@app.get("/notes")
+def list_notes() -> dict:
+    reg = _load_notes_registry()
+    return {"notes": reg["notes"]}
+
+
+@app.post("/notes")
+def create_note(body: dict) -> dict:
+    name = (body.get("title") or "Nowa notatka").strip() or "Nowa notatka"
+    reg = _load_notes_registry()
+    nid = uuid.uuid4().hex[:12]
+    now = _now_iso()
+    n = {"id": nid, "title": name, "titleManual": False, "preview": "", "createdAt": now, "updatedAt": now}
+    reg["notes"].append(n)
+    _save_notes_registry(reg)
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    _note_json_file(nid).write_text(json.dumps(_EMPTY_NOTE))
+    return n
+
+
+@app.put("/notes/{nid}")
+def rename_note(nid: str, body: dict) -> dict:
+    reg = _load_notes_registry()
+    n = _find_note(reg, nid)
+    if not n:
+        raise HTTPException(404, f"Notatka '{nid}' nie istnieje")
+    if "title" in body and body["title"].strip():
+        n["title"] = body["title"].strip()
+        n["titleManual"] = True
+    n["updatedAt"] = _now_iso()
+    _save_notes_registry(reg)
+    return n
+
+
+@app.delete("/notes/{nid}")
+def delete_note(nid: str) -> dict:
+    reg = _load_notes_registry()
+    if not _find_note(reg, nid):
+        raise HTTPException(404, f"Notatka '{nid}' nie istnieje")
+    reg["notes"] = [n for n in reg["notes"] if n["id"] != nid]
+    _save_notes_registry(reg)
+    _note_json_file(nid).unlink(missing_ok=True)
+    return {"ok": True}
+
+
+@app.get("/notes/{nid}/data")
+def get_note(nid: str) -> dict:
+    f = _note_json_file(nid)
+    if not f.exists():
+        raise HTTPException(404, f"Notatka '{nid}' nie istnieje")
+    try:
+        return json.loads(f.read_text())
+    except Exception:
+        return dict(_EMPTY_NOTE)
+
+
+@app.put("/notes/{nid}/data")
+def save_note(nid: str, body: dict) -> dict:
+    reg = _load_notes_registry()
+    n = _find_note(reg, nid)
+    if not n:
+        raise HTTPException(404, f"Notatka '{nid}' nie istnieje")
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    text = body.get("text", "")
+    _note_json_file(nid).write_text(json.dumps({"text": text}))
+    # Tytuł śledzi pierwszą niepustą linię treści, chyba że użytkowniczka sama
+    # nadała go przez PUT /notes/{nid} (rename_note, titleManual=True).
+    if not n.get("titleManual"):
+        n["title"] = _title_from_text(text, n["title"])
+    # Podgląd dla listy w zakładce Notatki — liczony tu (nie po stronie
+    # frontu), żeby lista notatek nie musiała osobno pobierać treści każdej
+    # z nich (N+1 zapytań) tylko po to, by pokazać kilka pierwszych zdań.
+    n["preview"] = text.strip()[:300]
+    n["updatedAt"] = _now_iso()
+    _save_notes_registry(reg)
+    return {"ok": True}
 
 
 if __name__ == "__main__":

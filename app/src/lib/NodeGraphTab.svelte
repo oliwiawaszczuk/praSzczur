@@ -30,7 +30,7 @@
     type GraphTextNote,
   } from "$lib/nodegraph";
   import { COMBINE_MODE_LABELS, COMBINE_MODE_LIST, computeHistogram, type CombineModeExt } from "$lib/nodegraph.mapa";
-  import { SEG_PALETTE, runKmeans, MERGE_MODE_LABELS, MERGE_MODE_LIST } from "$lib/nodegraph.segmentacja";
+  import { SEG_PALETTE, runKmeans, runQuantile, runHierarchical, runGMM, runDBSCAN, MERGE_MODE_LABELS, MERGE_MODE_LIST, KMEANS_ALGORITHM_LABELS, KMEANS_ALGORITHM_LIST } from "$lib/nodegraph.segmentacja";
   import {
     WIDMO_COMBINE_MODE_LABELS, WIDMO_COMBINE_MODE_LIST, WIDMO_NORMALIZE_MODE_LABELS, WIDMO_NORMALIZE_MODE_LIST,
     widmoInputSignature, segmentInputSignature, maxIntensity, filterMzByIntensityBand,
@@ -78,6 +78,51 @@
   function persist() {
     if (!activeGraphId) return;
     scheduleSaveNodeGraph(activeGraphId, graph);
+    pushHistory();
+  }
+
+  // ── Historia (Ctrl+Z / Ctrl+Shift+Z) — ten sam wzorzec co Tablica.svelte
+  // (history/historyIndex/pushHistory debounced), tylko snapshoty to całe
+  // Graph (nodes/edges/notes/viewport) zamiast BoardData. Resetowana przy
+  // każdym otwarciu/przełączeniu grafu (openGraph) — historia nie przeskakuje
+  // między różnymi grafami. ──────────────────────────────────────────────
+  let history: Graph[] = [];
+  let historyIndex = -1;
+  let historyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function graphSnapshot(): Graph {
+    return JSON.parse(JSON.stringify(graph));
+  }
+
+  function pushHistory() {
+    if (historyTimer) clearTimeout(historyTimer);
+    historyTimer = setTimeout(() => {
+      history = history.slice(0, historyIndex + 1);
+      history.push(graphSnapshot());
+      if (history.length > 100) history.shift();
+      historyIndex = history.length - 1;
+    }, 400);
+  }
+
+  function applyHistorySnapshot(snap: Graph) {
+    graph = JSON.parse(JSON.stringify(snap));
+    selectedNodeIds = new Set();
+    selectedNoteIds = new Set();
+    scheduleSaveNodeGraph(activeGraphId, graph);
+  }
+
+  function undoGraph() {
+    if (historyTimer) { clearTimeout(historyTimer); historyTimer = null; }
+    if (historyIndex <= 0) return;
+    historyIndex -= 1;
+    applyHistorySnapshot(history[historyIndex]);
+  }
+
+  function redoGraph() {
+    if (historyTimer) { clearTimeout(historyTimer); historyTimer = null; }
+    if (historyIndex >= history.length - 1) return;
+    historyIndex += 1;
+    applyHistorySnapshot(history[historyIndex]);
   }
 
   async function openGraph(id: string) {
@@ -90,6 +135,9 @@
     selectedNodeIds = new Set();
     graphReady = true;
     queueFitAll();
+    if (historyTimer) { clearTimeout(historyTimer); historyTimer = null; }
+    history = [graphSnapshot()];
+    historyIndex = 0;
   }
 
   async function switchGraph(id: string) {
@@ -452,7 +500,8 @@
     } else if (node.type === "mapa/save_output") {
       h += 30 + 34 + 16;
     } else if (node.type === "segmentacja/kmeans") {
-      h += 40;
+      h += 40; // dropbox algorytmu
+      h += (node.params.algorithm as string) === "dbscan" ? 80 : 40; // eps+minPts (2 pola) albo k (1 pole)
       h += Math.max(1, inputsFor(node, "in").length) * 24 + 10;
       h += 34 + 16;
     } else if (node.type === "segmentacja/select_segments") {
@@ -561,9 +610,30 @@
   let marqueeCurScreen = $state({ x: 0, y: 0 });
 
   // ── Node dragging (pojedynczy albo cała zaznaczona grupa naraz) ───────
+  // WYDAJNOŚĆ: `graph.nodes` jest jedyną zależnością `evalMemo` (patrz wyżej)
+  // — gdyby pointermove podczas przeciągania mutował `graph.nodes[idx]` na
+  // KAŻDĄ klatkę (jak robiło to wcześniej), evalMemo przeliczałoby CAŁY graf
+  // (evaluate() każdego node'a, w tym realne operacje na pełnych mapach
+  // pikseli) przy każdym ruchu myszy — przy wielu node'ach to był główny
+  // powód laga przy przeciąganiu. Dlatego pozycja w trakcie przeciągania
+  // żyje WYŁĄCZNIE w `dragLiveOffset` (lekki, osobny `$state`, nie czytany
+  // przez evalMemo) — `graph.nodes` dostaje JEDNO zbiorcze zapisanie dopiero
+  // na pointerup (patrz effectiveNodePos/onNodeHeaderPointerUp).
   let dragNodeId = $state<string | null>(null);
   let dragStart = { x: 0, y: 0 };
   let dragGroupOrigin = new Map<string, { x: number; y: number }>();
+  let dragLiveOffset = $state<{ dx: number; dy: number } | null>(null);
+
+  /** Pozycja node'a do renderowania/portów — podczas przeciągania zwraca
+   * pozycję przesuniętą o `dragLiveOffset` (bez dotykania `graph.nodes`),
+   * dla pozostałych node'ów zwraca ich prawdziwe `x`/`y`. */
+  function effectiveNodePos(node: GraphNode): { x: number; y: number } {
+    if (dragLiveOffset) {
+      const origin = dragGroupOrigin.get(node.id);
+      if (origin) return { x: origin.x + dragLiveOffset.dx, y: origin.y + dragLiveOffset.dy };
+    }
+    return { x: node.x, y: node.y };
+  }
 
   function onNodeHeaderPointerDown(e: PointerEvent, node: GraphNode) {
     if ((e.target as HTMLElement).closest(".node-info, .node-menu-trigger")) return;
@@ -584,20 +654,50 @@
     if (dragGroupOrigin.size === 0) dragGroupOrigin.set(node.id, { x: node.x, y: node.y });
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
   }
+
+  /** Zaznaczenie BEZ przeciągania, dla kliknięć gdziekolwiek indziej na karcie
+   * node'a (nie tylko na nagłówku) — np. w tło/etykiety w `.mnode-body`, które
+   * nie są same w sobie kontrolką (te mają własny `onpointerdown` z
+   * `stopPropagation()` i tu w ogóle nie dotrą). Bez tego trzeba było trafić
+   * dokładnie w wąski pasek nagłówka, żeby zaznaczyć node pod Ctrl+C — inaczej
+   * niż w Tablicy, gdzie całe obiekty są klikalne. Zatrzymuje propagację, żeby
+   * canvas nie zaczął jednocześnie marquee-zaznaczania (patrz onCanvasPointerDown). */
+  function onNodeBodyPointerDown(e: PointerEvent, node: GraphNode) {
+    e.stopPropagation();
+    if (!e.shiftKey) selectedNoteIds = new Set();
+    if (e.shiftKey) {
+      const next = new Set(selectedNodeIds);
+      if (next.has(node.id)) next.delete(node.id); else next.add(node.id);
+      selectedNodeIds = next;
+    } else if (!selectedNodeIds.has(node.id)) {
+      selectedNodeIds = new Set([node.id]);
+    }
+  }
   function onNodeHeaderPointerMove(e: PointerEvent) {
     if (!dragNodeId) return;
     const dx = (e.clientX - dragStart.x) / viewport.zoom;
     const dy = (e.clientY - dragStart.y) / viewport.zoom;
-    for (const [id, origin] of dragGroupOrigin) {
-      const idx = graph.nodes.findIndex((n) => n.id === id);
-      if (idx === -1) continue;
-      graph.nodes[idx] = { ...graph.nodes[idx], x: origin.x + dx, y: origin.y + dy };
-    }
+    dragLiveOffset = { dx, dy };
   }
   function onNodeHeaderPointerUp() {
-    if (dragNodeId) persist();
+    if (dragNodeId) {
+      // Jeden zbiorczy zapis do graph.nodes na koniec przeciągania — patrz
+      // komentarz przy dragLiveOffset. `dragLiveOffset` może być `null`, gdy
+      // pointerdown→pointerup nastąpiło bez żadnego pointermove (zwykły
+      // klik, nie drag) — wtedy nie ma czego commitować.
+      if (dragLiveOffset) {
+        const { dx, dy } = dragLiveOffset;
+        for (const [id, origin] of dragGroupOrigin) {
+          const idx = graph.nodes.findIndex((n) => n.id === id);
+          if (idx === -1) continue;
+          graph.nodes[idx] = { ...graph.nodes[idx], x: origin.x + dx, y: origin.y + dy };
+        }
+      }
+      persist();
+    }
     dragNodeId = null;
     dragGroupOrigin = new Map();
+    dragLiveOffset = null;
     if (dragNoteId) persist();
     dragNoteId = null;
   }
@@ -731,7 +831,8 @@
     const def = NODE_TYPES[node.type];
     const sockets = direction === "in" ? def?.inputs ?? [] : def?.outputs ?? [];
     const idx = Math.max(0, sockets.findIndex((s) => s.id === socketId));
-    return { x: node.x + (direction === "in" ? 0 : nodeWidth(node)), y: node.y + HEADER_H / 2 + idx * ROW_H };
+    const pos = effectiveNodePos(node);
+    return { x: pos.x + (direction === "in" ? 0 : nodeWidth(node)), y: pos.y + HEADER_H / 2 + idx * ROW_H };
   }
 
   function onPortPointerDown(e: PointerEvent, node: GraphNode, direction: "in" | "out", socket: PortSocketDef) {
@@ -846,13 +947,69 @@
     persist();
   }
 
+  /** Przestawia krawędzie wejściowe node'a (gniazdo `socketId`) z pozycji
+   * `fromIndex` na `toIndex` — WŚRÓD krawędzi wchodzących do tego gniazda
+   * (indeksy liczone jak w `inputsFor`), fizycznie przestawiając je wewnątrz
+   * `graph.edges` (kolejność tam = kolejność warstw w kompozycie, patrz
+   * "segmentacja/segments_to_segmentation" i evaluateInner w nodegraph.ts).
+   * Inne krawędzie w tablicy (nienależące do tego gniazda) zostają na swoich
+   * miejscach względem siebie. */
+  function reorderInputEdge(node: GraphNode, socketId: string, fromIndex: number, toIndex: number) {
+    if (fromIndex === toIndex) return;
+    const ownEdges = inputsFor(node, socketId);
+    if (fromIndex < 0 || fromIndex >= ownEdges.length || toIndex < 0 || toIndex >= ownEdges.length) return;
+    const reordered = [...ownEdges];
+    const [moved] = reordered.splice(fromIndex, 1);
+    reordered.splice(toIndex, 0, moved);
+    const ownIds = new Set(ownEdges.map((e) => e.id));
+    let cursor = 0;
+    graph.edges = graph.edges.map((e) => (ownIds.has(e.id) ? reordered[cursor++] : e));
+    persist();
+  }
+
+  function toggleHiddenSegmentEdge(node: GraphNode, edgeId: string) {
+    const idx = graph.nodes.findIndex((n) => n.id === node.id);
+    if (idx === -1) return;
+    const cur = graph.nodes[idx].hiddenSegmentEdges ?? [];
+    const next = cur.includes(edgeId) ? cur.filter((id) => id !== edgeId) : [...cur, edgeId];
+    graph.nodes[idx] = { ...graph.nodes[idx], hiddenSegmentEdges: next };
+    persist();
+  }
+
+  // ── Drag reorder dla listy segmentów "Kolorowanie segmentów" ───────────
+  let segDrag = $state<{ nodeId: string; socketId: string; fromIndex: number; overIndex: number } | null>(null);
+
+  function segDragStart(node: GraphNode, socketId: string, index: number) {
+    segDrag = { nodeId: node.id, socketId, fromIndex: index, overIndex: index };
+  }
+  function segDragOverItem(index: number) {
+    if (!segDrag) return;
+    segDrag = { ...segDrag, overIndex: index };
+  }
+  function segDragEnd(node: GraphNode) {
+    if (!segDrag || segDrag.nodeId !== node.id) { segDrag = null; return; }
+    const { socketId, fromIndex, overIndex } = segDrag;
+    segDrag = null;
+    reorderInputEdge(node, socketId, fromIndex, overIndex);
+  }
+
   function edgePath(from: { x: number; y: number }, to: { x: number; y: number }): string {
     const dx = Math.max(40, Math.abs(to.x - from.x) * 0.5);
     return `M ${from.x} ${from.y} C ${from.x + dx} ${from.y}, ${to.x - dx} ${to.y}, ${to.x} ${to.y}`;
   }
 
+  // O(1) zamiast O(N) .find() — czytane dla KAŻDEJ krawędzi przy KAŻDYM
+  // renderze (w tym na każdej klatce przeciągania node'a, patrz
+  // effectiveNodePos/dragLiveOffset wyżej), więc przy wielu node'ach/
+  // krawędziach .find() robiło z tego O(N·E) per klatka — ten sam powód co
+  // edgesByTarget poniżej.
+  let nodeById = $derived.by(() => {
+    const m = new Map<string, GraphNode>();
+    for (const n of graph.nodes) m.set(n.id, n);
+    return m;
+  });
   function nodePos(id: string): GraphNode | undefined {
-    return graph.nodes.find((n) => n.id === id);
+    return nodeById.get(id);
   }
 
   // Wyprowadzone z PORT_KIND_COLORS (zamiast osobno wpisanych rgba) — żeby
@@ -1150,8 +1307,10 @@
   }
 
   function onWindowKeydown(e: KeyboardEvent) {
-    const target = e.target as HTMLElement | null;
-    const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA");
+    // document.activeElement (nie e.target) — ten sam sposób co Tablica.svelte,
+    // dla spójności zachowania między oboma edytorami.
+    const tag = document.activeElement?.tagName;
+    const typing = tag === "INPUT" || tag === "TEXTAREA";
     if (e.key === "Escape") closeMenus();
     if (!typing && (e.key === "f" || e.key === "F")) { e.preventDefault(); fitAll(); }
     if (!typing && visible && e.key === " " && !paletteOpen) {
@@ -1167,6 +1326,9 @@
       if (k === "c") { e.preventDefault(); copySelection(); }
       else if (k === "x") { e.preventDefault(); cutSelection(); }
       else if (k === "v") { e.preventDefault(); pasteClipboard(); }
+      else if (k === "z" && e.shiftKey) { e.preventDefault(); redoGraph(); }
+      else if (k === "z") { e.preventDefault(); undoGraph(); }
+      else if (k === "y") { e.preventDefault(); redoGraph(); }
     }
   }
 
@@ -1314,7 +1476,11 @@
     if (n.type === "mapa/curve") return `Krzywa intensywności (${n.curvePoints?.length ?? 2} pkt)`;
     if (n.type === "mapa/combine") return `Łączenie (${COMBINE_MODE_LABELS[(n.params.mode as CombineModeExt) ?? "mean"]})`;
     if (n.type === "widmo/combine") return `Łączenie (${WIDMO_COMBINE_MODE_LABELS[(n.params.mode as keyof typeof WIDMO_COMBINE_MODE_LABELS) ?? "sum"]})`;
-    if (n.type === "segmentacja/kmeans") return `K-means (k=${n.params.k ?? 3})`;
+    if (n.type === "segmentacja/kmeans") {
+      const algo = (n.params.algorithm as string) ?? "kmeans";
+      const algoLabel = KMEANS_ALGORITHM_LABELS[algo] ?? algo;
+      return algo === "dbscan" ? `Segmentacja (${algoLabel})` : `Segmentacja (${algoLabel}, k=${n.params.k ?? 3})`;
+    }
     return NODE_TYPES[n.type]?.label ?? n.type;
   }
 
@@ -1342,21 +1508,33 @@
       return;
     }
     const k = Math.round(Number(node.params.k ?? 3));
+    const eps = Number(node.params.eps ?? 0.1);
+    const minPts = Math.round(Number(node.params.minPts ?? 4));
+    const algorithm = (node.params.algorithm as string) ?? "kmeans";
     const validMask = combineMasks(inputs.map((r) => r.mask), height, width);
     runningNodeId = node.id;
     kmeansStatus = { ...kmeansStatus, [node.id]: "" };
     setTimeout(() => {
       try {
-        const { labels, legend } = runKmeans(inputs.map((r) => r.data), k, validMask);
+        const channels = inputs.map((r) => r.data);
+        const { labels, legend } =
+          algorithm === "dbscan" ? runDBSCAN(channels, eps, minPts, validMask) :
+          algorithm === "hierarchical" ? runHierarchical(channels, k, validMask) :
+          algorithm === "gmm" ? runGMM(channels, k, validMask) :
+          algorithm === "quantile" ? runQuantile(channels, k, validMask) :
+          runKmeans(channels, k, validMask);
+        // Rzeczywista liczba grup (dla DBSCAN to wynik emergentny, nie `k`
+        // wejściowe — DBSCAN w ogóle nie bierze `k`).
+        const actualK = legend.length;
         const idx = graph.nodes.findIndex((n) => n.id === node.id);
         if (idx !== -1) {
           graph.nodes[idx] = {
             ...graph.nodes[idx],
-            kmeansResult: { k, width, height, tissueId, tissueLabel, labels, legend, mask: validMask, sources: dedupeMapSources(inputs.flatMap((r) => r.sources)) },
+            kmeansResult: { k: actualK, width, height, tissueId, tissueLabel, labels, legend, mask: validMask, sources: dedupeMapSources(inputs.flatMap((r) => r.sources)) },
           };
           persist();
         }
-        kmeansStatus = { ...kmeansStatus, [node.id]: `gotowe — k=${k}` };
+        kmeansStatus = { ...kmeansStatus, [node.id]: actualK === 0 ? "brak gęstych skupisk — zwiększ eps/zmniejsz minPts" : `gotowe — ${actualK} grup` };
       } catch (e) {
         kmeansStatus = { ...kmeansStatus, [node.id]: e instanceof Error ? e.message : String(e) };
       } finally {
@@ -1544,7 +1722,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} />
+<svelte:window onkeydown={onWindowKeydown} onpointerup={() => { if (segDrag) segDrag = null; }} />
 
 <div class="ng-layout">
 <div
@@ -1584,10 +1762,12 @@
     <!-- Nodes -->
     {#each graph.nodes as node (node.id)}
       {@const def = NODE_TYPES[node.type]}
+      {@const pos = effectiveNodePos(node)}
       {#if def}
         <div class="mnode" class:selected={selectedNodeIds.has(node.id)}
-             style="left:{node.x}px; top:{node.y}px; width:{nodeWidth(node)}px;"
+             style="left:{pos.x}px; top:{pos.y}px; width:{nodeWidth(node)}px;"
              oncontextmenu={(e) => onNodeContextMenu(e, node)}
+             onpointerdown={(e) => onNodeBodyPointerDown(e, node)}
              onpointerenter={() => (hoveredNodeId = node.id)}
              onpointerleave={() => (hoveredNodeId = null)}>
           <div class="mnode-header"
@@ -1719,37 +1899,89 @@
               {/if}
             {:else if node.type === "segmentacja/kmeans"}
               <label class="field">
-                <span class="field-head">
-                  <input type="text" inputmode="numeric" class="param-value-input"
-                         value={node.params.k ?? 3}
-                         onpointerdown={(e) => e.stopPropagation()}
-                         onchange={(e) => {
-                           const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
-                           if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params.k ?? 3); return; }
-                           setKmeansK(node, raw);
-                           (e.target as HTMLInputElement).value = String(Math.min(10, Math.max(2, Math.round(raw))));
-                         }}
-                         onkeydown={(e) => {
-                           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                           if (e.key === "Escape") {
-                             (e.target as HTMLInputElement).value = String(node.params.k ?? 3);
-                             (e.target as HTMLInputElement).blur();
-                           }
-                         }} />
-                  <span>k (liczba grup)</span>
-                </span>
-                <input type="range" min="2" max="10" step="1"
-                       value={Number(node.params.k ?? 3)}
-                       onpointerdown={(e) => e.stopPropagation()}
-                       oninput={(e) => setKmeansK(node, Number((e.target as HTMLInputElement).value))} />
+                <span>Algorytm</span>
+                <select class="ds-select" value={(node.params.algorithm as string) ?? "kmeans"}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setNodeStringParam(node, "algorithm", (e.target as HTMLSelectElement).value)}>
+                  {#each KMEANS_ALGORITHM_LIST as a}
+                    <option value={a}>{KMEANS_ALGORITHM_LABELS[a]}</option>
+                  {/each}
+                </select>
               </label>
+              {#if (node.params.algorithm as string) !== "dbscan"}
+                <label class="field">
+                  <span class="field-head">
+                    <input type="text" inputmode="numeric" class="param-value-input"
+                           value={node.params.k ?? 3}
+                           onpointerdown={(e) => e.stopPropagation()}
+                           onchange={(e) => {
+                             const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                             if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params.k ?? 3); return; }
+                             setKmeansK(node, raw);
+                             (e.target as HTMLInputElement).value = String(Math.min(10, Math.max(2, Math.round(raw))));
+                           }}
+                           onkeydown={(e) => {
+                             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                             if (e.key === "Escape") {
+                               (e.target as HTMLInputElement).value = String(node.params.k ?? 3);
+                               (e.target as HTMLInputElement).blur();
+                             }
+                           }} />
+                    <span>k (liczba grup)</span>
+                  </span>
+                  <input type="range" min="2" max="10" step="1"
+                         value={Number(node.params.k ?? 3)}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         oninput={(e) => setKmeansK(node, Number((e.target as HTMLInputElement).value))} />
+                </label>
+              {:else}
+                <label class="field">
+                  <span class="field-head">
+                    <input type="text" inputmode="decimal" class="param-value-input"
+                           value={node.params.eps ?? 0.1}
+                           onpointerdown={(e) => e.stopPropagation()}
+                           onchange={(e) => {
+                             const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                             if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params.eps ?? 0.1); return; }
+                             setNodeParamClampedFloat(node, "eps", raw, 0.01, 1);
+                           }}
+                           onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
+                    <span>eps (promień sąsiedztwa)</span>
+                  </span>
+                  <input type="range" min="0.01" max="1" step="0.01"
+                         value={Number(node.params.eps ?? 0.1)}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         oninput={(e) => setNodeParamClampedFloat(node, "eps", Number((e.target as HTMLInputElement).value), 0.01, 1)} />
+                </label>
+                <label class="field">
+                  <span class="field-head">
+                    <input type="text" inputmode="numeric" class="param-value-input"
+                           value={node.params.minPts ?? 4}
+                           onpointerdown={(e) => e.stopPropagation()}
+                           onchange={(e) => {
+                             const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                             if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params.minPts ?? 4); return; }
+                             setNodeParamClamped(node, "minPts", raw, 2, 50);
+                           }}
+                           onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
+                    <span>minPts (min. sąsiadów)</span>
+                  </span>
+                  <input type="range" min="2" max="50" step="1"
+                         value={Number(node.params.minPts ?? 4)}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         oninput={(e) => setNodeParamClamped(node, "minPts", Number((e.target as HTMLInputElement).value), 2, 50)} />
+                </label>
+              {/if}
               <div class="combine-list" onpointerdown={(e) => e.stopPropagation()}>
                 {#if inputsFor(node, "in").length === 0}
                   <div class="combine-list-empty">brak podłączonej mapy</div>
                 {:else}
-                  <div class="combine-list-item">
-                    <span class="combine-list-label">{sourceLabel(inputsFor(node, "in")[0].from)}</span>
-                  </div>
+                  {#each inputsFor(node, "in") as edge (edge.id)}
+                    <div class="combine-list-item">
+                      <span class="combine-list-label">{sourceLabel(edge.from)}</span>
+                      <button class="combine-remove" onclick={() => removeEdge(edge.id)} title="Usuń połączenie">×</button>
+                    </div>
+                  {/each}
                 {/if}
               </div>
               <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
@@ -1807,9 +2039,22 @@
                   <div class="combine-list-empty">brak podłączonych segmentów</div>
                 {:else}
                   {#each inputsFor(node, "in") as edge, i (edge.id)}
-                    <div class="combine-list-item">
+                    {@const hidden = (node.hiddenSegmentEdges ?? []).includes(edge.id)}
+                    <div class="combine-list-item seg-layer-item"
+                         class:seg-layer-dragging={segDrag?.nodeId === node.id && segDrag.fromIndex === i}
+                         class:seg-layer-dropzone={segDrag?.nodeId === node.id && segDrag.overIndex === i && segDrag.fromIndex !== i}
+                         class:seg-layer-hidden={hidden}
+                         onpointerup={() => segDragEnd(node)}
+                         onpointerenter={() => segDragOverItem(i)}>
+                      <span class="seg-drag-handle" title="Przeciągnij, aby zmienić kolejność warstw"
+                            onpointerdown={(e) => { e.stopPropagation(); segDragStart(node, "in", i); }}>⠿</span>
                       <span class="seg-swatch" style="background:{SEG_PALETTE[i % SEG_PALETTE.length]}"></span>
                       <span class="combine-list-label">{sourceLabel(edge.from)}</span>
+                      <button class="seg-visibility-toggle" class:seg-visibility-off={hidden}
+                              onclick={() => toggleHiddenSegmentEdge(node, edge.id)}
+                              title={hidden ? "Pokaż segment" : "Wygaś segment"}>
+                        {hidden ? "◌" : "●"}
+                      </button>
                       <button class="combine-remove" onclick={() => removeEdge(edge.id)} title="Usuń połączenie">×</button>
                     </div>
                   {/each}
@@ -2718,6 +2963,8 @@
     padding: 4px 6px;
   }
   .combine-list-label {
+    flex: 1;
+    min-width: 0;
     font-size: 0.62rem;
     color: rgba(255,255,255,0.7);
     white-space: nowrap;
@@ -2731,6 +2978,30 @@
     font-family: inherit; transition: color 0.15s;
   }
   .combine-remove:hover { color: #ff6b6b; }
+
+  .seg-layer-item { cursor: default; transition: border-color 0.1s, opacity 0.15s; }
+  .seg-layer-item.seg-layer-dragging { opacity: 0.45; }
+  .seg-layer-item.seg-layer-dropzone { border-color: #ffc951; }
+  .seg-layer-item.seg-layer-hidden { opacity: 0.45; }
+  .seg-layer-item.seg-layer-hidden .seg-swatch { opacity: 0.3; }
+  .seg-drag-handle {
+    flex-shrink: 0;
+    cursor: grab;
+    color: rgba(255,255,255,0.3);
+    font-size: 0.75rem;
+    line-height: 1;
+    touch-action: none;
+    user-select: none;
+  }
+  .seg-drag-handle:hover { color: rgba(255,255,255,0.6); }
+  .seg-visibility-toggle {
+    flex-shrink: 0;
+    background: none; border: none; cursor: pointer;
+    font-size: 0.6rem; line-height: 1; padding: 0 2px;
+    color: #ffc951;
+    font-family: inherit;
+  }
+  .seg-visibility-toggle.seg-visibility-off { color: rgba(255,255,255,0.25); }
 
   .seg-checklist {
     display: flex;

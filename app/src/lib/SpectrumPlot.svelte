@@ -1,6 +1,7 @@
 <script lang="ts">
   import Plotly from "plotly.js-dist-min";
   import type { PixelSpectrum } from "./api.js";
+  import { attachCopyOnModifierClick } from "./plotlyCopy";
 
   interface Props {
     spectrum: PixelSpectrum | null;
@@ -44,7 +45,7 @@
       mode: "lines" as const,
       name: label,
       line: { color, width: 1, dash: "dot" as const },
-      hoverinfo: "skip" as const,
+      hovertemplate: `<b>%{x:.4f} Da</b><br>${label}: %{y:.0f}<extra></extra>`,
     }];
     if (overlaySpectrum) {
       traces.push({
@@ -53,7 +54,7 @@
         mode: "lines" as const,
         name: overlayLabel,
         line: { color: overlayColor, width: 1.3 },
-        hoverinfo: "skip" as const,
+        hovertemplate: `<b>%{x:.4f} Da</b><br>${overlayLabel}: %{y:.0f}<extra></extra>`,
       });
     }
     return traces;
@@ -128,9 +129,18 @@
     Plotly.react(plotDiv, buildTraces(), layout, config).then(() => {
       Plotly.Plots.resize(plotDiv!);
       attachRelayoutListener();
+      attachCopyOnModifierClick(plotDiv, flashCopyStatus);
     });
     plottedFor = spectrum;
     plottedOverlayFor = overlaySpectrum;
+  }
+
+  let copyStatus = $state("");
+  let copyStatusTimer: ReturnType<typeof setTimeout> | null = null;
+  function flashCopyStatus(text: string) {
+    copyStatus = `skopiowano: ${text}`;
+    if (copyStatusTimer) clearTimeout(copyStatusTimer);
+    copyStatusTimer = setTimeout(() => { copyStatus = ""; }, 1500);
   }
 
   // Pełne przebudowanie wykresu tylko gdy zmienią się dane widma.
@@ -189,6 +199,9 @@
       <span class="spinner"></span>
       <span>Wczytuję…</span>
     </div>
+  {/if}
+  {#if copyStatus}
+    <div class="copy-toast">{copyStatus}</div>
   {/if}
 </div>
 
@@ -251,4 +264,17 @@
   }
 
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  .copy-toast {
+    position: absolute;
+    bottom: 6px;
+    right: 8px;
+    background: rgba(255,201,81,0.15);
+    border: 1px solid rgba(255,201,81,0.4);
+    color: #ffc951;
+    font-size: 0.68rem;
+    padding: 2px 7px;
+    border-radius: 6px;
+    pointer-events: none;
+  }
 </style>

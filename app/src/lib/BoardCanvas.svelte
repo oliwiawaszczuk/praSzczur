@@ -528,6 +528,16 @@
     editingTextarea?.blur();
   }
 
+  /** Czy aktualnie trwa edycja tekstu na płótnie (nakładka <textarea> ze
+   * startTextEdit) — używane przez Tablica.svelte, żeby wklejanie obrazka
+   * (Cmd/Ctrl+V) blokować TYLKO wtedy, gdy to naprawdę ta edycja, a nie
+   * przez blankietowe sprawdzanie document.activeElement (fałszywie
+   * blokowało wklejanie, gdy fokus został gdzieś w BoardSidebar po
+   * wcześniejszej edycji innego pola). */
+  export function isTextEditing(): boolean {
+    return editingTextarea !== null;
+  }
+
   function selectOnly(id: string): void {
     selectedIds = new Set([id]);
     applySelection();
@@ -594,6 +604,15 @@
     updateCursor();
 
     stage.on("mousedown touchstart", (e) => {
+      // Obrona w głąb: jeśli klik dotarł aż do Konva stage'a, to NIE mógł
+      // trafić w nakładkę <textarea> edycji tekstu (ta jest realnym DOM-em
+      // nad stagem i przechwyciłaby klik pierwsza) — każdy zabłąkany fokus
+      // (np. pole przezroczystości w BoardSidebar) jest więc bezpieczny do
+      // zdjęcia, żeby nie blokował niczego (patrz Tablica.svelte:isTextEditing).
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA") && active !== editingTextarea) {
+        active.blur();
+      }
       if (e.target !== stage) return;
       // Kliknięcie w puste miejsce mapy zawsze odznacza — niezależnie od
       // aktywnego narzędzia (nie tylko w trybie zaznaczania).

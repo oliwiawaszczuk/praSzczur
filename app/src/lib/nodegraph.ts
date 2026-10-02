@@ -181,6 +181,10 @@ export interface GraphNode {
   /** "widmo/smooth" / "widmo/baseline" / "widmo/peakpick" / "widmo/from_segment":
    * wynik ostatniego ręcznego przetworzenia (patrz WidmoProcessCache). */
   widmoProcessCache?: WidmoProcessCache;
+  /** "segmentacja/segments_to_segmentation": id krawędzi wejściowych (gniazdo
+   * "in"), których segment jest WYGASZONY — wyłączony z kompozytu warstw bez
+   * usuwania samego połączenia (patrz filtr w evaluateInner poniżej). */
+  hiddenSegmentEdges?: string[];
 }
 
 export interface GraphEdge {
@@ -372,7 +376,12 @@ function evaluateInner(
 ): EvalOutcome | Promise<EvalOutcome> {
   const inputs: Record<string, NodeValue[]> = {};
   for (const socket of def.inputs) {
-    const edges = graph.edges.filter((e) => e.to === node.id && e.toSocket === socket.id);
+    // Krawędzie wygaszone przez `hiddenSegmentEdges` (patrz "Kolorowanie
+    // segmentów") traktujemy jak nieistniejące — ukryty segment znika z
+    // kompozytu bez usuwania samego połączenia.
+    const edges = graph.edges.filter(
+      (e) => e.to === node.id && e.toSocket === socket.id && !(node.hiddenSegmentEdges?.includes(e.id)),
+    );
     const values: NodeValue[] = [];
     for (const e of edges) {
       const r = evaluateGraphNode(graph, e.from, ctx, memo, visiting);
