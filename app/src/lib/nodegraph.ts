@@ -143,6 +143,14 @@ export interface WidmoProcessCache {
   intensity: number[];
 }
 
+/** Jak WidmoProcessCache, ale dla węzłów segmentu wymagających backendu
+ * (segmentacja/active_contour, segmentacja/spectral_refine) — wynik to
+ * binarna maska 2D (kind: "segment"), nie wektor widma. */
+export interface SegMaskProcessCache {
+  inputSignature: string;
+  data: number[][];
+}
+
 export interface GraphNode {
   id: string;
   type: string;
@@ -185,6 +193,12 @@ export interface GraphNode {
    * "in"), których segment jest WYGASZONY — wyłączony z kompozytu warstw bez
    * usuwania samego połączenia (patrz filtr w evaluateInner poniżej). */
   hiddenSegmentEdges?: string[];
+  /** "segmentacja/active_contour": wynik ostatniego ręcznego dopasowania
+   * aktywnego konturu (patrz SegMaskProcessCache). */
+  morphSnakesCache?: SegMaskProcessCache;
+  /** "segmentacja/spectral_refine": wynik ostatniej ręcznej rafinacji na
+   * podstawie podobieństwa widm (patrz SegMaskProcessCache). */
+  spectralRefineCache?: SegMaskProcessCache;
 }
 
 export interface GraphEdge {

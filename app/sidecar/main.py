@@ -1611,6 +1611,112 @@ def segment_spectrum(body: dict) -> dict:
         raise HTTPException(500, str(e))
 
 
+@app.post("/segment_morphsnakes")
+def segment_morphsnakes(body: dict) -> dict:
+    """Dopasowuje aktywny kontur (morphological Chan-Vese, patrz
+    src/msi/segmentation_post.py) do zaszumionej maski segmentu — czysto
+    obrazowa operacja (bez dostępu do tkanki/widm, w odróżnieniu od
+    /segment_spectral_refine poniżej). Używane przez węzeł
+    "segmentacja/active_contour" ("Aktywny kontur")."""
+    mask_grid = body.get("mask")
+    iterations = int(body.get("iterations", 20))
+    smoothing = int(body.get("smoothing", 2))
+    if not mask_grid:
+        raise HTTPException(400, "Brak mask")
+
+    from src.msi.segmentation_post import morphological_snakes_refine
+
+    try:
+        mask_arr = np.asarray(mask_grid, dtype=float)
+        out = morphological_snakes_refine(mask_arr, iterations=iterations, smoothing=smoothing)
+        return {"mask": out.tolist()}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/segment_spectral_refine")
+def segment_spectral_refine(body: dict) -> dict:
+    """Rafinuje segment na podstawie faktycznego podobieństwa widm, nie tylko
+    geometrii maski — wyznacza widmo referencyjne "rdzenia" (erodowane
+    wnętrze segmentu) i "tła" (erodowana odwrotność, oba na faktycznej
+    siatce 2D tkanki przez scipy.ndimage.binary_erosion), ocenia KAŻDY piksel
+    tkanki podobieństwem kosinusowym do obu referencji (src.msi.
+    segmentation_post.cosine_scores) i progu przy 0 (symetryczna granica —
+    różnica dwóch podobieństw kosinusowych). Opcjonalnie iteruje
+    (self-training): nowa maska → nowe referencje → nowy wynik. Offset do
+    bezwzględnych (x,y) z `_tissues_meta`, dokładnie jak /segment_spectrum.
+    Używane przez węzeł "segmentacja/spectral_refine" ("Dopasowanie do
+    widm") — jedyny postprocessing segmentacji, który faktycznie wraca do
+    oryginalnych widm zamiast zostać czysto geometryczną operacją na masce 0/1.
+
+    Body: {tissue, dataset, mask: number[][], iterations, erosionRadius}."""
+    tissue = body.get("tissue")
+    dataset = body.get("dataset", "")
+    mask_grid = body.get("mask")
+    iterations = max(1, min(5, int(body.get("iterations", 1))))
+    erosion_radius = max(0, min(10, int(body.get("erosionRadius", 2))))
+    if not tissue or not mask_grid:
+        raise HTTPException(400, "Brak tissue/mask")
+    meta = next((m for m in _tissues_meta if m["id"] == tissue), None)
+    if not meta:
+        raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana")
+    gx0, gy0 = meta["x_min"], meta["y_min"]
+
+    from scipy.ndimage import binary_erosion
+
+    from src.msi.segmentation_post import cosine_scores
+
+    try:
+        cache = _get_dataset_cache(dataset)
+        if tissue not in cache:
+            raise HTTPException(404, f"Tkanka '{tissue}' nie jest załadowana w wybranym zestawie")
+        d = cache[tissue]
+        coords = d["coords"]
+        spectra = np.asarray(d["spectra"], dtype=float)
+
+        cur_mask = np.asarray(mask_grid, dtype=float) >= 0.5
+        h, w = cur_mask.shape
+        core_n = bg_n = 0
+        score = None
+        for _ in range(iterations):
+            if erosion_radius > 0:
+                core2d = binary_erosion(cur_mask, iterations=erosion_radius)
+                bg2d = binary_erosion(~cur_mask, iterations=erosion_radius)
+            else:
+                core2d, bg2d = cur_mask, ~cur_mask
+            if not core2d.any():
+                core2d = cur_mask
+            if not bg2d.any():
+                bg2d = ~cur_mask
+
+            core_ys, core_xs = np.where(core2d)
+            bg_ys, bg_xs = np.where(bg2d)
+            core_xy = set(zip((core_xs + gx0).tolist(), (core_ys + gy0).tolist()))
+            bg_xy = set(zip((bg_xs + gx0).tolist(), (bg_ys + gy0).tolist()))
+            sel_core = np.array([(int(cx), int(cy)) in core_xy for cx, cy in coords])
+            sel_bg = np.array([(int(cx), int(cy)) in bg_xy for cx, cy in coords])
+            if not sel_core.any() or not sel_bg.any():
+                raise HTTPException(400, "Za mało pikseli rdzenia/tła po erozji — zmniejsz promień")
+            core_ref = spectra[sel_core].mean(axis=0)
+            bg_ref = spectra[sel_bg].mean(axis=0)
+            core_n, bg_n = int(sel_core.sum()), int(sel_bg.sum())
+
+            score = cosine_scores(spectra, core_ref, bg_ref)
+
+            new_mask = np.zeros((h, w), dtype=bool)
+            for i, (cx, cy) in enumerate(coords):
+                lx, ly = int(cx) - gx0, int(cy) - gy0
+                if 0 <= ly < h and 0 <= lx < w:
+                    new_mask[ly, lx] = bool(score[i] > 0)
+            cur_mask = new_mask
+
+        return {"mask": cur_mask.astype(int).tolist(), "core_n": core_n, "bg_n": bg_n}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.get("/pixel_spectrum")
 def pixel_spectrum(tissue: str, x: int, y: int, dataset: str = "") -> dict:
     """Zwraca pełne widmo binned dla piksela (x, y) w tkance (opcjonalnie z

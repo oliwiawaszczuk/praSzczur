@@ -11,7 +11,7 @@
   import SpectrumTracesPlot from "$lib/SpectrumTracesPlot.svelte";
   import SpectrumZoomModal from "$lib/SpectrumZoomModal.svelte";
   import type { TissueImage } from "$lib/api.js";
-  import { fetchSpectrumProcess, fetchSegmentSpectrum, type SpectrumProcessMethod, type SegmentSpectrumMode } from "$lib/api";
+  import { fetchSpectrumProcess, fetchSegmentSpectrum, fetchSegmentMorphsnakes, fetchSegmentSpectralRefine, type SpectrumProcessMethod, type SegmentSpectrumMode } from "$lib/api";
   import { maxOf, combineMasks } from "$lib/tissueMerge";
   import { datasets, loadDatasets, datasetsLoaded, RAW_DATASET_ID } from "$lib/datasets.svelte";
   import {
@@ -30,7 +30,7 @@
     type GraphTextNote,
   } from "$lib/nodegraph";
   import { COMBINE_MODE_LABELS, COMBINE_MODE_LIST, computeHistogram, type CombineModeExt } from "$lib/nodegraph.mapa";
-  import { SEG_PALETTE, runKmeans, runQuantile, runHierarchical, runGMM, runDBSCAN, MERGE_MODE_LABELS, MERGE_MODE_LIST, KMEANS_ALGORITHM_LABELS, KMEANS_ALGORITHM_LIST } from "$lib/nodegraph.segmentacja";
+  import { SEG_PALETTE, runKmeans, runQuantile, runHierarchical, runGMM, runDBSCAN, MERGE_MODE_LABELS, MERGE_MODE_LIST, KMEANS_ALGORITHM_LABELS, KMEANS_ALGORITHM_LIST, MORPHOLOGY_MODE_LABELS, MORPHOLOGY_MODE_LIST, MORPHOLOGY_SHAPE_LABELS, MORPHOLOGY_SHAPE_LIST, segMaskInputSignature } from "$lib/nodegraph.segmentacja";
   import {
     WIDMO_COMBINE_MODE_LABELS, WIDMO_COMBINE_MODE_LIST, WIDMO_NORMALIZE_MODE_LABELS, WIDMO_NORMALIZE_MODE_LIST,
     widmoInputSignature, segmentInputSignature, maxIntensity, filterMzByIntensityBand,
@@ -447,6 +447,11 @@
     if (node.type === "segmentacja/merge_segments") return 240;
     if (node.type === "segmentacja/segments_to_segmentation") return 240;
     if (node.type === "segmentacja/remove_islands") return 230;
+    if (node.type === "segmentacja/local_density") return 230;
+    if (node.type === "segmentacja/morphology") return 250;
+    if (node.type === "segmentacja/keep_largest") return 230;
+    if (node.type === "segmentacja/active_contour") return 230;
+    if (node.type === "segmentacja/spectral_refine") return 250;
     if (node.type === "segmentacja/segment_source") return 240;
     if (node.type === "segmentacja/save_segment") return 230;
     if (node.type === "widmo/spectrum_source") return 240;
@@ -515,6 +520,16 @@
       h += 10 + Math.max(1, inputsFor(node, "in").length) * 24;
     } else if (node.type === "segmentacja/remove_islands") {
       h += 40 + 26; // suwak + checkbox "odwróć kolory"
+    } else if (node.type === "segmentacja/local_density") {
+      h += 40 + 40; // suwak promienia + suwak progu
+    } else if (node.type === "segmentacja/morphology") {
+      h += 40 + 40 + 40; // dropbox operacji, dropbox kształtu, suwak promienia
+    } else if (node.type === "segmentacja/keep_largest") {
+      h += 40; // suwak K
+    } else if (node.type === "segmentacja/active_contour") {
+      h += 40 * 2 + 34 + 16; // 2 suwaki (iteracje, wygładzanie) + przycisk "Przetwórz" + status
+    } else if (node.type === "segmentacja/spectral_refine") {
+      h += 40 * 2 + 34 + 34 + 16; // 2 suwaki + dropdown zestawu danych + przycisk + status
     } else if (node.type === "segmentacja/segment_source") {
       h += 30 + 22;
       if (node.expanded) h += 70;
@@ -1608,6 +1623,82 @@
   // co K-means powyżej — patrz komentarz na górze nodegraph.widmo.ts). ──────
   let widmoRunStatus = $state<Record<string, string>>({});
 
+  // ── Segmentacja: dwa węzły postprocessingu wymagające backendu (aktywny
+  // kontur, rafinacja na podstawie widm) — ten sam wzorzec "Przetwórz" +
+  // cache na węźle co K-means/Widmo powyżej. ─────────────────────────────
+  let segPostStatus = $state<Record<string, string>>({});
+
+  /** "segmentacja/active_contour" — dopasowuje aktywny kontur (morphological
+   * Chan-Vese) na backendzie (patrz /segment_morphsnakes w sidecarze) i
+   * cache'uje wynik na węźle. */
+  async function runMorphSnakesNode(node: GraphNode) {
+    const inEdges = inputsFor(node, "in");
+    if (inEdges.length === 0) { segPostStatus = { ...segPostStatus, [node.id]: "podłącz segment" }; return; }
+    const r = evalNode(inEdges[0].from);
+    if (!r.ok) { segPostStatus = { ...segPostStatus, [node.id]: r.error }; return; }
+    if (r.value.kind !== "segment") { segPostStatus = { ...segPostStatus, [node.id]: "wejście musi być segmentem" }; return; }
+    const seg = r.value;
+    const iterations = Number(node.params.iterations ?? 20);
+    const smoothing = Number(node.params.smoothing ?? 2);
+    runningNodeId = node.id;
+    segPostStatus = { ...segPostStatus, [node.id]: "" };
+    try {
+      const res = await fetchSegmentMorphsnakes(seg.data, iterations, smoothing);
+      const idx = graph.nodes.findIndex((n) => n.id === node.id);
+      if (idx !== -1) {
+        graph.nodes[idx] = {
+          ...graph.nodes[idx],
+          morphSnakesCache: {
+            inputSignature: segMaskInputSignature(seg.tissueId, seg.width, seg.height, seg.data, node.params),
+            data: res.mask,
+          },
+        };
+        persist();
+      }
+      segPostStatus = { ...segPostStatus, [node.id]: "gotowe" };
+    } catch (e) {
+      segPostStatus = { ...segPostStatus, [node.id]: e instanceof Error ? e.message : String(e) };
+    } finally {
+      runningNodeId = null;
+    }
+  }
+
+  /** "segmentacja/spectral_refine" — rafinuje segment na podstawie
+   * podobieństwa widm na backendzie (patrz /segment_spectral_refine w
+   * sidecarze) i cache'uje wynik na węźle. */
+  async function runSpectralRefineNode(node: GraphNode) {
+    const inEdges = inputsFor(node, "in");
+    if (inEdges.length === 0) { segPostStatus = { ...segPostStatus, [node.id]: "podłącz segment" }; return; }
+    const r = evalNode(inEdges[0].from);
+    if (!r.ok) { segPostStatus = { ...segPostStatus, [node.id]: r.error }; return; }
+    if (r.value.kind !== "segment") { segPostStatus = { ...segPostStatus, [node.id]: "wejście musi być segmentem" }; return; }
+    const seg = r.value;
+    const dataset = (node.params.dataset as string) ?? "";
+    const iterations = Number(node.params.iterations ?? 1);
+    const erosionRadius = Number(node.params.erosionRadius ?? 2);
+    runningNodeId = node.id;
+    segPostStatus = { ...segPostStatus, [node.id]: "" };
+    try {
+      const res = await fetchSegmentSpectralRefine(seg.tissueId, dataset, seg.data, iterations, erosionRadius);
+      const idx = graph.nodes.findIndex((n) => n.id === node.id);
+      if (idx !== -1) {
+        graph.nodes[idx] = {
+          ...graph.nodes[idx],
+          spectralRefineCache: {
+            inputSignature: segMaskInputSignature(seg.tissueId, seg.width, seg.height, seg.data, node.params),
+            data: res.mask,
+          },
+        };
+        persist();
+      }
+      segPostStatus = { ...segPostStatus, [node.id]: `gotowe — rdzeń ${res.core_n}px, tło ${res.bg_n}px` };
+    } catch (e) {
+      segPostStatus = { ...segPostStatus, [node.id]: e instanceof Error ? e.message : String(e) };
+    } finally {
+      runningNodeId = null;
+    }
+  }
+
   /** "widmo/from_segment" — agreguje widma pikseli segmentu na backendzie
    * (patrz /segment_spectrum w sidecarze) i cache'uje wynik na węźle. */
   async function runFromSegmentNode(node: GraphNode) {
@@ -2090,6 +2181,212 @@
                 <input type="checkbox" class="cb-input cb-input-sm" checked={node.invertIslandTarget ?? false} onchange={() => toggleInvertIslandTarget(node)} />
                 <span class="cb-label">Odwróć kolory (usuń wysepki poza segmentem)</span>
               </label>
+            {:else if node.type === "segmentacja/local_density"}
+              <label class="field">
+                <span class="field-head">
+                  <input type="text" inputmode="numeric" class="param-value-input"
+                         value={node.params.radius ?? 3}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         onchange={(e) => {
+                           const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                           if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params.radius ?? 3); return; }
+                           setNodeParamClamped(node, "radius", raw, 1, 15);
+                           (e.target as HTMLInputElement).value = String(Math.min(15, Math.max(1, Math.round(raw))));
+                         }}
+                         onkeydown={(e) => {
+                           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                           if (e.key === "Escape") {
+                             (e.target as HTMLInputElement).value = String(node.params.radius ?? 3);
+                             (e.target as HTMLInputElement).blur();
+                           }
+                         }} />
+                  <span>promień okna (px)</span>
+                </span>
+                <input type="range" min="1" max="15" step="1"
+                       value={Number(node.params.radius ?? 3)}
+                       onpointerdown={(e) => e.stopPropagation()}
+                       oninput={(e) => setNodeParamClamped(node, "radius", Number((e.target as HTMLInputElement).value), 1, 15)} />
+              </label>
+              <label class="field">
+                <span class="field-head">
+                  <input type="text" inputmode="decimal" class="param-value-input"
+                         value={node.params.threshold ?? 0.5}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         onchange={(e) => {
+                           const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                           if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params.threshold ?? 0.5); return; }
+                           setNodeParamClampedFloat(node, "threshold", raw, 0.05, 0.95);
+                           (e.target as HTMLInputElement).value = String(Math.min(0.95, Math.max(0.05, raw)));
+                         }}
+                         onkeydown={(e) => {
+                           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                           if (e.key === "Escape") {
+                             (e.target as HTMLInputElement).value = String(node.params.threshold ?? 0.5);
+                             (e.target as HTMLInputElement).blur();
+                           }
+                         }} />
+                  <span>próg gęstości (0–1)</span>
+                </span>
+                <input type="range" min="0.05" max="0.95" step="0.05"
+                       value={Number(node.params.threshold ?? 0.5)}
+                       onpointerdown={(e) => e.stopPropagation()}
+                       oninput={(e) => setNodeParamClampedFloat(node, "threshold", Number((e.target as HTMLInputElement).value), 0.05, 0.95)} />
+              </label>
+            {:else if node.type === "segmentacja/morphology"}
+              <label class="field">
+                <span>Operacja</span>
+                <select class="ds-select" value={(node.params.mode as string) ?? "close"}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setNodeStringParam(node, "mode", (e.target as HTMLSelectElement).value)}>
+                  {#each MORPHOLOGY_MODE_LIST as m}
+                    <option value={m}>{MORPHOLOGY_MODE_LABELS[m]}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="field">
+                <span>Kształt sąsiedztwa</span>
+                <select class="ds-select" value={(node.params.shape as string) ?? "diamond"}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setNodeStringParam(node, "shape", (e.target as HTMLSelectElement).value)}>
+                  {#each MORPHOLOGY_SHAPE_LIST as s}
+                    <option value={s}>{MORPHOLOGY_SHAPE_LABELS[s]}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="field">
+                <span class="field-head">
+                  <input type="text" inputmode="numeric" class="param-value-input"
+                         value={node.params.radius ?? 1}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         onchange={(e) => {
+                           const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                           if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params.radius ?? 1); return; }
+                           setNodeParamClamped(node, "radius", raw, 1, 10);
+                           (e.target as HTMLInputElement).value = String(Math.min(10, Math.max(1, Math.round(raw))));
+                         }}
+                         onkeydown={(e) => {
+                           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                           if (e.key === "Escape") {
+                             (e.target as HTMLInputElement).value = String(node.params.radius ?? 1);
+                             (e.target as HTMLInputElement).blur();
+                           }
+                         }} />
+                  <span>promień (px)</span>
+                </span>
+                <input type="range" min="1" max="10" step="1"
+                       value={Number(node.params.radius ?? 1)}
+                       onpointerdown={(e) => e.stopPropagation()}
+                       oninput={(e) => setNodeParamClamped(node, "radius", Number((e.target as HTMLInputElement).value), 1, 10)} />
+              </label>
+            {:else if node.type === "segmentacja/keep_largest"}
+              <label class="field">
+                <span class="field-head">
+                  <input type="text" inputmode="numeric" class="param-value-input"
+                         value={node.params.keepK ?? 1}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         onchange={(e) => {
+                           const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                           if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params.keepK ?? 1); return; }
+                           setNodeParamClamped(node, "keepK", raw, 1, 10);
+                           (e.target as HTMLInputElement).value = String(Math.min(10, Math.max(1, Math.round(raw))));
+                         }}
+                         onkeydown={(e) => {
+                           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                           if (e.key === "Escape") {
+                             (e.target as HTMLInputElement).value = String(node.params.keepK ?? 1);
+                             (e.target as HTMLInputElement).blur();
+                           }
+                         }} />
+                  <span>liczba składowych (K)</span>
+                </span>
+                <input type="range" min="1" max="10" step="1"
+                       value={Number(node.params.keepK ?? 1)}
+                       onpointerdown={(e) => e.stopPropagation()}
+                       oninput={(e) => setNodeParamClamped(node, "keepK", Number((e.target as HTMLInputElement).value), 1, 10)} />
+              </label>
+            {:else if node.type === "segmentacja/active_contour"}
+              {#each NODE_TYPES[node.type]?.params ?? [] as p (p.key)}
+                <label class="field">
+                  <span class="field-head">
+                    <input type="text" inputmode="decimal" class="param-value-input"
+                           value={node.params[p.key] ?? p.default}
+                           onpointerdown={(e) => e.stopPropagation()}
+                           onchange={(e) => {
+                             const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                             if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default); return; }
+                             setNodeParamClampedFloat(node, p.key, raw, p.min ?? raw, p.max ?? raw);
+                             (e.target as HTMLInputElement).value = String(Math.min(p.max ?? raw, Math.max(p.min ?? raw, raw)));
+                           }}
+                           onkeydown={(e) => {
+                             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                             if (e.key === "Escape") {
+                               (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default);
+                               (e.target as HTMLInputElement).blur();
+                             }
+                           }} />
+                    <span>{p.label}</span>
+                  </span>
+                  <input type="range" min={p.min} max={p.max} step={p.step}
+                         value={node.params[p.key] ?? p.default}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         oninput={(e) => setNodeParamClampedFloat(node, p.key, Number((e.target as HTMLInputElement).value), p.min ?? 0, p.max ?? 100)} />
+                </label>
+              {/each}
+              <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
+                      disabled={runningNodeId === node.id}
+                      onclick={() => runMorphSnakesNode(node)}>
+                {runningNodeId === node.id ? "Przetwarzanie…" : "Przetwórz"}
+              </button>
+              {#if segPostStatus[node.id]}
+                <span class="preview-result">{segPostStatus[node.id]}</span>
+              {/if}
+            {:else if node.type === "segmentacja/spectral_refine"}
+              {#each NODE_TYPES[node.type]?.params ?? [] as p (p.key)}
+                <label class="field">
+                  <span class="field-head">
+                    <input type="text" inputmode="decimal" class="param-value-input"
+                           value={node.params[p.key] ?? p.default}
+                           onpointerdown={(e) => e.stopPropagation()}
+                           onchange={(e) => {
+                             const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+                             if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default); return; }
+                             setNodeParamClampedFloat(node, p.key, raw, p.min ?? raw, p.max ?? raw);
+                             (e.target as HTMLInputElement).value = String(Math.min(p.max ?? raw, Math.max(p.min ?? raw, raw)));
+                           }}
+                           onkeydown={(e) => {
+                             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                             if (e.key === "Escape") {
+                               (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default);
+                               (e.target as HTMLInputElement).blur();
+                             }
+                           }} />
+                    <span>{p.label}</span>
+                  </span>
+                  <input type="range" min={p.min} max={p.max} step={p.step}
+                         value={node.params[p.key] ?? p.default}
+                         onpointerdown={(e) => e.stopPropagation()}
+                         oninput={(e) => setNodeParamClampedFloat(node, p.key, Number((e.target as HTMLInputElement).value), p.min ?? 0, p.max ?? 100)} />
+                </label>
+              {/each}
+              <label class="field">
+                <span>Zestaw danych</span>
+                <select class="ds-select" value={(node.params.dataset as string) ?? ""}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setNodeStringParam(node, "dataset", (e.target as HTMLSelectElement).value)}>
+                  <option value="">Aktywny zestaw</option>
+                  {#each datasets() as d}
+                    <option value={d.id}>{d.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
+                      disabled={runningNodeId === node.id}
+                      onclick={() => runSpectralRefineNode(node)}>
+                {runningNodeId === node.id ? "Przetwarzanie…" : "Przetwórz"}
+              </button>
+              {#if segPostStatus[node.id]}
+                <span class="preview-result">{segPostStatus[node.id]}</span>
+              {/if}
             {:else if node.type === "segmentacja/save_segment"}
               <label class="field" onpointerdown={(e) => e.stopPropagation()}>
                 <span>Nazwa nowego segmentu</span>

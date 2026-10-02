@@ -13,6 +13,20 @@
 import { combineMasks } from "./tissueMerge";
 import { registerNodeTypes, dedupeSources, type NodeTypeDef, type MapaValue, type SegmentacjaValue, type SegmentValue, type EvalOutcome } from "./nodegraph";
 
+/** Odcisk wejścia dla węzłów segmentu z ręcznym "Przetwórz" wymagających
+ * backendu (segmentacja/active_contour, segmentacja/spectral_refine) — jak
+ * widmoInputSignature w nodegraph.widmo.ts: nie porównuje maski piksel-po-
+ * pikselu, tylko tanie, ale czułe na zmianę sygnały — wymiary + liczba
+ * pikseli segmentu (suma 0/1, tania do policzenia, bo `data` jest już w
+ * pamięci) + parametry węzła. */
+export function segMaskInputSignature(
+  tissueId: string, width: number, height: number, data: number[][], params: Record<string, number | string>,
+): string {
+  let sum = 0;
+  for (const row of data) for (const v of row) if (v >= 0.5) sum++;
+  return `${tissueId}|${width}x${height}|${sum}|${JSON.stringify(params)}`;
+}
+
 /** Etykiety trybu węzła "Łączenie segmentów" — operacje mnogościowe na
  * maskach 0/1 (w odróżnieniu od "mapa/combine", które łączy ciągłą
  * intensywność; tu wynik ma zawsze pozostać czystą maską 0/1). */
@@ -654,6 +668,204 @@ function removeIslands(data: number[][], maxSize: number, invert: boolean): numb
   return out;
 }
 
+// ── Postprocessing: morfologia, gęstość, składowe, dziury ──────────────────
+// Cztery nowe, czysto-klienckie węzły (bez wywołań backendu — siatka tkanki
+// to ~44k pikseli, ten sam rząd wielkości co k-means/GMM powyżej, więc
+// zostają w pełni synchroniczne jak reszta domeny Segmentacja) do czyszczenia
+// mocno zaszumionych masek (szum "sól i pieprz" na zewnątrz struktury +
+// dziury w jej wnętrzu) — "Usuwanie wysepek" (wyżej) radzi sobie tylko z
+// pojedynczymi, małymi (≤20px) izolowanymi skupiskami.
+
+/** Składowe spójne (4-sąsiedztwo, bez przekątnych — ten sam rodzaj sąsiedztwa
+ * co `removeIslands`) wartości `target` (0/1) na masce segmentu, z pominięciem
+ * pikseli poza `validMask` (jak gdyby nie istniały). Współdzielona przez
+ * `segmentacja/keep_largest`. */
+function connectedComponents(
+  data: number[][], validMask: number[][] | undefined, target: 0 | 1,
+): Array<[number, number][]> {
+  const h = data.length;
+  const w = data[0]?.length ?? 0;
+  const visited: boolean[][] = Array.from({ length: h }, () => new Array(w).fill(false));
+  const isFg = (y: number, x: number) => {
+    if (validMask && validMask[y][x] === 0) return false;
+    return (data[y][x] >= 0.5 ? 1 : 0) === target;
+  };
+  const comps: Array<[number, number][]> = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!isFg(y, x) || visited[y][x]) continue;
+      const stack: [number, number][] = [[y, x]];
+      visited[y][x] = true;
+      const comp: [number, number][] = [];
+      while (stack.length) {
+        const [cy, cx] = stack.pop()!;
+        comp.push([cy, cx]);
+        const neighbors: [number, number][] = [[cy - 1, cx], [cy + 1, cx], [cy, cx - 1], [cy, cx + 1]];
+        for (const [ny, nx] of neighbors) {
+          if (ny < 0 || ny >= h || nx < 0 || nx >= w) continue;
+          if (visited[ny][nx] || !isFg(ny, nx)) continue;
+          visited[ny][nx] = true;
+          stack.push([ny, nx]);
+        }
+      }
+      comps.push(comp);
+    }
+  }
+  return comps;
+}
+
+export const MORPHOLOGY_MODE_LABELS: Record<string, string> = {
+  erode: "erozja (ścieńczenie)",
+  dilate: "dylatacja (pogrubienie)",
+  open: "otwarcie (erozja → dylatacja, usuwa szum)",
+  close: "zamknięcie (dylatacja → erozja, zalatuje dziury)",
+};
+export const MORPHOLOGY_MODE_LIST: string[] = ["erode", "dilate", "open", "close"];
+export const MORPHOLOGY_SHAPE_LABELS: Record<string, string> = {
+  diamond: "diament (4-sąsiedztwo)",
+  square: "kwadrat (8-sąsiedztwo)",
+};
+export const MORPHOLOGY_SHAPE_LIST: string[] = ["diamond", "square"];
+
+/** Element strukturalny: lista przesunięć (dy,dx) w promieniu `radius` wokół
+ * (0,0) — "diamond" = odległość Manhattan (ten sam rodzaj sąsiedztwa co
+ * `removeIslands` przy radius=1), "square" = odległość Czebyszewa (pełny
+ * kwadrat (2·radius+1)²). */
+function structuringOffsets(radius: number, shape: "diamond" | "square"): Array<[number, number]> {
+  const offs: Array<[number, number]> = [];
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      if (dy === 0 && dx === 0) continue;
+      if (shape === "diamond" && Math.abs(dy) + Math.abs(dx) > radius) continue;
+      offs.push([dy, dx]);
+    }
+  }
+  return offs;
+}
+
+/** Erozja/dylatacja binarnej maski elementem strukturalnym
+ * `structuringOffsets(radius, shape)`. Piksele poza `validMask` są pomijane
+ * jako sąsiedzi (dylatacja nigdy nie "wcieka" spoza tkanki, erozja nie liczy
+ * braku sąsiada spoza tkanki jako powód do ścieńczenia) i zostają
+ * przepisane bez zmian — ta sama konwencja co pozostałe węzły segmentu. */
+function erodeDilate(
+  data: number[][], validMask: number[][] | undefined, radius: number,
+  mode: "erode" | "dilate", shape: "diamond" | "square",
+): number[][] {
+  const h = data.length;
+  const w = data[0]?.length ?? 0;
+  const offs = structuringOffsets(Math.max(1, radius), shape);
+  const inTissue = (y: number, x: number) => !validMask || validMask[y][x] !== 0;
+  const fg = (y: number, x: number) => data[y][x] >= 0.5;
+  const out: number[][] = Array.from({ length: h }, () => new Array(w).fill(0));
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!inTissue(y, x)) { out[y][x] = data[y][x]; continue; }
+      if (mode === "dilate") {
+        let any = fg(y, x);
+        for (let i = 0; !any && i < offs.length; i++) {
+          const ny = y + offs[i][0], nx = x + offs[i][1];
+          if (ny < 0 || ny >= h || nx < 0 || nx >= w || !inTissue(ny, nx)) continue;
+          if (fg(ny, nx)) any = true;
+        }
+        out[y][x] = any ? 1 : 0;
+      } else {
+        let all = fg(y, x);
+        for (let i = 0; all && i < offs.length; i++) {
+          const ny = y + offs[i][0], nx = x + offs[i][1];
+          if (ny < 0 || ny >= h || nx < 0 || nx >= w || !inTissue(ny, nx)) continue;
+          if (!fg(ny, nx)) all = false;
+        }
+        out[y][x] = all ? 1 : 0;
+      }
+    }
+  }
+  return out;
+}
+
+/** Otwarcie (erozja→dylatacja, usuwa drobne wypustki/szum pierwszego planu
+ * bez naruszania ogólnego kształtu) / zamknięcie (dylatacja→erozja, zalatuje
+ * drobne dziury/wcięcia) — złożenie dwóch przebiegów `erodeDilate`. */
+function morphologyOp(
+  data: number[][], validMask: number[][] | undefined, radius: number,
+  mode: "erode" | "dilate" | "open" | "close", shape: "diamond" | "square",
+): number[][] {
+  if (mode === "erode") return erodeDilate(data, validMask, radius, "erode", shape);
+  if (mode === "dilate") return erodeDilate(data, validMask, radius, "dilate", shape);
+  if (mode === "open") return erodeDilate(erodeDilate(data, validMask, radius, "erode", shape), validMask, radius, "dilate", shape);
+  return erodeDilate(erodeDilate(data, validMask, radius, "dilate", shape), validMask, radius, "erode", shape);
+}
+
+/** Lokalna gęstość pierwszego planu w oknie (2·radius+1)² wokół każdego
+ * piksela, liczona przez obraz całkowy (prefix sums) — koszt O(1) per piksel
+ * niezależnie od promienia. Piksele poza `validMask` są wykluczone zarówno z
+ * sumy, jak i z mianownika (liczby pikseli faktycznie w oknie), żeby brzeg
+ * tkanki nie "rozcieńczał" gęstości zerami zza granicy skanu. */
+function boxDensity(data: number[][], validMask: number[][] | undefined, radius: number): number[][] {
+  const h = data.length;
+  const w = data[0]?.length ?? 0;
+  const sumFg: number[][] = Array.from({ length: h + 1 }, () => new Array(w + 1).fill(0));
+  const sumValid: number[][] = Array.from({ length: h + 1 }, () => new Array(w + 1).fill(0));
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const valid = !validMask || validMask[y][x] !== 0;
+      const fg = valid && data[y][x] >= 0.5 ? 1 : 0;
+      sumFg[y + 1][x + 1] = sumFg[y][x + 1] + sumFg[y + 1][x] - sumFg[y][x] + fg;
+      sumValid[y + 1][x + 1] = sumValid[y][x + 1] + sumValid[y + 1][x] - sumValid[y][x] + (valid ? 1 : 0);
+    }
+  }
+  const rangeSum = (sum: number[][], y0: number, x0: number, y1: number, x1: number) =>
+    sum[y1 + 1][x1 + 1] - sum[y0][x1 + 1] - sum[y1 + 1][x0] + sum[y0][x0];
+  const out: number[][] = Array.from({ length: h }, () => new Array(w).fill(0));
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (validMask && validMask[y][x] === 0) { out[y][x] = data[y][x]; continue; }
+      const y0 = Math.max(0, y - radius), y1 = Math.min(h - 1, y + radius);
+      const x0 = Math.max(0, x - radius), x1 = Math.min(w - 1, x + radius);
+      const validCount = rangeSum(sumValid, y0, x0, y1, x1);
+      out[y][x] = validCount > 0 ? rangeSum(sumFg, y0, x0, y1, x1) / validCount : 0;
+    }
+  }
+  return out;
+}
+
+/** Wypełnia WSZYSTKIE dziury wewnątrz segmentu — flood-fill tła startujący od
+ * brzegu SIATKI (nie tylko brzegu `validMask`, żeby wcięcie tkanki stykające
+ * się z krawędzią obrazu nadal liczyło się jako "na zewnątrz", nie jako
+ * zamknięta dziura), bez limitu rozmiaru — uzupełnienie `removeIslands`
+ * (+ invert), które ma twardy limit `maxSize`. Piksele poza `validMask` są
+ * pomijane jak gdzie indziej (nie traktowane jako tło). */
+function fillHolesFull(data: number[][], validMask: number[][] | undefined): number[][] {
+  const h = data.length;
+  const w = data[0]?.length ?? 0;
+  const inTissue = (y: number, x: number) => !validMask || validMask[y][x] !== 0;
+  const isBg = (y: number, x: number) => inTissue(y, x) && data[y][x] < 0.5;
+  const reachable: boolean[][] = Array.from({ length: h }, () => new Array(w).fill(false));
+  const stack: [number, number][] = [];
+  const seed = (y: number, x: number) => {
+    if (isBg(y, x) && !reachable[y][x]) { reachable[y][x] = true; stack.push([y, x]); }
+  };
+  for (let y = 0; y < h; y++) { seed(y, 0); seed(y, w - 1); }
+  for (let x = 0; x < w; x++) { seed(0, x); seed(h - 1, x); }
+  while (stack.length) {
+    const [cy, cx] = stack.pop()!;
+    const neighbors: [number, number][] = [[cy - 1, cx], [cy + 1, cx], [cy, cx - 1], [cy, cx + 1]];
+    for (const [ny, nx] of neighbors) {
+      if (ny < 0 || ny >= h || nx < 0 || nx >= w) continue;
+      if (reachable[ny][nx] || !isBg(ny, nx)) continue;
+      reachable[ny][nx] = true;
+      stack.push([ny, nx]);
+    }
+  }
+  const out = data.map((row) => [...row]);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (isBg(y, x) && !reachable[y][x]) out[y][x] = 1;
+    }
+  }
+  return out;
+}
+
 const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
   {
     id: "segmentacja/kmeans",
@@ -834,6 +1046,130 @@ const SEGMENTACJA_NODE_TYPES: NodeTypeDef[] = [
       const maxSize = Math.max(1, Math.round(Number(node.params.islandMax ?? 1)));
       const data = removeIslands(src.data, maxSize, node.invertIslandTarget ?? false);
       return { ok: true, value: { ...src, data } };
+    },
+  },
+  {
+    id: "segmentacja/local_density",
+    label: "Wygładzanie gęstością",
+    detail: "lokalne głosowanie większościowe",
+    description: "Liczy lokalną gęstość segmentu w oknie wokół każdego piksela i przywraca piksel do 1, jeśli gęstość przekracza próg — jeden operator, który JEDNOCZEŚNIE tłumi rozproszony szum NA ZEWNĄTRZ struktury (niska lokalna gęstość) i zalatuje dziury W ŚRODKU (wysoka lokalna gęstość wokół). Dobry pierwszy krok postprocessingu mocno zaszumionej segmentacji, przed dalszym czyszczeniem.",
+    domain: "segmentacja", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "segment", kind: "segment" }],
+    outputs: [{ id: "out", label: "segment", kind: "segment" }],
+    params: [
+      { key: "radius", label: "Promień okna (px)", min: 1, max: 15, step: 1, default: 3 },
+      { key: "threshold", label: "Próg gęstości (0–1)", min: 0.05, max: 0.95, step: 0.05, default: 0.5 },
+    ],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0] as SegmentValue | undefined;
+      if (!src) return { ok: false, error: "podłącz wejście (segment)" };
+      const radius = Math.max(1, Math.round(Number(node.params.radius ?? 3)));
+      const threshold = Math.min(0.95, Math.max(0.05, Number(node.params.threshold ?? 0.5)));
+      const density = boxDensity(src.data, src.mask, radius);
+      const data = density.map((row, y) =>
+        row.map((v, x) => (src.mask && src.mask[y][x] === 0 ? src.data[y][x] : (v >= threshold ? 1 : 0))),
+      );
+      return { ok: true, value: { ...src, data } };
+    },
+  },
+  {
+    id: "segmentacja/morphology",
+    label: "Operacja morfologiczna",
+    detail: "erozja / dylatacja / otwarcie / zamknięcie",
+    description: "Klasyczna morfologia matematyczna na masce segmentu — otwarcie (erozja→dylatacja) usuwa drobny szum pierwszego planu bez naruszania ogólnego kształtu, zamknięcie (dylatacja→erozja) zalatuje drobne dziury/wcięcia. Promień i kształt sąsiedztwa (diament/kwadrat) sterują siłą i charakterem operacji.",
+    domain: "segmentacja", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "segment", kind: "segment" }],
+    outputs: [{ id: "out", label: "segment", kind: "segment" }],
+    params: [
+      { key: "mode", label: "Operacja", default: "close", options: MORPHOLOGY_MODE_LIST },
+      { key: "shape", label: "Kształt sąsiedztwa", default: "diamond", options: MORPHOLOGY_SHAPE_LIST },
+      { key: "radius", label: "Promień (px)", min: 1, max: 10, step: 1, default: 1 },
+    ],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0] as SegmentValue | undefined;
+      if (!src) return { ok: false, error: "podłącz wejście (segment)" };
+      const mode = (["erode", "dilate", "open", "close"].includes(node.params.mode as string) ? node.params.mode : "close") as "erode" | "dilate" | "open" | "close";
+      const shape = (node.params.shape as string) === "square" ? "square" : "diamond";
+      const radius = Math.max(1, Math.round(Number(node.params.radius ?? 1)));
+      const data = morphologyOp(src.data, src.mask, radius, mode, shape);
+      return { ok: true, value: { ...src, data } };
+    },
+  },
+  {
+    id: "segmentacja/keep_largest",
+    label: "Największe składowe",
+    description: "Zostawia tylko K największych (wg liczby pikseli) składowych spójnych segmentu, zerując resztę — przydatne, żeby odrzucić przypadkowe skupiska szumu i zostawić dominujący kształt, niezależnie od jego rozmiaru (w odróżnieniu od \"Usuwania wysepek\", które odcina wg progu bezwzględnego, nie wg rangi).",
+    domain: "segmentacja", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "segment", kind: "segment" }],
+    outputs: [{ id: "out", label: "segment", kind: "segment" }],
+    params: [{ key: "keepK", label: "Liczba zachowanych składowych (K)", min: 1, max: 10, step: 1, default: 1 }],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0] as SegmentValue | undefined;
+      if (!src) return { ok: false, error: "podłącz wejście (segment)" };
+      const keepK = Math.max(1, Math.round(Number(node.params.keepK ?? 1)));
+      const comps = connectedComponents(src.data, src.mask, 1);
+      const top = [...comps].sort((a, b) => b.length - a.length).slice(0, keepK);
+      const keep = new Set<string>();
+      for (const comp of top) for (const [y, x] of comp) keep.add(`${y},${x}`);
+      const data = src.data.map((row, y) => row.map((_, x) => (keep.has(`${y},${x}`) ? 1 : 0)));
+      return { ok: true, value: { ...src, data } };
+    },
+  },
+  {
+    id: "segmentacja/fill_holes",
+    label: "Wypełnij wszystkie dziury",
+    description: "Wypełnia KAŻDĄ dziurę w pełni otoczoną segmentem, niezależnie od rozmiaru (flood-fill tła od brzegu siatki) — uzupełnienie \"Usuwania wysepek\" (+ \"Odwróć kolory\"), które ma twardy limit 20 px i nie poradzi sobie z rozległym, gęsto podziurawionym wnętrzem struktury.",
+    domain: "segmentacja", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "segment", kind: "segment" }],
+    outputs: [{ id: "out", label: "segment", kind: "segment" }],
+    params: [],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0] as SegmentValue | undefined;
+      if (!src) return { ok: false, error: "podłącz wejście (segment)" };
+      const data = fillHolesFull(src.data, src.mask);
+      return { ok: true, value: { ...src, data } };
+    },
+  },
+  {
+    id: "segmentacja/active_contour",
+    label: "Aktywny kontur",
+    detail: "morphological Chan-Vese",
+    description: "Dopasowuje gładki, zamknięty kontur do zaszumionej maski segmentu — energia REGIONALNA (wariancja wewnątrz/na zewnątrz konturu), nie próg piksel-po-pikselu, więc odporne na pojedyncze piksele szumu i dziury: kontur \"osiada\" na dominującym kształcie widocznym makroskopowo. Liczone na backendzie (scikit-image) — przeliczane ręcznie przyciskiem \"Przetwórz\".",
+    domain: "segmentacja", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "segment", kind: "segment" }],
+    outputs: [{ id: "out", label: "segment", kind: "segment" }],
+    params: [
+      { key: "iterations", label: "Iteracje", min: 5, max: 50, step: 1, default: 20 },
+      { key: "smoothing", label: "Wygładzanie", min: 1, max: 4, step: 1, default: 2 },
+    ],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0] as SegmentValue | undefined;
+      if (!src) return { ok: false, error: "podłącz wejście (segment)" };
+      if (!node.morphSnakesCache) return { ok: false, error: "kliknij \"Przetwórz\", żeby dopasować kontur" };
+      const sig = segMaskInputSignature(src.tissueId, src.width, src.height, src.data, node.params);
+      if (node.morphSnakesCache.inputSignature !== sig) return { ok: false, error: "wejście zmieniło się od ostatniego przetworzenia — kliknij \"Przetwórz\" ponownie" };
+      return { ok: true, value: { ...src, data: node.morphSnakesCache.data } };
+    },
+  },
+  {
+    id: "segmentacja/spectral_refine",
+    label: "Dopasowanie do widm",
+    detail: "rafinacja na podstawie podobieństwa widm",
+    description: "Traktuje obecny segment jako wstępną etykietę: wyznacza widmo referencyjne \"rdzenia\" (erodowane wnętrze) i \"tła\" (erodowana odwrotność) i przelicza segment na podstawie faktycznego podobieństwa kosinusowego widma KAŻDEGO piksela tkanki do obu referencji — jedyny węzeł postprocessingu, który wraca do oryginalnych widm, zamiast zostać czysto geometryczną operacją na masce 0/1. \"Iteracje\" > 1 powtarza cykl rdzeń/tło → wynik → nowy rdzeń/tło (prosty self-training). Liczone na backendzie — przeliczane ręcznie przyciskiem \"Przetwórz\".",
+    domain: "segmentacja", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "segment", kind: "segment" }],
+    outputs: [{ id: "out", label: "segment", kind: "segment" }],
+    params: [
+      { key: "erosionRadius", label: "Promień erozji referencji (px)", min: 0, max: 10, step: 1, default: 2 },
+      { key: "iterations", label: "Iteracje (self-training)", min: 1, max: 5, step: 1, default: 1 },
+    ],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0] as SegmentValue | undefined;
+      if (!src) return { ok: false, error: "podłącz wejście (segment)" };
+      if (!node.spectralRefineCache) return { ok: false, error: "kliknij \"Przetwórz\", żeby dopasować do widm" };
+      const sig = segMaskInputSignature(src.tissueId, src.width, src.height, src.data, node.params);
+      if (node.spectralRefineCache.inputSignature !== sig) return { ok: false, error: "wejście zmieniło się od ostatniego przetworzenia — kliknij \"Przetwórz\" ponownie" };
+      return { ok: true, value: { ...src, data: node.spectralRefineCache.data } };
     },
   },
   {

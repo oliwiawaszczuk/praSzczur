@@ -259,6 +259,59 @@ inny rodzaj gniazda — nie da się ich pomylić nawet przy podłączaniu:
   odizolowane pojedyncze piksele) zostaje wyzerowana. Piksele poza
   `mask` (poza faktycznym skanem tkanki) są pomijane, nie traktowane jak
   "0"/tło. Implementacja: `removeIslands()` w `nodegraph.segmentacja.ts`.
+
+### Postprocessing mocno zaszumionych segmentacji
+
+Sześć węzłów do czyszczenia masek, w których widać gołym okiem spójną
+strukturę anatomiczną, ale wynik segmentacji jest usiany szumem "sól i
+pieprz" na zewnątrz i dziurami w środku — "Usuwanie wysepek" (wyżej) radzi
+sobie tylko z pojedynczymi, małymi (≤20px) izolowanymi skupiskami. Cztery
+pierwsze są czysto klienckie (ten sam powód co k-means/GMM: siatka tkanki to
+~44k pikseli, tani koszt w JS, zostają w pełni synchroniczne); dwa ostatnie
+wymagają backendu i idą wzorcem "Przetwórz" + cache z domeny Widmo.
+
+- **`segmentacja/local_density`** ("Wygładzanie gęstością") — liczy lokalną
+  gęstość segmentu w oknie (promień, suwak) wokół każdego piksela (obraz
+  całkowy/prefix sums, `boxDensity()`, koszt O(1) per piksel) i przywraca
+  piksel do 1, jeśli gęstość przekracza próg. Jeden operator, który
+  JEDNOCZEŚNIE tłumi szum na zewnątrz struktury i zalatuje dziury w środku —
+  polecany jako pierwszy krok postprocessingu.
+- **`segmentacja/morphology`** ("Operacja morfologiczna") — erozja/dylatacja/
+  otwarcie/zamknięcie (dropdown trybu + promień + kształt sąsiedztwa
+  diament/kwadrat), `erodeDilate()`/`morphologyOp()`. Jeden węzeł zamiast
+  czterech osobnych typów, zgodnie z konwencją "Jeden węzeł, jedna
+  struktura" (patrz np. `merge_segments`'owy dropdown trybu).
+- **`segmentacja/keep_largest`** ("Największe składowe") — zostawia tylko K
+  największych (wg liczby pikseli) składowych spójnych, zerując resztę
+  (`connectedComponents()`, generalizacja flood-fillu z `removeIslands`) —
+  odrzuca przypadkowe skupiska szumu niezależnie od ich rozmiaru (w
+  odróżnieniu od progu bezwzględnego w "Usuwaniu wysepek").
+- **`segmentacja/fill_holes`** ("Wypełnij wszystkie dziury") — flood-fill
+  tła od brzegu siatki (`fillHolesFull()`), bez limitu rozmiaru dziury —
+  uzupełnienie "Usuwania wysepek" (+ "Odwróć kolory", limit 20px) dla
+  rozległego, gęsto podziurawionego wnętrza struktury.
+- **`segmentacja/active_contour`** ("Aktywny kontur") — dopasowuje gładki,
+  zamknięty kontur do maski energią REGIONALNĄ (wariancja wewnątrz/na
+  zewnątrz konturu, nie próg piksel-po-pikselu), więc odporne na pojedyncze
+  piksele szumu i dziury — `skimage.segmentation.morphological_chan_vese`
+  przez nowy endpoint `POST /segment_morphsnakes`
+  (`src/msi/segmentation_post.py`). Cache: `GraphNode.morphSnakesCache`.
+- **`segmentacja/spectral_refine`** ("Dopasowanie do widm") — JEDYNY węzeł
+  postprocessingu, który wraca do oryginalnych widm zamiast zostać czysto
+  geometryczną operacją na masce 0/1: erozja maski (rdzeń/tło) na
+  faktycznej siatce 2D tkanki (`scipy.ndimage.binary_erosion`), widmo
+  referencyjne rdzenia i tła (średnia widm z `_get_dataset_cache`, ten sam
+  dostęp co `/segment_spectrum`), podobieństwo kosinusowe KAŻDEGO piksela
+  tkanki do obu referencji (`src.msi.segmentation_post.cosine_scores`), próg
+  przy 0. Parametr "Iteracje" > 1 powtarza cykl (self-training: nowa maska →
+  nowe referencje → nowy wynik). Endpoint `POST /segment_spectral_refine`.
+  Cache: `GraphNode.spectralRefineCache`.
+
+Odcisk wejścia dla dwóch ostatnich (`segMaskInputSignature()` w
+`nodegraph.segmentacja.ts`) — jak `widmoInputSignature` w domenie Widmo: nie
+porównuje maski piksel-po-pikselu, tylko tanie, ale czułe na zmianę sygnały
+(wymiary + liczba pikseli segmentu + parametry węzła).
+
 - **`segmentacja/save_segment`** / **`segmentacja/segment_source`**
   ("Zapis segmentu" / "Zapisany segment") — odpowiedniki
   `mapa/save_output`/`mapa/map_source`, ale dla `kind: "segment"`; zapisują/

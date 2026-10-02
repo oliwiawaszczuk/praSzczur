@@ -203,6 +203,50 @@ export async function fetchSegmentSpectrum(
   return r.json();
 }
 
+export interface MorphSnakesResult {
+  mask: number[][];
+}
+
+/** Dopasowuje aktywny kontur (morphological Chan-Vese) do zaszumionej maski
+ * segmentu — czysto obrazowa operacja, patrz /segment_morphsnakes w
+ * sidecarze. Używana przez węzeł "segmentacja/active_contour". */
+export async function fetchSegmentMorphsnakes(
+  mask: number[][], iterations: number, smoothing: number,
+): Promise<MorphSnakesResult> {
+  const r = await fetch(`${BASE}/segment_morphsnakes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mask, iterations, smoothing }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: `API error ${r.status}` }));
+    throw new Error(err.detail ?? `API error ${r.status}`);
+  }
+  return r.json();
+}
+
+export interface SpectralRefineResult {
+  mask: number[][]; core_n: number; bg_n: number;
+}
+
+/** Rafinuje segment na podstawie podobieństwa widm (nie tylko geometrii
+ * maski) — patrz /segment_spectral_refine w sidecarze. Używana przez węzeł
+ * "segmentacja/spectral_refine" ("Dopasowanie do widm"). */
+export async function fetchSegmentSpectralRefine(
+  tissue: string, dataset: string, mask: number[][], iterations: number, erosionRadius: number,
+): Promise<SpectralRefineResult> {
+  const r = await fetch(`${BASE}/segment_spectral_refine`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tissue, dataset, mask, iterations, erosionRadius }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: `API error ${r.status}` }));
+    throw new Error(err.detail ?? `API error ${r.status}`);
+  }
+  return r.json();
+}
+
 export interface TissuePixelMap {
   tissue: string; xs: number[]; ys: number[]; values: number[];
 }
