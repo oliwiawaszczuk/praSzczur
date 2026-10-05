@@ -123,6 +123,21 @@ export const NODE_TYPES: Record<string, PreNodeTypeDef> = {
       { key: "window", label: "okno [pkt]", min: 5, max: 51, step: 2, default: 15 },
     ],
   },
+  smooth_matched: {
+    id: "smooth_matched",
+    label: "Wygładzanie dopasowane",
+    detail: "Gauss, σ z m/z",
+    description:
+      "Gauss o szerokości dopasowanej do piku: FWHM = m/z / R (w tych danych ok. 0,09 Da przy 375 i 0,16 Da przy 950). " +
+      "Nie spłaszcza pików jak Savitzky-Golay o stałym, szerokim oknie. Używaj na danych surowych albo gęsto zbinowanych (≤0,1 Da); " +
+      "przy binie 0,3 Da σ jest poniżej połowy punktu i filtr prawie nic nie robi.",
+    category: "preprocessing",
+    hasInput: true,
+    hasOutput: true,
+    params: [
+      { key: "resolving_power", label: "R (zdolność rozdz.)", min: 1000, max: 20000, step: 250, default: 5000 },
+    ],
+  },
   baseline: {
     id: "baseline",
     label: "Korekcja linii bazowej",
@@ -154,6 +169,23 @@ export const NODE_TYPES: Record<string, PreNodeTypeDef> = {
     hasOutput: true,
     params: [
       { key: "prominence_frac", label: "próg (ułamek max)", min: 0.001, max: 0.2, step: 0.001, default: 0.02 },
+    ],
+  },
+  peakpick_snr: {
+    id: "peakpick_snr",
+    label: "Piki wg SNR",
+    detail: "lokalny szum (MAD)",
+    description:
+      "Wykrywa piki będące maksimum w oknie ±okno [Da] i o wysokości nad lokalną linią bazową ≥ SNR × lokalny szum (MAD w oknie, jak MALDIquant; SNR 3 ≈ granica detekcji, 10 ≈ granica oznaczalności; na pojedynczym pikselu surowych danych SNR 3 daje dużo fałszywych pików, dlatego domyślnie 4). " +
+      "Próg nie zależy od najwyższego piku w widmie. Tryb 'centroidy' zostawia same wierzchołki, 'profil' cały kształt piku.",
+    category: "preprocessing",
+    hasInput: true,
+    hasOutput: true,
+    params: [
+      { key: "snr", label: "min. SNR", min: 1, max: 20, step: 0.5, default: 4 },
+      { key: "noise_window_da", label: "okno szumu [Da]", min: 2, max: 50, step: 1, default: 10 },
+      { key: "max_window_da", label: "okno maksimum ±[Da]", min: 0.02, max: 5, step: 0.01, default: 0.1 },
+      { key: "mode", label: "tryb", default: "centroidy", options: ["centroidy", "profil"] },
     ],
   },
   output: {

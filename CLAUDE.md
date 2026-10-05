@@ -115,15 +115,33 @@ zoom/pan, multi-select, kopiuj-wklej) zbudowana na **Konva.js** (`app/src/lib/Bo
 ## Dokumentacja (zakładka — poradnik użytkownika, nie dokumentacja kodu)
 
 Zakładka **Dokumentacja** to poradnik + opis DZIAŁANIA appki (nie kodu), globalny — NIE
-per-workspace (ten sam duch co Tablica/Notatki). Lewy panel: spis zakładek appki + typów node'ów
-Node Grapha (pogrupowanych tak samo jak paleta w `NodeGraphTab.svelte`). Prawy panel: pełna treść
-wybranej sekcji + przycisk "Edytuj" (`Dokumentacja.svelte`).
+per-workspace (ten sam duch co Tablica/Notatki). Lewy panel: spis w trzech niezależnie zwijanych
+sekcjach (kliknięcie nagłówka chowa/pokazuje, animacja przez `grid-template-rows` 0fr↔1fr) —
+**Poradniki** (własne strony usera, u góry) / **Zakładki aplikacji** / **Node Graph — typy node'ów**
+(pogrupowane tak samo jak paleta w `NodeGraphTab.svelte`). Każda sekcja pokazuje naraz maks. ok. 5
+pozycji (`.docs-nav-scroll { max-height: 168px; overflow-y: auto }`) — więcej przewija się w
+środku sekcji, niezależnie od scrolla całego lewego panelu. Ikony sekcji/akcji to ręcznie pisane
+inline SVG (Svelte `{#snippet}`, `stroke="currentColor"`) — świadomie BEZ emoji. Prawy panel: pełna
+treść wybranej sekcji na całą szerokość (`Dokumentacja.svelte`).
 
+- **Treść sekcji to Markdown** — edytor to zwykła `<textarea>` nad surowym źródłem MD, podgląd to
+  wyrenderowany HTML przez `marked` (`marked.setOptions({ gfm: true, breaks: true })`), wstawiany
+  przez `{@html bodyHtml}` w `.docs-markdown` (style dla h1–h3/list/code/blockquote/tabel
+  zdefiniowane lokalnie w komponencie). Treść jest w 100% lokalna, autorska dla jednego usera —
+  świadomie bez sanityzacji HTML (ten sam poziom zaufania co notatki Markdown w Obsidianie).
+- **Tryb edycji jest GLOBALNY** — jeden przełącznik w górnym pasku (`editMode`), nie osobny
+  przycisk "Edytuj" per sekcja. Gdy włączony: treść KAŻDEJ wybranej sekcji od razu jest polem
+  tekstowym (surowy Markdown) z autozapisem (bez osobnego "Zapisz", ten sam duch co
+  Notatki/Tablica), a w lewym panelu pojawiają się kontrolki strukturalne — "+" (dodaj własną
+  stronę), uchwyt przeciągania (reorder przez Pointer Events jak w `WieleMz.svelte`, NIE natywny
+  HTML5 DnD — niestabilny w webview Tauri) i usuwanie strony. Poza trybem edycji appka jest czysto
+  do czytania/nawigacji.
 - **Dane globalne**: `app_docs.json` w rootcie (endpointy `/app_docs` w sidecarze, ten sam wzorzec
-  co `app_settings.json`), czytane/zapisywane przez `app/src/lib/appdocs.svelte.ts`
-  (`getTabDoc`/`setTabDoc`, `getNodeDoc`/`setNodeDoc`). Domyślna (seed) treść sekcji per zakładka
-  jest w `app/src/lib/docsSeed.ts` — `app_docs.json` trzyma tylko NADPISANIA tego, co user
-  faktycznie edytował.
+  co `app_settings.json`), czytane/zapisywane przez `app/src/lib/appdocs.svelte.ts` — trzy klucze:
+  `tabs` (nadpisania poradnika per zakładka), `nodes` (nadpisania opisu node'a), `pages` (lista
+  własnych stron usera: `{id, title, body}`, kolejność = kolejność w tablicy). Domyślna (seed)
+  treść sekcji per zakładka jest w `app/src/lib/docsSeed.ts` — `app_docs.json` trzyma tylko
+  NADPISANIA tego, co user faktycznie edytował.
 - **Synchronizacja z ikonką "(i)" na node'ach Node Grapha**: opis node'a NIE jest duplikowany —
   `NodeGraphTab.svelte` i `Dokumentacja.svelte` czytają dokładnie to samo przez
   `getNodeDoc(typeId, def.description)` (nadpisanie z `app_docs.json`, inaczej domyślny

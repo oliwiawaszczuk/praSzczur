@@ -1399,7 +1399,7 @@ def preprocess_chain(body: dict) -> dict:
         raise HTTPException(400, "Brak tissue/x/y")
 
     from src.msi.preprocessing import (
-        smooth_savgol, baseline_correction_snip, normalize_tic, peak_pick,
+        smooth_savgol, baseline_correction_snip, normalize_tic, peak_pick, apply_extra_step,
     )
 
     try:
@@ -1451,6 +1451,9 @@ def preprocess_chain(body: dict) -> dict:
             elif method == "peakpick":
                 cur, n_peaks = peak_pick(mz_arr, cur, prominence_frac=float(params.get("prominence_frac", 0.02)))
                 info["n_peaks"] = n_peaks
+            elif method in ("smooth_matched", "peakpick_snr"):
+                cur, extra_info = apply_extra_step(method, mz_arr, cur, params)
+                info.update(extra_info)
             elif method == "mz_range":
                 mz_lo = float(params.get("mz_min", mz_arr.min() if len(mz_arr) else 0))
                 mz_hi = float(params.get("mz_max", mz_arr.max() if len(mz_arr) else 0))
@@ -2045,7 +2048,7 @@ async def build_pipeline_dataset(wid: str, did: str, body: dict) -> StreamingRes
             raise HTTPException(404, f"Zestaw źródłowy '{source_id}' nie istnieje")
 
     from src.msi.preprocessing import (
-        smooth_savgol, baseline_correction_snip, normalize_tic, peak_pick,
+        smooth_savgol, baseline_correction_snip, normalize_tic, peak_pick, apply_extra_step,
     )
 
     async def generate():
@@ -2132,6 +2135,8 @@ async def build_pipeline_dataset(wid: str, did: str, body: dict) -> StreamingRes
                                 cur, _f = normalize_tic(cur, target_tic=target_tic)
                             elif method == "peakpick":
                                 cur, _n = peak_pick(cur_mz, cur, prominence_frac=float(params.get("prominence_frac", 0.02)))
+                            elif method in ("smooth_matched", "peakpick_snr"):
+                                cur, _ = apply_extra_step(method, cur_mz, cur, params)
                             elif method == "mz_range":
                                 mz_lo = float(params.get("mz_min", cur_mz.min() if len(cur_mz) else 0))
                                 mz_hi = float(params.get("mz_max", cur_mz.max() if len(cur_mz) else 0))
@@ -2494,13 +2499,14 @@ _APP_DOCS_FILE = ROOT / "app_docs.json"
 @app.get("/app_docs")
 def get_app_docs() -> dict:
     if not _APP_DOCS_FILE.exists():
-        return {"tabs": {}, "nodes": {}}
+        return {"tabs": {}, "nodes": {}, "pages": []}
     try:
         data = json.loads(_APP_DOCS_FILE.read_text())
     except Exception:
-        return {"tabs": {}, "nodes": {}}
+        return {"tabs": {}, "nodes": {}, "pages": []}
     data.setdefault("tabs", {})
     data.setdefault("nodes", {})
+    data.setdefault("pages", [])
     return data
 
 
