@@ -4,9 +4,14 @@
 // MzListModal.svelte) — jedno miejsce definiujące ten format, żeby obie
 // strony się nie rozjechały.
 
-/** "[m1;m2;...]" — max. 4 miejsca po przecinku, bez końcowych zer. */
-export function formatMzListText(values: number[]): string {
-  return `[${values.map((v) => String(Math.round(v * 10000) / 10000)).join(";")}]`;
+/** "[m1;m2;...]" — wartości zaokrąglone do `decimals` miejsc po przecinku (domyślnie 2;
+ * w appce przekazywane z ustawienia workspace'u, patrz mzListSettings.svelte.ts), bez
+ * końcowych zer. Po zaokrągleniu sąsiednie biny mogą dać tę samą wartość, więc powtórzenia
+ * są usuwane (kolejność pierwszego wystąpienia zostaje). */
+export function formatMzListText(values: number[], decimals = 2): string {
+  const f = 10 ** Math.max(0, Math.min(10, Math.round(decimals)));
+  const rounded = values.map((v) => Math.round(v * f) / f);
+  return `[${[...new Set(rounded)].map(String).join(";")}]`;
 }
 
 /** Odwrotność formatMzListText — nawiasy kwadratowe opcjonalne, separator

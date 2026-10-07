@@ -1614,6 +1614,93 @@ def segment_spectrum(body: dict) -> dict:
         raise HTTPException(500, str(e))
 
 
+# ── Analiza grup (PLS-DA) — węzły domeny "analiza" w Node Graph ─────────────
+# Odpowiednik workflow MATLAB (skrypt_ostateczny_*_KM_5dni_neg.m); jednostką
+# próbki jest widmo (tkanka/segment), patrz src/msi/pls.py.
+
+
+@app.post("/tissue_spectra")
+def tissue_spectra(body: dict) -> dict:
+    """Widmo każdej wskazanej tkanki zestawu danych (średnia/suma po pikselach) —
+    próbki dla węzła analiza/set_tissues. Body: {dataset, tissues: [id], mode}."""
+    dataset = body.get("dataset", "")
+    ids = body.get("tissues") or []
+    mode = body.get("mode", "mean")
+    if not ids:
+        raise HTTPException(400, "Nie wybrano tkanek")
+    if mode not in ("mean", "sum"):
+        raise HTTPException(400, f"Nieznany tryb '{mode}'")
+    from src.msi.pls import quantize
+    try:
+        cache = _get_dataset_cache(dataset)
+        mz_ref = None
+        samples = []
+        for tid in ids:
+            if tid not in cache:
+                raise HTTPException(404, f"Tkanka '{tid}' nie istnieje w wybranym zestawie")
+            d = cache[tid]
+            mz = np.asarray(d["mz_bins"], dtype=float)
+            if mz_ref is None:
+                mz_ref = mz
+            elif mz.shape != mz_ref.shape or not np.allclose(mz, mz_ref):
+                raise HTTPException(400, "Tkanki mają różne siatki m/z")
+            spectra = np.asarray(d["spectra"], dtype=float)
+            vec = spectra.mean(axis=0) if mode == "mean" else spectra.sum(axis=0)
+            samples.append({"id": tid, "n_pixels": int(len(spectra)), "intensity": quantize(vec)})
+        return {"mz": [round(float(m), 6) for m in mz_ref], "samples": samples}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/set_preprocess")
+def set_preprocess(body: dict) -> dict:
+    """Preprocessing całego zestawu widm naraz (zakres m/z → Savitzky-Golay → SNIP →
+    normalizacja) — węzeł analiza/preprocess. Body: {mz, samples: [[...]], mz_min,
+    mz_max, smooth_window, baseline_iterations, normalize}."""
+    mz = np.asarray(body.get("mz") or [], dtype=float)
+    samples = body.get("samples") or []
+    if mz.size == 0 or not samples:
+        raise HTTPException(400, "Brak mz/samples")
+    from src.msi.pls import preprocess_matrix, quantize
+    try:
+        out_mz, out = preprocess_matrix(
+            mz, np.asarray(samples, dtype=float),
+            mz_min=float(body.get("mz_min", mz.min())),
+            mz_max=float(body.get("mz_max", mz.max())),
+            smooth_window=int(body.get("smooth_window", 3)),
+            baseline_iterations=int(body.get("baseline_iterations", 40)),
+            normalize=str(body.get("normalize", "tic")),
+        )
+        return {"mz": [round(float(m), 6) for m in out_mz], "samples": [quantize(r) for r in out]}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/pls_da")
+def pls_da_endpoint(body: dict) -> dict:
+    """PLS-DA grupa A (+1) vs B (-1) z walidacją krzyżową — węzeł analiza/pls_da.
+    Body: {a: [[...]], b: [[...]], lv, folds, seed, n_perm}."""
+    a = body.get("a") or []
+    b = body.get("b") or []
+    if not a or not b:
+        raise HTTPException(400, "Podłącz oba zestawy (A i B)")
+    from src.msi.pls import pls_da
+    try:
+        return pls_da(
+            np.asarray(a, dtype=float), np.asarray(b, dtype=float),
+            lv=int(body.get("lv", 8)), n_folds=int(body.get("folds", 5)),
+            seed=int(body.get("seed", 0)), n_perm=int(body.get("n_perm", 0)),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.post("/segment_morphsnakes")
 def segment_morphsnakes(body: dict) -> dict:
     """Dopasowuje aktywny kontur (morphological Chan-Vese, patrz

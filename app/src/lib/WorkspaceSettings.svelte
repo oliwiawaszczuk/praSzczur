@@ -14,6 +14,13 @@
   import {
     nodeGraphs, loadNodeGraphs, nodeGraphsLoaded, createNodeGraph, renameNodeGraph, deleteNodeGraph,
   } from "$lib/nodegraphs.svelte";
+  import {
+    groupSets, ensureGroupSets, createGroupSet, renameGroupSet, deleteGroupSet,
+  } from "$lib/mzGroups.svelte";
+  import {
+    mzListDecimals, setMzListDecimals, MZ_LIST_DECIMALS_MIN, MZ_LIST_DECIMALS_MAX,
+  } from "$lib/mzListSettings.svelte";
+  import { formatMzListText } from "$lib/mzListFormat";
   import { getSetting, setSetting } from "$lib/appSettings.svelte";
 
   // ── Czułość zoomu/przesuwania płótna — GLOBALNA, współdzielona przez
@@ -148,6 +155,31 @@
     try { await deleteNodeGraph(id); }
     catch (e) { ngError = (e as Error).message; }
     finally { ngBusy = false; }
+  }
+
+  // ── Zestawy grup m/z (per workspace; zakładka m/z → Grupy) ──────────────
+  let gsCreating     = $state(false);
+  let gsNewName      = $state("");
+  let gsRenamingId   = $state<string | null>(null);
+  let gsRenameVal    = $state("");
+  let gsDeleteTarget = $state<{ id: string; name: string } | null>(null);
+
+  onMount(() => { ensureGroupSets(); });
+
+  function gsDoCreate() {
+    if (!gsNewName.trim()) return;
+    createGroupSet(gsNewName.trim());
+    gsNewName = ""; gsCreating = false;
+  }
+  function gsStartRename(id: string, current: string) { gsRenamingId = id; gsRenameVal = current; }
+  function gsCommitRename() {
+    if (gsRenamingId && gsRenameVal.trim()) renameGroupSet(gsRenamingId, gsRenameVal);
+    gsRenamingId = null;
+  }
+  function gsConfirmDelete() {
+    if (!gsDeleteTarget) return;
+    deleteGroupSet(gsDeleteTarget.id);
+    gsDeleteTarget = null;
   }
 
   async function dsDoCreate() {
@@ -336,6 +368,60 @@
 
   <div class="card">
     <div class="card-header">
+      <span class="card-title">Zestawy grup m/z</span>
+      <div class="header-actions">
+        <button class="btn-primary-sm" onclick={() => (gsCreating = !gsCreating)}>+ Nowy</button>
+      </div>
+    </div>
+
+    {#if gsCreating}
+      <div class="create-row">
+        <input class="field-input" type="text" placeholder="nazwa zestawu" bind:value={gsNewName}
+               onkeydown={(e) => e.key === "Enter" && gsDoCreate()} />
+        <button class="btn-primary-sm" onclick={gsDoCreate} disabled={!gsNewName.trim()}>Utwórz</button>
+        <button class="btn-secondary" onclick={() => { gsCreating = false; gsNewName = ""; }}>Anuluj</button>
+      </div>
+    {/if}
+
+    <div class="ws-list">
+      {#each groupSets() as g (g.id)}
+        <div class="ws-row">
+          {#if gsRenamingId === g.id}
+            <input class="field-input rename-input" type="text" bind:value={gsRenameVal}
+                   onkeydown={(e) => e.key === "Enter" && gsCommitRename()}
+                   onblur={gsCommitRename} />
+          {:else}
+            <span class="ws-name">{g.name}</span>
+          {/if}
+          <span class="ws-meta">zmieniony {fmtDate(g.updatedAt)}</span>
+          <div class="ws-actions">
+            <button class="icon-btn" title="Zmień nazwę" onclick={() => gsStartRename(g.id, g.name)}>✎</button>
+            <button class="icon-btn del" title="Usuń" onclick={() => (gsDeleteTarget = { id: g.id, name: g.name })}>×</button>
+          </div>
+        </div>
+      {/each}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Format listy m/z</span>
+    </div>
+    <div class="field-group">
+      <label class="field-label" for="mzlist-decimals">Miejsca po przecinku: {mzListDecimals()}</label>
+      <input id="mzlist-decimals" type="range" min={MZ_LIST_DECIMALS_MIN} max={MZ_LIST_DECIMALS_MAX} step="1"
+             value={mzListDecimals()}
+             oninput={(e) => setMzListDecimals(Number((e.target as HTMLInputElement).value))} />
+    </div>
+    <div class="canvas-hint">
+      Zaokrąglenie wartości w liście "[m1;m2;…]" z node'ów "Lista m/z (próg)" i "Top m/z".
+      Podgląd: {formatMzListText([323.44567, 512.30123, 700.07891], mzListDecimals())}.
+      Dotyczy bieżącego workspace'u.
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
       <span class="card-title">Widok płótna</span>
     </div>
     <div class="field-group">
@@ -360,6 +446,16 @@
   danger={true}
   onconfirm={confirmDelete}
   oncancel={() => (deleteTarget = null)}
+/>
+
+<ConfirmModal
+  open={gsDeleteTarget !== null}
+  title="Usunąć zestaw grup?"
+  message={gsDeleteTarget ? `Zestaw "${gsDeleteTarget.name}" zostanie trwale usunięty razem z wszystkimi jego kolumnami m/z i zaznaczeniami. Tej operacji nie można cofnąć.` : ""}
+  confirmLabel="Usuń"
+  danger={true}
+  onconfirm={gsConfirmDelete}
+  oncancel={() => (gsDeleteTarget = null)}
 />
 
 <ConfirmModal

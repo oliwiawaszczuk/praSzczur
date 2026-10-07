@@ -12,7 +12,7 @@
 // węzły z wieloma gniazdami naraz (np. węzeł biorący jednocześnie "mapa" i
 // "segmentacja"), nie tylko pod dzisiejszy przypadek 1 wejście + 1 wyjście.
 
-import type { IonImageResponse } from "./api";
+import type { IonImageResponse, PlsResult } from "./api";
 import type { SavedPixelMap, SavedPixelMapSource } from "./savedPixelMaps.svelte";
 import type { SavedSpectrum, SavedSpectrumSource } from "./spectraLibrary.svelte";
 
@@ -23,7 +23,12 @@ import type { SavedSpectrum, SavedSpectrumSource } from "./spectraLibrary.svelte
 // segmentu (i odwrotnie) — patrz "Wybór segmentów" / "Łączenie segmentów" /
 // "Odwrócenie segmentu" / "Usuwanie wysepek" w nodegraph.segmentacja.ts,
 // wszystkie operują WYŁĄCZNIE na kind "segment".
-export type PortKind = "widmo" | "mapa" | "segmentacja" | "segment";
+//
+// "zestaw" to ZBIÓR widm-próbek na wspólnej osi m/z (np. 5 tkanek kontrolnych) —
+// wejście analiz grupowych (domena "analiza", np. PLS-DA). Świadomie osobny od
+// "widmo" (jedno widmo): łączy się wyłącznie z węzłami, które potrafią
+// operować na wielu próbkach naraz.
+export type PortKind = "widmo" | "mapa" | "segmentacja" | "segment" | "zestaw";
 
 // Rozróżnialne, stałe kolory kropek per rodzaj gniazda — używane spójnie
 // wszędzie (kropki portów, krawędzie, kropka typu w prawym panelu/legendzie).
@@ -37,6 +42,7 @@ export const PORT_KIND_COLORS: Record<PortKind, string> = {
   mapa: "#f2994a",
   segmentacja: "#b48ce0",
   segment: "#7bc47f",
+  zestaw: "#4db6ac",
 };
 
 export const PORT_KIND_LABELS: Record<PortKind, string> = {
@@ -44,16 +50,18 @@ export const PORT_KIND_LABELS: Record<PortKind, string> = {
   mapa: "Mapa",
   segmentacja: "Segmentacja",
   segment: "Segment",
+  zestaw: "Zestaw widm",
 };
 
 export type NodeStage = "dane" | "przetwarzanie" | "wynik";
-export type NodeDomain = "widmo" | "mapa" | "segmentacja";
+export type NodeDomain = "widmo" | "mapa" | "segmentacja" | "analiza";
 
-export const DOMAIN_ORDER: NodeDomain[] = ["widmo", "mapa", "segmentacja"];
+export const DOMAIN_ORDER: NodeDomain[] = ["widmo", "mapa", "segmentacja", "analiza"];
 export const DOMAIN_LABELS: Record<NodeDomain, string> = {
   widmo: "Widmo",
   mapa: "Mapa pikseli",
   segmentacja: "Segmentacja",
+  analiza: "Analiza grup",
 };
 export const STAGE_ORDER: NodeStage[] = ["dane", "przetwarzanie", "wynik"];
 export const STAGE_LABELS: Record<NodeStage, string> = {
@@ -152,6 +160,31 @@ export interface SegMaskProcessCache {
   data: number[][];
 }
 
+/** Próbka zestawu widm — jedno widmo (tkanka / segment / zapisane widmo) na osi m/z
+ * zestawu (`ZestawValue.mz`). */
+export interface ZestawSample {
+  label: string;
+  tissueId: string;
+  intensity: number[];
+}
+
+/** Wynik ręcznego "Przetwórz" węzłów budujących/przetwarzających zestaw widm
+ * (analiza/set_tissues, set_segments, preprocess) — jak WidmoProcessCache, ale
+ * wynikiem jest cały zestaw próbek. */
+export interface ZestawProcessCache {
+  inputSignature: string;
+  mz: number[];
+  samples: ZestawSample[];
+}
+
+/** Wynik ręcznego "Przetwórz" węzła analiza/pls_da. */
+export interface PlsProcessCache {
+  inputSignature: string;
+  result: PlsResult;
+  /** Siatka m/z modelu (beta[i] ↔ mz[i]). */
+  mz: number[];
+}
+
 export interface GraphNode {
   id: string;
   type: string;
@@ -200,6 +233,12 @@ export interface GraphNode {
   /** "segmentacja/spectral_refine": wynik ostatniej ręcznej rafinacji na
    * podstawie podobieństwa widm (patrz SegMaskProcessCache). */
   spectralRefineCache?: SegMaskProcessCache;
+  /** "analiza/set_tissues": zaznaczone id tkanek (kolejność = kolejność próbek). */
+  tissueIds?: string[];
+  /** "analiza/set_tissues" / "set_segments" / "preprocess": wynik ostatniego "Przetwórz". */
+  zestawCache?: ZestawProcessCache;
+  /** "analiza/pls_da": wynik ostatniego "Przetwórz". */
+  plsCache?: PlsProcessCache;
 }
 
 export interface GraphEdge {
@@ -314,7 +353,16 @@ export interface WidmoValue {
   sources: SavedSpectrumSource[];
 }
 
-export type NodeValue = MapaValue | SegmentacjaValue | SegmentValue | WidmoValue;
+/** Zestaw widm-próbek na wspólnej osi `mz` — patrz komentarz przy `PortKind`.
+ * `label` to nazwa zestawu do wyświetlenia (np. "Zestaw z tkanek (5)"). */
+export interface ZestawValue {
+  kind: "zestaw";
+  label: string;
+  mz: number[];
+  samples: ZestawSample[];
+}
+
+export type NodeValue = MapaValue | SegmentacjaValue | SegmentValue | WidmoValue | ZestawValue;
 
 /** Klucz cache zapytania "Mapa z m/z" (mapa/mz_source) — te same (zestaw, m/z, tol) dają ten
  * sam wynik /ion_image, więc kilka node'ów z identycznym zapytaniem dzieli jedno pobranie. */

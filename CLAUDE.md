@@ -90,6 +90,9 @@ endpoint `/data` do odczytu/zapisu pełnej treści grafu — jak boards).
   raz per zmianę grafu przez współdzielony `$derived.by` (patrz `evalMemo`/`edgesByTarget` w
   `NodeGraphTab.svelte`), NIGDY osobno per node/per odczyt — inaczej koszt renderu rośnie do O(N²)
   z liczbą node'ów.
+- **Domena "Analiza grup"** (`nodegraph.analiza.ts`, port `zestaw` = zbiór widm-próbek, PLS-DA z
+  CV w `src/msi/pls.py`) — workflow z MATLAB-a: zestaw → preprocessing → PLS-DA → Top m/z. Opis i
+  różnice względem MATLAB-a: `docs/node-graph.md`, sekcja "Domena Analiza grup".
 - "Wyślij do Node Graph" z innych zakładek (m/z, Widma, Zapisane) — most `$lib/graphInsert.svelte.ts`
   (`requestGraphInsert`/`pendingGraphInsert`): zapisuje obiekt do biblioteki (Zapisane
   mapy/Zapisane widma), przełącza zakładkę, `NodeGraphTab.svelte` pokazuje "duszka" pod kursorem
@@ -111,6 +114,14 @@ zoom/pan, multi-select, kopiuj-wklej) zbudowana na **Konva.js** (`app/src/lib/Bo
   render obiektów, zoom/pan myszką, multi-select rubber-band, resize/rotate przez `Transformer`, edycja
   tekstu przez overlay `<textarea>`), `BoardSidebar.svelte` (lista tablic gdy brak zaznaczenia, właściwości
   obiektu — kolor/rozmiar/bold dla tekstu, przezroczystość dla obrazu — gdy coś zaznaczone).
+
+## Zestawy grup m/z (zakładka m/z → Grupy)
+
+Zakładka Grupy ma **wiele nazwanych zestawów kolumn per workspace** (jak grafy/tablice): przełącznik +
+"+" w pasku `WieleMz.svelte`, zmiana nazwy/usuwanie w Ustawieniach (karta "Zestawy grup m/z"). Stan w
+`mzGroups.svelte.ts` przez `wsGet/wsSet`: `wielemz_sets` (lista), `wielemz_activeSetId`,
+`wielemz_set_<id>` (kolumny + zaznaczenia + tryb łączenia). Stare klucze `wielemz_groups/_selection/
+_combine_mode` są tylko migrowane do "Zestawu 1".
 
 ## Dokumentacja (zakładka — poradnik użytkownika, nie dokumentacja kodu)
 

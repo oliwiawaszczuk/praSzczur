@@ -451,3 +451,25 @@ przeciążania tamtego różnymi trybami.
    (wyszukiwarka + kategorie), jak i w prawym panelu (`groupedNodeTypes` w
    `NodeGraphTab.svelte` czyta ten sam rejestr) — nic dodatkowo nie trzeba
    tam wpisywać.
+
+## Domena "Analiza grup" (PLS-DA, workflow z MATLAB-a)
+
+Odpowiednik skryptów `Matlab/.../skrypt_ostateczny_*_KM_5dni_neg.m`. Pliki:
+`nodegraph.analiza.ts` (węzły + czyste funkcje), `src/msi/pls.py` (algorytmy,
+testy w `tests/test_pls.py`), endpointy `/tissue_spectra`, `/set_preprocess`,
+`/pls_da` w sidecarze, `PlsDiagnostics.svelte` (okno wykresów diagnostycznych).
+
+- **Jednostką próbki jest widmo** (tkanka albo segment), nie piksel — jak w
+  MATLAB-ie (1 plik `.txt` = 1 próbka). Stąd rodzaj portu `zestaw`
+  (`ZestawValue`: N widm na wspólnej osi m/z). Wyjście PLS-DA to zwykłe
+  `widmo` (beta(m/z)), więc dalej działają węzły domeny Widmo.
+- Mapowanie: `mssgolay` → Savitzky-Golay, `msbackadj` → SNIP, `data./sum` →
+  TIC, `plsregress` → `sklearn.PLSRegression(scale=False)` + własne CV,
+  `PLSmsep`/`pctVar` → wykresy w "Diagnostyka", `maxk(abs(beta))` → "Top m/z".
+- Różnice względem MATLAB-a (świadome): `min. odstęp m/z` w "Top m/z" (0 =
+  zachowanie MATLAB-a; bez niego top-k to zwykle sąsiednie biny jednego piku),
+  opcjonalny test permutacyjny Q² (przy kilku próbkach i tysiącach m/z PLS łatwo
+  się przeucza), foldy CV stratyfikowane po grupie.
+- Cache zestawów (`GraphNode.zestawCache`) trafia do pliku grafu — dlatego węzły
+  zestawu zapisują widma zaokrąglone do 5 cyfr znaczących (`quantize`).
+

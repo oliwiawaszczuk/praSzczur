@@ -3,7 +3,10 @@
   import MzColumn from "./MzColumn.svelte";
   import MzListModal from "./MzListModal.svelte";
   import ConfirmModal from "./ConfirmModal.svelte";
-  import { allGroups, loadWieleMz, addGroup, removeGroup, reorderGroups, clearSelection, hasAnySelection } from "./mzGroups.svelte";
+  import {
+    allGroups, loadWieleMz, addGroup, removeGroup, reorderGroups, clearSelection, hasAnySelection,
+    groupSets, activeGroupSetId, switchGroupSet, createGroupSet,
+  } from "./mzGroups.svelte";
 
   interface Props {
     mzMin?: number;
@@ -73,6 +76,16 @@
 
 <div class="wmz-outer">
   <div class="wmz-toolbar">
+    <div class="wmz-set-switch">
+      <select class="wmz-set-select" value={activeGroupSetId()}
+              title="Zestaw grup (zarządzanie: Ustawienia)"
+              onchange={(e) => switchGroupSet((e.target as HTMLSelectElement).value)}>
+        {#each groupSets() as gs (gs.id)}
+          <option value={gs.id}>{gs.name}</option>
+        {/each}
+      </select>
+      <button class="wmz-set-new" title="Nowy zestaw grup" onclick={() => createGroupSet()}>+</button>
+    </div>
     <button class="wmz-clear-btn" onclick={() => (mzListModalOpen = true)}>
       Lista m/z
     </button>
@@ -145,6 +158,35 @@
     padding: 10px 16px 0;
     box-sizing: border-box;
   }
+
+  .wmz-set-switch { display: flex; gap: 6px; margin-right: auto; min-width: 0; }
+  .wmz-set-select {
+    min-width: 140px;
+    max-width: 260px;
+    background: #1a1a1a;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 7px;
+    color: #e0e0e0;
+    font-size: 0.7rem;
+    padding: 5px 6px;
+    font-family: inherit;
+    outline: none;
+  }
+  .wmz-set-select:hover { border-color: rgba(255,201,81,0.3); color: #ffc951; }
+  .wmz-set-select option { background: #1a1a1a; color: #e0e0e0; }
+  .wmz-set-new {
+    flex-shrink: 0;
+    width: 28px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 7px;
+    color: rgba(255,255,255,0.6);
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .wmz-set-new:hover { border-color: rgba(255,201,81,0.5); background: rgba(255,201,81,0.1); color: #ffc951; }
 
   .wmz-clear-btn {
     background: rgba(255,255,255,0.06);

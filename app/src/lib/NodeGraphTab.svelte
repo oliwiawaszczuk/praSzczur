@@ -10,8 +10,9 @@
   import SegmentMaskCanvas from "$lib/SegmentMaskCanvas.svelte";
   import SpectrumTracesPlot from "$lib/SpectrumTracesPlot.svelte";
   import SpectrumZoomModal from "$lib/SpectrumZoomModal.svelte";
+  import PlsDiagnostics from "$lib/PlsDiagnostics.svelte";
   import type { TissueImage, IonImageResponse } from "$lib/api.js";
-  import { fetchIonImage, fetchIonImageRaw, fetchSpectrumProcess, fetchSegmentSpectrum, fetchSegmentMorphsnakes, fetchSegmentSpectralRefine, type SpectrumProcessMethod, type SegmentSpectrumMode } from "$lib/api";
+  import { fetchIonImage, fetchIonImageRaw, fetchSpectrumProcess, fetchSegmentSpectrum, fetchSegmentMorphsnakes, fetchSegmentSpectralRefine, fetchDatasetTissues, fetchTissueSpectra, fetchSetPreprocess, fetchPlsDa, type SpectrumProcessMethod, type SegmentSpectrumMode, type DatasetTissue } from "$lib/api";
   import { maxOf, combineMasks } from "$lib/tissueMerge";
   import { datasets, loadDatasets, datasetsLoaded, activeDatasetId, RAW_DATASET_ID } from "$lib/datasets.svelte";
   import {
@@ -27,7 +28,7 @@
     PORT_KIND_COLORS, PORT_KIND_LABELS, DOMAIN_ORDER, DOMAIN_LABELS, STAGE_ORDER, STAGE_LABELS, DEFAULT_CURVE_POINTS,
     type Graph, type GraphNode, type GraphEdge, type GraphViewport, type PortKind, type PortSocketDef,
     type MapaValue, type SegmentValue, type WidmoValue, type CurvePoint, type EvalOutcome, type EvalContext, type NodeTypeDef,
-    type GraphTextNote,
+    type GraphTextNote, type NodeParamDef, type ZestawValue,
   } from "$lib/nodegraph";
   import { COMBINE_MODE_LABELS, COMBINE_MODE_LIST, computeHistogram, type CombineModeExt } from "$lib/nodegraph.mapa";
   import { SEG_PALETTE, runKmeans, runQuantile, runHierarchical, runGMM, runDBSCAN, MERGE_MODE_LABELS, MERGE_MODE_LIST, KMEANS_ALGORITHM_LABELS, KMEANS_ALGORITHM_LIST, MORPHOLOGY_MODE_LABELS, MORPHOLOGY_MODE_LIST, MORPHOLOGY_SHAPE_LABELS, MORPHOLOGY_SHAPE_LIST, segMaskInputSignature } from "$lib/nodegraph.segmentacja";
@@ -35,7 +36,13 @@
     WIDMO_COMBINE_MODE_LABELS, WIDMO_COMBINE_MODE_LIST, WIDMO_NORMALIZE_MODE_LABELS, WIDMO_NORMALIZE_MODE_LIST,
     widmoInputSignature, segmentInputSignature, maxIntensity, filterMzByIntensityBand,
   } from "$lib/nodegraph.widmo";
+  import {
+    zestawSignature, segmentsSetSignature, tissuesSetSignature, preprocessSignature, plsSignature, sameGrid, topMzPeaks,
+    SET_MODE_LABELS, PRE_NORMALIZE_LABELS, MEAN_MODE_LABELS, PLS_OUTPUT_LABELS, TOP_MZ_SIGN_LABELS,
+    type TopMzSign,
+  } from "$lib/nodegraph.analiza";
   import { formatMzListText } from "$lib/mzListFormat";
+  import { mzListDecimals } from "$lib/mzListSettings.svelte";
   import {
     nodeGraphs, ensureAtLeastOneGraph, createNodeGraph, getNodeGraphData,
     scheduleSaveNodeGraph, flushSaveNodeGraph,
@@ -49,6 +56,7 @@
   import "$lib/nodegraph.mapa";
   import "$lib/nodegraph.segmentacja";
   import "$lib/nodegraph.widmo";
+  import "$lib/nodegraph.analiza";
 
   interface Props {
     /** Czy ta zakładka jest aktualnie widoczna — pozwala przeliczyć auto-fit
@@ -507,8 +515,18 @@
     if (node.type === "widmo/compare") return 260;
     if (node.type === "widmo/mz_list") return 260;
     if (node.type === "widmo/save_spectrum") return 230;
+    if (node.type === "analiza/set_tissues") return 250;
+    if (node.type === "analiza/set_segments") return 240;
+    if (node.type === "analiza/set_spectra") return 230;
+    if (node.type === "analiza/preprocess") return 260;
+    if (node.type === "analiza/mean_spectrum") return 230;
+    if (node.type === "analiza/pls_da") return 270;
+    if (node.type === "analiza/top_mz") return 290;
     return 210;
   }
+
+  /** Węzły czysto podglądowe — brak wartości wyjściowej, więc nie pokazują błędu "brak wyniku". */
+  const PREVIEW_ONLY_TYPES = new Set(["widmo/compare", "widmo/mz_list", "analiza/top_mz"]);
 
   const PREVIEW_MIN_H = 90;
   const PREVIEW_MAX_H = 320;
@@ -606,10 +624,28 @@
       h += 40 + 34; // pole z listą m/z do skopiowania + przycisk "Kopiuj"
     } else if (node.type === "widmo/save_spectrum") {
       h += 30 + 34 + 16;
+    } else if (node.type === "analiza/set_tissues") {
+      const ds = String(node.params.dataset ?? "");
+      h += 34 + 34 + Math.min(150, (tissuesByDataset[ds]?.length ?? 1) * 20 + 10) + 34 + 16;
+    } else if (node.type === "analiza/set_segments") {
+      h += 34 + 34 + 10 + Math.max(1, inputsFor(node, "in").length) * 24 + 34 + 16;
+    } else if (node.type === "analiza/set_spectra") {
+      h += 10 + Math.max(1, inputsFor(node, "in").length) * 24;
+    } else if (node.type === "analiza/preprocess") {
+      h += 40 * 4 + 34 + 34 + 16;
+    } else if (node.type === "analiza/mean_spectrum") {
+      h += 34;
+    } else if (node.type === "analiza/pls_da") {
+      h += 40 * 4 + 34 + 34 + 34 + 16 + (node.plsCache ? 58 : 0);
+    } else if (node.type === "analiza/top_mz") {
+      h += 40 * 2 + 34; // k, odstęp, kierunek
+      h += 180 + 10; // wykres z markerami
+      h += 130 + 8; // tabela rankingu
+      h += 40 + 34; // lista m/z + przycisk "Kopiuj"
     }
     const kind = outputKind(node);
-    if (kind === "mapa" || kind === "segmentacja" || kind === "segment" || kind === "widmo") h += previewHeight(node) + 10;
-    else if (node.type !== "widmo/compare" && node.type !== "widmo/mz_list") h += 22;
+    if (kind === "mapa" || kind === "segmentacja" || kind === "segment" || kind === "widmo" || kind === "zestaw") h += previewHeight(node) + 10;
+    else if (!PREVIEW_ONLY_TYPES.has(node.type)) h += 22;
     return Math.max(h, 80);
   }
 
@@ -1239,6 +1275,12 @@
     }
     if (typeId === "widmo/from_segment") node.params = { ...node.params, dataset: RAW_DATASET_ID };
     if (typeId === "widmo/save_spectrum") node.saveName = "";
+    if (typeId === "analiza/set_tissues") {
+      node.tissueIds = [];
+      node.params = { ...node.params, dataset: activeDatasetId() };
+      ensureDatasetTissues(activeDatasetId());
+    }
+    if (typeId === "analiza/set_segments") node.params = { ...node.params, dataset: activeDatasetId() || RAW_DATASET_ID };
     graph.nodes.push(node);
     if (pendingConn) {
       const def = NODE_TYPES[typeId];
@@ -1865,9 +1907,285 @@
       // cichy błąd — przycisk po prostu nie pokaże "Skopiowano ✓"
     }
   }
+  // ── Domena "Analiza grup" (PLS-DA, odpowiednik workflow MATLAB) ──────────
+  // Węzły budujące/przetwarzające ZESTAW widm (patrz nodegraph.analiza.ts) liczą na
+  // backendzie po ręcznym "Przetwórz" i cache'ują wynik na węźle — ten sam wzorzec
+  // co "widmo/smooth" i "segmentacja/kmeans".
+  let analizaStatus = $state<Record<string, string>>({});
+  let tissuesByDataset = $state<Record<string, DatasetTissue[]>>({});
+  const tissuesLoading = new Set<string>();
+
+  function setAnalizaStatus(nodeId: string, msg: string) {
+    analizaStatus = { ...analizaStatus, [nodeId]: msg };
+  }
+
+  function patchNode(nodeId: string, patch: Partial<GraphNode>) {
+    const idx = graph.nodes.findIndex((n) => n.id === nodeId);
+    if (idx === -1) return;
+    graph.nodes[idx] = { ...graph.nodes[idx], ...patch };
+    persist();
+  }
+
+  async function ensureDatasetTissues(dataset: string) {
+    if (tissuesByDataset[dataset] || tissuesLoading.has(dataset)) return;
+    tissuesLoading.add(dataset);
+    try {
+      tissuesByDataset = { ...tissuesByDataset, [dataset]: await fetchDatasetTissues(dataset) };
+    } catch {
+      // lista pozostaje pusta — węzeł pokaże "brak tkanek w zestawie"
+    } finally {
+      tissuesLoading.delete(dataset);
+    }
+  }
+
+  $effect(() => {
+    for (const n of graph.nodes) if (n.type === "analiza/set_tissues") ensureDatasetTissues(String(n.params.dataset ?? ""));
+  });
+
+  function tissueDisplayLabel(t: DatasetTissue): string {
+    return wsGet<Record<string, string>>("dane_tissueLabels", {})[t.id] || t.label;
+  }
+
+  function toggleSetTissue(node: GraphNode, id: string) {
+    const picked = new Set(node.tissueIds ?? []);
+    if (picked.has(id)) picked.delete(id); else picked.add(id);
+    // kolejność próbek = kolejność tkanek na liście (deterministyczna, niezależna od kolejności klikania)
+    const order = (tissuesByDataset[String(node.params.dataset ?? "")] ?? []).map((t) => t.id);
+    patchNode(node.id, { tissueIds: order.filter((x) => picked.has(x)) });
+  }
+
+  function setSetTissuesDataset(node: GraphNode, dataset: string) {
+    patchNode(node.id, { params: { ...node.params, dataset }, tissueIds: [] });
+    ensureDatasetTissues(dataset);
+  }
+
+  async function runSetTissuesNode(node: GraphNode) {
+    const ids = node.tissueIds ?? [];
+    if (ids.length === 0) { setAnalizaStatus(node.id, "zaznacz przynajmniej jedną tkankę"); return; }
+    const dataset = String(node.params.dataset ?? "");
+    const mode = String(node.params.mode ?? "mean");
+    runningNodeId = node.id;
+    setAnalizaStatus(node.id, "");
+    try {
+      const res = await fetchTissueSpectra(dataset, ids, mode as "mean" | "sum");
+      const custom = wsGet<Record<string, string>>("dane_tissueLabels", {});
+      const known = tissuesByDataset[dataset] ?? [];
+      patchNode(node.id, {
+        zestawCache: {
+          inputSignature: tissuesSetSignature(dataset, ids, mode),
+          mz: res.mz,
+          samples: res.samples.map((s) => ({
+            label: custom[s.id] || known.find((t) => t.id === s.id)?.label || s.id, tissueId: s.id, intensity: s.intensity,
+          })),
+        },
+      });
+      setAnalizaStatus(node.id, `gotowe — ${res.samples.length} próbek × ${res.mz.length} m/z`);
+    } catch (e) {
+      setAnalizaStatus(node.id, e instanceof Error ? e.message : String(e));
+    } finally {
+      runningNodeId = null;
+    }
+  }
+
+  async function runSetSegmentsNode(node: GraphNode) {
+    const edges = inputsFor(node, "in");
+    if (edges.length === 0) { setAnalizaStatus(node.id, "podłącz segmenty"); return; }
+    const segs: SegmentValue[] = [];
+    for (const e of edges) {
+      const r = evalNode(e.from);
+      if (!r.ok) { setAnalizaStatus(node.id, r.error); return; }
+      if (r.value.kind !== "segment") { setAnalizaStatus(node.id, "wejścia muszą być segmentami"); return; }
+      segs.push(r.value);
+    }
+    const mode = String(node.params.mode ?? "mean");
+    const datasetChoice = String(node.params.dataset ?? "");
+    const source: "raw" | "binned" = datasetChoice === RAW_DATASET_ID ? "raw" : "binned";
+    const dataset = source === "raw" ? "" : datasetChoice;
+    const totals = new Map<string, number>();
+    for (const sg of segs) totals.set(sg.tissueLabel, (totals.get(sg.tissueLabel) ?? 0) + 1);
+    const seen = new Map<string, number>();
+    runningNodeId = node.id;
+    try {
+      const samples: { label: string; tissueId: string; intensity: number[] }[] = [];
+      let mz: number[] = [];
+      for (let i = 0; i < segs.length; i++) {
+        const sg = segs[i];
+        setAnalizaStatus(node.id, `segment ${i + 1}/${segs.length}…`);
+        const res = await fetchSegmentSpectrum(sg.tissueId, source, dataset, sg.data, mode as SegmentSpectrumMode);
+        if (i === 0) mz = res.mz;
+        else if (res.mz.length !== mz.length) throw new Error("segmenty mają różne siatki m/z");
+        const n = (seen.get(sg.tissueLabel) ?? 0) + 1;
+        seen.set(sg.tissueLabel, n);
+        samples.push({
+          label: (totals.get(sg.tissueLabel) ?? 1) > 1 ? `${sg.tissueLabel} #${n}` : sg.tissueLabel,
+          tissueId: sg.tissueId, intensity: res.intensity,
+        });
+      }
+      patchNode(node.id, { zestawCache: { inputSignature: segmentsSetSignature(segs, datasetChoice, mode), mz, samples } });
+      setAnalizaStatus(node.id, `gotowe — ${samples.length} próbek × ${mz.length} m/z`);
+    } catch (e) {
+      setAnalizaStatus(node.id, e instanceof Error ? e.message : String(e));
+    } finally {
+      runningNodeId = null;
+    }
+  }
+
+  /** Wartość zestawu z wejścia węzła (po ewaluacji), albo komunikat błędu do statusu. */
+  function zestawInput(node: GraphNode, socketId: string, what: string): ZestawValue | string {
+    const edge = inputsFor(node, socketId)[0];
+    if (!edge) return `podłącz ${what}`;
+    const r = evalNode(edge.from);
+    if (!r.ok) return r.error;
+    if (r.value.kind !== "zestaw") return `${what} musi być zestawem widm`;
+    return r.value;
+  }
+
+  async function runPreprocessNode(node: GraphNode) {
+    const src = zestawInput(node, "in", "zestaw");
+    if (typeof src === "string") { setAnalizaStatus(node.id, src); return; }
+    runningNodeId = node.id;
+    setAnalizaStatus(node.id, "");
+    try {
+      const res = await fetchSetPreprocess(src.mz, src.samples.map((s) => s.intensity), {
+        mz_min: Number(node.params.mz_min ?? 300), mz_max: Number(node.params.mz_max ?? 1500),
+        smooth_window: Math.round(Number(node.params.smooth_window ?? 3)),
+        baseline_iterations: Math.round(Number(node.params.baseline_iterations ?? 40)),
+        normalize: String(node.params.normalize ?? "tic"),
+      });
+      patchNode(node.id, {
+        zestawCache: {
+          inputSignature: preprocessSignature(src, node.params), mz: res.mz,
+          samples: src.samples.map((s, i) => ({ ...s, intensity: res.samples[i] })),
+        },
+      });
+      setAnalizaStatus(node.id, `gotowe — ${res.mz.length} m/z (${res.mz[0]}–${res.mz[res.mz.length - 1]})`);
+    } catch (e) {
+      setAnalizaStatus(node.id, e instanceof Error ? e.message : String(e));
+    } finally {
+      runningNodeId = null;
+    }
+  }
+
+  async function runPlsNode(node: GraphNode) {
+    const a = zestawInput(node, "a", "zestaw A");
+    if (typeof a === "string") { setAnalizaStatus(node.id, a); return; }
+    const b = zestawInput(node, "b", "zestaw B");
+    if (typeof b === "string") { setAnalizaStatus(node.id, b); return; }
+    if (!sameGrid(a, b)) { setAnalizaStatus(node.id, "zestawy A i B mają różne siatki m/z"); return; }
+    runningNodeId = node.id;
+    setAnalizaStatus(node.id, "liczenie…");
+    try {
+      const result = await fetchPlsDa(a.samples.map((s) => s.intensity), b.samples.map((s) => s.intensity), {
+        lv: Math.round(Number(node.params.lv ?? 8)), folds: Math.round(Number(node.params.folds ?? 5)),
+        seed: Math.round(Number(node.params.seed ?? 0)), n_perm: Math.round(Number(node.params.n_perm ?? 0)),
+      });
+      patchNode(node.id, { plsCache: { inputSignature: plsSignature(a, b, node.params), result, mz: a.mz } });
+      setAnalizaStatus(node.id, "gotowe");
+    } catch (e) {
+      setAnalizaStatus(node.id, e instanceof Error ? e.message : String(e));
+    } finally {
+      runningNodeId = null;
+    }
+  }
+
+  let plsDiagNodeId = $state<string | null>(null);
+  let plsDiagNode = $derived(plsDiagNodeId ? graph.nodes.find((n) => n.id === plsDiagNodeId) ?? null : null);
+
+  /** Kolory próbek zestawu na wykresie nałożonych widm (równomiernie po kole barw). */
+  function sampleColor(i: number, n: number): string {
+    return `hsl(${Math.round((360 * i) / Math.max(n, 1))},65%,62%)`;
+  }
+  // Memo per obiekt wartości (nowy obiekt tylko gdy graf przeliczył węzeł) — bez tego każdy
+  // render tworzyłby świeże tablice śladów i wymuszał pełne Plotly.react dla zestawu.
+  const zestawTraceMemo = new WeakMap<ZestawValue, { mz: number[]; intensity: number[]; label: string; color: string }[]>();
+  function zestawTraces(z: ZestawValue) {
+    let t = zestawTraceMemo.get(z);
+    if (!t) {
+      t = z.samples.map((s, i) => ({ mz: z.mz, intensity: s.intensity, label: s.label, color: sampleColor(i, z.samples.length) }));
+      zestawTraceMemo.set(z, t);
+    }
+    return t;
+  }
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} onpointerup={() => { if (segDrag) segDrag = null; }} />
+
+{#snippet numParam(node: GraphNode, p: NodeParamDef)}
+  <label class="field">
+    <span class="field-head">
+      <input type="text" inputmode="decimal" class="param-value-input"
+             value={node.params[p.key] ?? p.default}
+             onpointerdown={(e) => e.stopPropagation()}
+             onchange={(e) => {
+               const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
+               if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default); return; }
+               setNodeParamClampedFloat(node, p.key, raw, p.min ?? raw, p.max ?? raw);
+               (e.target as HTMLInputElement).value = String(Math.min(p.max ?? raw, Math.max(p.min ?? raw, raw)));
+             }}
+             onkeydown={(e) => {
+               if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+               if (e.key === "Escape") {
+                 (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default);
+                 (e.target as HTMLInputElement).blur();
+               }
+             }} />
+      <span>{p.label}</span>
+    </span>
+    <input type="range" min={p.min} max={p.max} step={p.step}
+           value={node.params[p.key] ?? p.default}
+           onpointerdown={(e) => e.stopPropagation()}
+           oninput={(e) => setNodeParamClampedFloat(node, p.key, Number((e.target as HTMLInputElement).value), p.min ?? 0, p.max ?? 100)} />
+  </label>
+{/snippet}
+
+{#snippet selParam(node: GraphNode, p: NodeParamDef, labels: Record<string, string>)}
+  <label class="field">
+    <span>{p.label}</span>
+    <select class="ds-select" value={node.params[p.key] ?? p.default}
+            onpointerdown={(e) => e.stopPropagation()}
+            onchange={(e) => setNodeStringParam(node, p.key, (e.target as HTMLSelectElement).value)}>
+      {#each p.options ?? [] as opt}
+        <option value={opt}>{labels[opt] ?? opt}</option>
+      {/each}
+    </select>
+  </label>
+{/snippet}
+
+{#snippet paramList(node: GraphNode, labels: Record<string, string>)}
+  {#each NODE_TYPES[node.type]?.params ?? [] as p (p.key)}
+    {#if p.options}
+      {@render selParam(node, p, labels)}
+    {:else}
+      {@render numParam(node, p)}
+    {/if}
+  {/each}
+{/snippet}
+
+{#snippet inputList(node: GraphNode, socketId: string, emptyText: string)}
+  <div class="combine-list" onpointerdown={(e) => e.stopPropagation()}>
+    {#if inputsFor(node, socketId).length === 0}
+      <div class="combine-list-empty">{emptyText}</div>
+    {:else}
+      {#each inputsFor(node, socketId) as edge (edge.id)}
+        <div class="combine-list-item">
+          <span class="combine-list-label">{sourceLabel(edge.from)}</span>
+          <button class="combine-remove" onclick={() => removeEdge(edge.id)} title="Usuń połączenie">×</button>
+        </div>
+      {/each}
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet runBlock(node: GraphNode, onrun: () => void)}
+  <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
+          disabled={runningNodeId === node.id}
+          onclick={onrun}>
+    {runningNodeId === node.id ? "Przetwarzanie…" : "Przetwórz"}
+  </button>
+  {#if analizaStatus[node.id]}
+    <span class="preview-result">{analizaStatus[node.id]}</span>
+  {/if}
+{/snippet}
 
 <div class="ng-layout">
 <div
@@ -2732,7 +3050,7 @@
                 {@const lo = Math.min(t1, t2) * maxI}
                 {@const hi = Math.max(t1, t2) * maxI}
                 {@const matches = widmoVal ? filterMzByIntensityBand(widmoVal.mz, widmoVal.intensity, lo, hi) : []}
-                {@const listText = formatMzListText(matches)}
+                {@const listText = formatMzListText(matches, mzListDecimals())}
                 <div class="mz-preview" style="height:180px">
                   {#if widmoVal}
                     {@const traces = [
@@ -2750,6 +3068,121 @@
                 {#if widmoVal}
                   <label class="field" onpointerdown={(e) => e.stopPropagation()}>
                     <span>Lista m/z ({matches.length}) — do skopiowania</span>
+                    <textarea class="mz-name-input mz-list-output" readonly rows="2">{listText}</textarea>
+                  </label>
+                  <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
+                          onclick={() => copyMzList(node, listText)}>
+                    {mzListCopyStatus[node.id] ? "Skopiowano ✓" : "Kopiuj listę m/z"}
+                  </button>
+                {/if}
+              {/if}
+            {:else if node.type === "analiza/set_tissues"}
+              {@const ds = String(node.params.dataset ?? "")}
+              <label class="field">
+                <span>Zestaw danych</span>
+                <select class="ds-select" value={ds}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setSetTissuesDataset(node, (e.target as HTMLSelectElement).value)}>
+                  {#each datasets() as d (d.id)}
+                    <option value={d.id}>{d.name}</option>
+                  {/each}
+                </select>
+              </label>
+              {@render selParam(node, NODE_TYPES[node.type].params[0], SET_MODE_LABELS)}
+              <div class="combine-list" onpointerdown={(e) => e.stopPropagation()}>
+                {#each tissuesByDataset[ds] ?? [] as t (t.id)}
+                  <label class="seg-check-item">
+                    <input type="checkbox" class="cb-input cb-input-sm"
+                           checked={(node.tissueIds ?? []).includes(t.id)}
+                           onchange={() => toggleSetTissue(node, t.id)} />
+                    <span class="cb-label">{tissueDisplayLabel(t)}</span>
+                  </label>
+                {:else}
+                  <div class="combine-list-empty">brak tkanek w zestawie</div>
+                {/each}
+              </div>
+              {@render runBlock(node, () => runSetTissuesNode(node))}
+            {:else if node.type === "analiza/set_segments"}
+              <label class="field">
+                <span>Zestaw danych</span>
+                <select class="ds-select" value={String(node.params.dataset ?? "")}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setNodeStringParam(node, "dataset", (e.target as HTMLSelectElement).value)}>
+                  <option value={RAW_DATASET_ID}>Dane oryginalne</option>
+                  {#each datasets() as d (d.id)}
+                    <option value={d.id}>{d.name}</option>
+                  {/each}
+                </select>
+              </label>
+              {@render selParam(node, NODE_TYPES[node.type].params[0], SET_MODE_LABELS)}
+              {@render inputList(node, "in", "brak podłączonych segmentów")}
+              {@render runBlock(node, () => runSetSegmentsNode(node))}
+            {:else if node.type === "analiza/set_spectra"}
+              {@render inputList(node, "in", "brak podłączonych widm")}
+            {:else if node.type === "analiza/preprocess"}
+              {@render paramList(node, PRE_NORMALIZE_LABELS)}
+              {@render runBlock(node, () => runPreprocessNode(node))}
+            {:else if node.type === "analiza/mean_spectrum"}
+              {@render paramList(node, MEAN_MODE_LABELS)}
+            {:else if node.type === "analiza/pls_da"}
+              {@render paramList(node, PLS_OUTPUT_LABELS)}
+              {@render runBlock(node, () => runPlsNode(node))}
+              {#if node.plsCache}
+                {@const r = node.plsCache.result}
+                <div class="pls-stats" onpointerdown={(e) => e.stopPropagation()}>
+                  <span>LV <b>{r.lv}</b>{r.lv !== r.lv_requested ? ` (z ${r.lv_requested})` : ""} · {r.n_a} vs {r.n_b} próbek</span>
+                  <span>R² <b>{r.r2.toFixed(2)}</b> · Q² <b class:pls-bad={r.q2 < 0.3}>{r.q2.toFixed(2)}</b> · trafność CV <b>{(r.cv_accuracy * 100).toFixed(0)}%</b></span>
+                  {#if r.perm_p !== null}<span>p (permutacje) <b>{r.perm_p.toFixed(3)}</b></span>{/if}
+                  {#if r.q2 < 0.3}<span class="pls-bad">słaby model — różnice mogą być przypadkowe</span>{/if}
+                </div>
+                <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
+                        onclick={() => (plsDiagNodeId = node.id)}>Diagnostyka</button>
+              {/if}
+            {:else if node.type === "analiza/top_mz"}
+              {@render paramList(node, TOP_MZ_SIGN_LABELS)}
+              {#if true}
+                {@const betaEdge = inputsFor(node, "in")[0]}
+                {@const bgEdge = inputsFor(node, "bg")[0]}
+                {@const betaOut = betaEdge ? evalNode(betaEdge.from) : null}
+                {@const bgOut = bgEdge ? evalNode(bgEdge.from) : null}
+                {@const betaVal = betaOut?.ok && betaOut.value.kind === "widmo" ? betaOut.value : null}
+                {@const bgCand = bgOut?.ok && bgOut.value.kind === "widmo" ? bgOut.value : null}
+                {@const bgVal = betaVal && bgCand && bgCand.mz.length === betaVal.mz.length ? bgCand : null}
+                {@const top = betaVal ? topMzPeaks(betaVal.mz, betaVal.intensity, Math.round(Number(node.params.k ?? 10)), Number(node.params.min_gap ?? 0.5), ((node.params.sign as TopMzSign) ?? "abs")) : []}
+                {@const listText = formatMzListText(top.map((e) => e.mz).sort((x, y) => x - y), mzListDecimals())}
+                <div class="mz-preview" style="height:180px">
+                  {#if betaVal}
+                    {@const base = bgVal ?? betaVal}
+                    {@const traces = [
+                      { mz: top.map((e) => base.mz[e.index]), intensity: top.map((e) => base.intensity[e.index]), label: "Top m/z", color: "#ff5b5b", markers: true },
+                      { mz: base.mz, intensity: base.intensity, label: base.label, color: "#5b9bd5" },
+                    ]}
+                    <SpectrumTracesPlot {traces} compact />
+                    <button class="mz-zoom-btn" onpointerdown={(e) => e.stopPropagation()}
+                            onclick={() => (zoomWidmoTraces = traces)} title="Powiększ">⤢</button>
+                  {:else}
+                    <div class="mz-preview-empty">{betaOut && !betaOut.ok ? betaOut.error : "podłącz widmo beta (wyjście PLS-DA)"}</div>
+                  {/if}
+                </div>
+                {#if betaVal}
+                  {@const signed = betaVal.intensity.some((v) => v < 0)}
+                  {#if bgCand && !bgVal}
+                    <span class="preview-result">tło ma inną siatkę m/z niż beta — pominięte</span>
+                  {/if}
+                  <div class="top-table" onpointerdown={(e) => e.stopPropagation()} onwheel={(e) => e.stopPropagation()}>
+                    {#each top as e (e.rank)}
+                      <div class="top-row">
+                        <span class="top-rank">{e.rank}</span>
+                        <span>{e.mz.toFixed(3)}</span>
+                        <span>{e.value.toExponential(2)}</span>
+                        <span class="top-dir">{signed ? (e.value > 0 ? "↑A" : "↓B") : "·"}</span>
+                      </div>
+                    {:else}
+                      <div class="combine-list-empty">brak m/z spełniających kryteria</div>
+                    {/each}
+                  </div>
+                  <label class="field" onpointerdown={(e) => e.stopPropagation()}>
+                    <span>Lista m/z ({top.length}) — do skopiowania</span>
                     <textarea class="mz-name-input mz-list-output" readonly rows="2">{listText}</textarea>
                   </label>
                   <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
@@ -2780,7 +3213,7 @@
             {#if true}
               {@const outcome = evalNode(node.id)}
               {@const kind = outputKind(node)}
-              {#if kind === "mapa" || kind === "segmentacja" || kind === "segment" || kind === "widmo"}
+              {#if kind === "mapa" || kind === "segmentacja" || kind === "segment" || kind === "widmo" || kind === "zestaw"}
                 <div class="mz-preview" style="height:{previewHeight(node)}px">
                   {#if outcome.ok && outcome.value.kind === "mapa"}
                     {@const mapVal = outcome.value}
@@ -2797,11 +3230,16 @@
                     <SpectrumTracesPlot traces={[trace]} compact />
                     <button class="mz-zoom-btn" onpointerdown={(e) => e.stopPropagation()}
                             onclick={() => (zoomWidmoTraces = [trace])} title="Powiększ">⤢</button>
+                  {:else if outcome.ok && outcome.value.kind === "zestaw"}
+                    {@const zTraces = zestawTraces(outcome.value)}
+                    <SpectrumTracesPlot traces={zTraces} compact />
+                    <button class="mz-zoom-btn" onpointerdown={(e) => e.stopPropagation()}
+                            onclick={() => (zoomWidmoTraces = zTraces)} title="Powiększ">⤢</button>
                   {:else if !outcome.ok}
                     <div class="mz-preview-empty">{outcome.error}</div>
                   {/if}
                 </div>
-              {:else if !outcome.ok && node.type !== "widmo/compare" && node.type !== "widmo/mz_list"}
+              {:else if !outcome.ok && !PREVIEW_ONLY_TYPES.has(node.type)}
                 <div class="node-status">{outcome.error}</div>
               {/if}
             {/if}
@@ -2977,6 +3415,10 @@
 
 {#if zoomWidmoTraces}
   <SpectrumZoomModal traces={zoomWidmoTraces} onclose={() => (zoomWidmoTraces = null)} />
+{/if}
+
+{#if plsDiagNode?.plsCache}
+  <PlsDiagnostics result={plsDiagNode.plsCache.result} onclose={() => (plsDiagNodeId = null)} />
 {/if}
 
 <style>
@@ -3501,6 +3943,33 @@
     color: #7ec8e3;
   }
   .save-btn:hover:not(:disabled) { background: rgba(126,200,227,0.2); }
+
+  .pls-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.62rem;
+    color: rgba(255,255,255,0.6);
+    line-height: 1.35;
+  }
+  .pls-stats b { color: #ffc951; font-weight: 600; }
+  .pls-stats .pls-bad, .pls-stats b.pls-bad { color: #ff8a65; }
+  .top-table {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-height: 130px;
+    overflow-y: auto;
+    font-size: 0.62rem;
+    font-family: "JetBrains Mono", monospace;
+    color: rgba(255,255,255,0.75);
+    background: rgba(255,255,255,0.03);
+    border-radius: 4px;
+    padding: 3px 5px;
+  }
+  .top-row { display: grid; grid-template-columns: 22px 1fr 1fr 26px; gap: 4px; }
+  .top-rank { color: rgba(255,255,255,0.4); }
+  .top-dir { color: #4db6ac; text-align: right; }
 
   .preview-result {
     font-size: 0.6rem;

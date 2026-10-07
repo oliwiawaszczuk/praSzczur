@@ -260,3 +260,63 @@ export async function fetchTissuePixelMap(tissue: string, mz?: number, tol?: num
   if (!r.ok) throw new Error(`API error ${r.status}`);
   return r.json();
 }
+
+// ── Analiza grup (PLS-DA) — węzły domeny "analiza" w Node Graph ─────────────
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: `API error ${r.status}` }));
+    throw new Error(err.detail ?? `API error ${r.status}`);
+  }
+  return r.json();
+}
+
+export interface DatasetTissue { id: string; label: string; n_spectra: number; }
+
+/** Tkanki zestawu danych (do listy zaznaczeń w węźle "Zestaw z tkanek"). */
+export async function fetchDatasetTissues(dataset: string): Promise<DatasetTissue[]> {
+  const q = dataset ? `?dataset=${encodeURIComponent(dataset)}` : "";
+  const r = await fetch(`${BASE}/dataset_status${q}`);
+  if (!r.ok) throw new Error(`API error ${r.status}`);
+  const j = await r.json();
+  return (j.tissues ?? []) as DatasetTissue[];
+}
+
+export interface TissueSpectraResult {
+  mz: number[];
+  samples: { id: string; n_pixels: number; intensity: number[] }[];
+}
+
+export function fetchTissueSpectra(dataset: string, tissues: string[], mode: "mean" | "sum"): Promise<TissueSpectraResult> {
+  return postJson("/tissue_spectra", { dataset, tissues, mode });
+}
+
+export interface SetPreprocessParams {
+  mz_min: number; mz_max: number; smooth_window: number; baseline_iterations: number; normalize: string;
+}
+
+export function fetchSetPreprocess(
+  mz: number[], samples: number[][], params: SetPreprocessParams,
+): Promise<{ mz: number[]; samples: number[][] }> {
+  return postJson("/set_preprocess", { mz, samples, ...params });
+}
+
+export interface PlsResult {
+  lv: number; lv_requested: number; best_lv: number; n_folds: number; n_a: number; n_b: number;
+  beta: number[]; intercept: number;
+  y: number[]; yfit: number[]; ycv: number[];
+  msep_cv: number[]; pct_var_y: number[];
+  r2: number; q2: number; rmsecv: number; cv_accuracy: number;
+  perm_p: number | null; perm_q2: number[];
+}
+
+export function fetchPlsDa(
+  a: number[][], b: number[][], params: { lv: number; folds: number; seed: number; n_perm: number },
+): Promise<PlsResult> {
+  return postJson("/pls_da", { a, b, ...params });
+}

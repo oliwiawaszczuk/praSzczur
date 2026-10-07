@@ -41,6 +41,7 @@ Co można zrobić:
 
 - m/z — samo zapytanie: wpisujesz m/z i tolerancję, dostajesz mapę intensywności per tkanka (siatka obrazów), z panelem bocznym do zakresu wyświetlania i inwersji kolorów.
 - Grupy — wiele zapytań m/z naraz obok siebie (kolumny), do porównywania kilku jonów równolegle.
+  Kolumn może być wiele zestawów (przełącznik i "+" w pasku nad kolumnami, jak przy grafach); każdy zestaw ma własne kolumny, zaznaczenia i tryb łączenia. Zmiana nazwy i usuwanie zestawów: Ustawienia → karta "Zestawy grup m/z".
 - Łączenie — łączenie/kombinowanie kilku map pikseli w jedną (np. suma, średnia, maksimum kanałów).
 - Zapisane — biblioteka zapisanych map pikseli; stąd mapę można wysłać dalej do Node Grapha jako node źródłowy.`,
   },
@@ -70,7 +71,8 @@ Co można zrobić:
 
 Kluczowe pojęcia:
 - Wiele niezależnych grafów per workspace — przełącznik grafów i "+" (nowy graf) są w prawym panelu, nad listą typów node'ów.
-- Trzy domeny node'ów: Widmo, Mapa pikseli, Segmentacja — każda ma własne node'y źródłowe (np. "Mapa m/z", "Segment", "Widmo"), przetwarzające (zakres intensywności, krzywa, łączenie map, k-means, operacje na segmentach, wygładzanie/baseline/peak-picking widma) i wynikowe (zapis do biblioteki).
+- Cztery domeny node'ów: Widmo, Mapa pikseli, Segmentacja, Analiza grup — każda ma własne node'y źródłowe (np. "Mapa m/z", "Segment", "Widmo"), przetwarzające (zakres intensywności, krzywa, łączenie map, k-means, operacje na segmentach, wygładzanie/baseline/peak-picking widma) i wynikowe (zapis do biblioteki).
+- Domena "Analiza grup" odtwarza workflow z MATLAB-a (PLS-DA lek vs kontrola): zestaw próbek (tkanki / segmenty / widma, port "Zestaw widm") → Preprocessing zestawu → PLS-DA (walidacja krzyżowa, okno "Diagnostyka") → Top m/z (lista do wklejenia w zakładce m/z). Próbką jest widmo tkanki lub segmentu, nie piksel.
 - Gniazda (porty) łączą się tylko między tym samym rodzajem danych (kolor kropki = rodzaj) — appka nie pozwoli podłączyć np. segmentu tam, gdzie oczekiwana jest mapa.
 - Każdy node ma ikonkę "(i)" w nagłówku — najechanie pokazuje opis node'a, kliknięcie przenosi do tej Dokumentacji, do sekcji opisującej dokładnie ten typ node'a (i na odwrót: edycja opisu tutaj od razu zmienia to, co pokazuje tooltip "(i)").
 - "Wyślij do Node Graph" w innych zakładkach (m/z/Widma/Zapisane) pozwala wstawić zapisany obiekt bezpośrednio jako node źródłowy.`,
@@ -94,6 +96,7 @@ Co można zrobić:
 - Tworzyć, przełączać, zmieniać nazwę, usuwać, eksportować i importować workspace'y.
 - Zarządzać zestawami danych (jak w zakładce "Zestaw danych").
 - Karta "Node Graphy" — zmiana nazwy/usuwanie zapisanych grafów Node Grapha w bieżącym workspace.
+- Karta "Zestawy grup m/z" — zmiana nazwy/usuwanie zestawów kolumn z zakładki m/z → Grupy w bieżącym workspace.
 - Globalne ustawienia appki niezależne od workspace'u (np. czułość zoomu/przesuwania płótna — wspólna dla wszystkich Node Graphów i Tablicy).`,
   },
   {

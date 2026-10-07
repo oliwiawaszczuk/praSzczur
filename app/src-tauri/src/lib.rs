@@ -135,40 +135,15 @@ pub fn run() {
             // skrótów (np. Cmd+Q) po podmianie całego paska menu.
             let menu = tauri::menu::Menu::default(app.handle())?;
 
-            // Domyślne menu "Edytuj" wiąże Cofnij/Ponów/Wytnij/Kopiuj/Wklej pod
-            // NATYWNE skróty Cmd+Z/Shift+Z/X/C/V na poziomie systemowego paska menu —
-            // to przechwytuje te kombinacje klawiszy ZANIM dotrą jako zdarzenie
-            // 'keydown' do webview, więc własna obsługa kopiuj/wklej/wytnij/cofnij
-            // w Tablicy (BoardCanvas.svelte) i Node Graphie (NodeGraphTab.svelte),
-            // zaimplementowana w JS, nigdy nie dostawała tych zdarzeń. Usuwamy
-            // WSZYSTKIE natywne predefiniowane pozycje z menu "Edytuj" (Cofnij/
-            // Ponów/separatory/Wytnij/Kopiuj/Wklej/Zaznacz wszystko) — zwykłe pola
-            // tekstowe (input/textarea w innych zakładkach) nadal obsługują
-            // Cmd+C/V/X/Z natywnie przez WKWebView, niezależnie od zawartości
-            // paska menu.
-            //
-            // UWAGA: usuwamy po RODZAJU (MenuItemKind::Predefined), NIE po
-            // pozycji/indeksie ani po tekście etykiety. Wcześniejsza wersja
-            // usuwała indeksy 0..=5 TYLKO gdy submenu miało dokładnie 7 pozycji
-            // — jeśli z jakiegokolwiek powodu (wersja macOS, lokalizacja,
-            // przyszła wersja Tauri) liczba pozycji była inna, warunek cicho nie
-            // usuwał NICZEGO i skróty klawiszowe wracały do przechwytywania
-            // przez pasek menu bez żadnego komunikatu o błędzie. Dopasowanie po
-            // tekście etykiety też nie działa — natywne PredefinedMenuItem
-            // dostają etykietę ZLOKALIZOWANĄ przez system (np. "Wytnij" na
-            // polskim macOS). Filtrowanie po `MenuItemKind::Predefined` działa
-            // niezależnie od liczby pozycji i języka systemu.
-            if let Some(tauri::menu::MenuItemKind::Submenu(edit_menu)) = menu
-                .items()?
-                .into_iter()
-                .find(|item| matches!(item, tauri::menu::MenuItemKind::Submenu(s) if s.text().map(|t| t == "Edit").unwrap_or(false)))
-            {
-                for item in edit_menu.items()?.into_iter().rev() {
-                    if let tauri::menu::MenuItemKind::Predefined(predefined) = item {
-                        edit_menu.remove(&predefined)?;
-                    }
-                }
-            }
+            // UWAGA: NIE usuwaj pozycji z domyślnego menu "Edytuj" (Cofnij/Wytnij/Kopiuj/
+            // Wklej/Zaznacz wszystko). WKWebView na macOS realizuje Cmd+C/V/X/Z/A w polach
+            // tekstowych WŁAŚNIE przez akcje tego menu — bez nich skróty nie działają w
+            // żadnym input/textarea w całej appce (kopiowanie i wklejanie tekstu przestaje
+            // działać). Wcześniejsza wersja usuwała te pozycje, żeby Cmd+C/V docierały jako
+            // 'keydown' do własnej obsługi kopiuj/wklej node'ów w Node Graphie i obiektów na
+            // Tablicy — kosztem całego tekstu w appce. Kopiowanie node'ów/obiektów z
+            // klawiatury ma więc obecnie ograniczenia; jeśli ma wrócić, zrób to przez
+            // zdarzenia DOM 'copy'/'cut'/'paste' (menu je wyzwala), nie przez usuwanie menu.
 
             let workspace_menu = SubmenuBuilder::new(app, "Workspace")
                 .text("ws_new", "Nowy workspace…")

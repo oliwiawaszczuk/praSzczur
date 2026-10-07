@@ -3,7 +3,7 @@
   // listy w formacie "[m1;m2;...]" (ten sam format co produkuje węzeł
   // "Lista m/z (próg)" w Node Graph, patrz nodegraph.widmo.ts/mzListFormat.ts)
   // tworzy po kliknięciu "Zatwierdź" jedną grupę (kolumnę) per m/z, wszystkie
-  // z tym samym wybranym zestawem danych.
+  // z tym samym wybranym zestawem danych i tolerancją.
   import { datasets, activeDatasetId, RAW_DATASET_ID } from "$lib/datasets.svelte";
   import { addGroupsFromMzList } from "$lib/mzGroups.svelte";
   import { parseMzListText } from "$lib/mzListFormat";
@@ -17,13 +17,14 @@
 
   let text = $state("");
   let dataset = $state(RAW_DATASET_ID);
+  let tol = $state(tolDefault);
   let error = $state("");
 
   // Reset przy każdym otwarciu — modal nie ma sensu zachowywać wpisanego
   // tekstu po zatwierdzeniu/zamknięciu (inny wzorzec niż zapamiętane pola
   // formularza per-workspace — to jednorazowy formularz wsadowy).
   $effect(() => {
-    if (open) { text = ""; dataset = RAW_DATASET_ID; error = ""; }
+    if (open) { text = ""; dataset = RAW_DATASET_ID; tol = tolDefault; error = ""; }
   });
 
   function close() { onclose?.(); }
@@ -35,7 +36,9 @@
   function submit() {
     const values = parseMzListText(text);
     if (values.length === 0) { error = "Podaj przynajmniej jedną wartość m/z."; return; }
-    addGroupsFromMzList(values, dataset, tolDefault);
+    const t = Number(tol);
+    if (!Number.isFinite(t) || t < 0) { error = "Tolerancja musi być liczbą nie mniejszą niż 0."; return; }
+    addGroupsFromMzList(values, dataset, t);
     close();
   }
 </script>
@@ -52,13 +55,23 @@
         separator „;” albo biały znak) — każda wartość utworzy własną grupę.
       </p>
 
-      <label class="field-label" for="mzlist-ds">Zestaw danych</label>
-      <select id="mzlist-ds" class="ds-select" bind:value={dataset}>
-        <option value={RAW_DATASET_ID}>Dane oryginalne</option>
-        {#each datasets() as d}
-          <option value={d.id}>{d.name}{d.id === activeDatasetId() ? " (aktywny)" : ""}</option>
-        {/each}
-      </select>
+      <div class="ds-row">
+        <div class="ds-col">
+          <label class="field-label" for="mzlist-ds">Zestaw danych</label>
+          <select id="mzlist-ds" class="ds-select" bind:value={dataset}>
+            <option value={RAW_DATASET_ID}>Dane oryginalne</option>
+            {#each datasets() as d}
+              <option value={d.id}>{d.name}{d.id === activeDatasetId() ? " (aktywny)" : ""}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="tol-col">
+          <label class="field-label" for="mzlist-tol">Tolerancja ±[Da]</label>
+          <input id="mzlist-tol" class="tol-input" type="number" min="0" step="0.01"
+                 bind:value={tol}
+                 onkeydown={(e) => { e.stopPropagation(); if (e.key === "Enter") submit(); }} />
+        </div>
+      </div>
 
       <label class="field-label" for="mzlist-text" style="margin-top:10px">Lista m/z</label>
       <textarea
@@ -90,7 +103,7 @@
   .modal-box {
     background: #262626; border: 1px solid rgba(255,201,81,0.18);
     border-radius: 12px; padding: 18px 20px;
-    max-width: 400px; width: calc(100vw - 40px);
+    max-width: 440px; width: calc(100vw - 40px);
     box-shadow: 0 24px 60px rgba(0,0,0,0.5);
     animation: modal-in 0.16s ease;
     display: flex; flex-direction: column;
@@ -126,6 +139,25 @@
     letter-spacing: 0.09em; text-transform: uppercase;
     color: rgba(255,255,255,0.38); margin-bottom: 5px;
   }
+
+  .ds-row { display: flex; gap: 10px; align-items: flex-end; }
+  .ds-col { flex: 1; min-width: 0; }
+  .tol-col { width: 110px; flex-shrink: 0; }
+  .tol-input {
+    width: 100%;
+    background: #1a1a1a;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 0.72rem;
+    padding: 5px 8px;
+    font-family: inherit;
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color 0.15s;
+  }
+  .tol-input:hover { border-color: rgba(255,201,81,0.3); }
+  .tol-input:focus { border-color: #ffc951; box-shadow: 0 0 0 2px rgba(255,201,81,0.15); }
 
   .ds-select {
     width: 100%;

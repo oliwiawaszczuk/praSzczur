@@ -8,6 +8,8 @@
     intensity: number[];
     label: string;
     color: string;
+    /** Rysuj jako punkty (znaczniki wybranych m/z), nie jako linię. */
+    markers?: boolean;
   }
 </script>
 
@@ -48,9 +50,10 @@
       x: t.mz,
       y: normalizeVector(t.intensity, normMode),
       type: "scatter" as const,
-      mode: "lines" as const,
+      mode: (t.markers ? "markers" : "lines") as "markers" | "lines",
       name: t.label,
       line: { color: t.color, width: 1.2 },
+      ...(t.markers ? { marker: { color: t.color, size: compact ? 6 : 9, symbol: "circle-open", line: { width: 2, color: t.color } } } : {}),
       hovertemplate: "<b>%{x:.4f} Da</b><br>Int: %{y:.0f}<extra></extra>",
     }));
 
