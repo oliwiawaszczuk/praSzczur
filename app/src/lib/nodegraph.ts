@@ -12,6 +12,7 @@
 // węzły z wieloma gniazdami naraz (np. węzeł biorący jednocześnie "mapa" i
 // "segmentacja"), nie tylko pod dzisiejszy przypadek 1 wejście + 1 wyjście.
 
+import type { IonImageResponse } from "./api";
 import type { SavedPixelMap, SavedPixelMapSource } from "./savedPixelMaps.svelte";
 import type { SavedSpectrum, SavedSpectrumSource } from "./spectraLibrary.svelte";
 
@@ -315,7 +316,17 @@ export interface WidmoValue {
 
 export type NodeValue = MapaValue | SegmentacjaValue | SegmentValue | WidmoValue;
 
+/** Klucz cache zapytania "Mapa z m/z" (mapa/mz_source) — te same (zestaw, m/z, tol) dają ten
+ * sam wynik /ion_image, więc kilka node'ów z identycznym zapytaniem dzieli jedno pobranie. */
+export function ionQueryKey(dataset: string, mz: number, tol: number): string {
+  return `${dataset}|${mz}|${tol}`;
+}
+
 export interface EvalContext {
+  /** Wyniki /ion_image dla node'ów mapa/mz_source, klucz = ionQueryKey(). */
+  ionCache: Record<string, IonImageResponse>;
+  /** Własne nazwy tkanek ustawione w zakładce Dane (wsGet("dane_tissueLabels")), id → nazwa. */
+  tissueLabels?: Record<string, string>;
   mapCache: Record<string, SavedPixelMap>;
   savedMapExists: (id: string) => boolean;
   /** Analogiczne do mapCache/savedMapExists, ale dla biblioteki "Zapisane

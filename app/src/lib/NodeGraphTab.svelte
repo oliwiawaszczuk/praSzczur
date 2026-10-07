@@ -10,10 +10,10 @@
   import SegmentMaskCanvas from "$lib/SegmentMaskCanvas.svelte";
   import SpectrumTracesPlot from "$lib/SpectrumTracesPlot.svelte";
   import SpectrumZoomModal from "$lib/SpectrumZoomModal.svelte";
-  import type { TissueImage } from "$lib/api.js";
-  import { fetchSpectrumProcess, fetchSegmentSpectrum, fetchSegmentMorphsnakes, fetchSegmentSpectralRefine, type SpectrumProcessMethod, type SegmentSpectrumMode } from "$lib/api";
+  import type { TissueImage, IonImageResponse } from "$lib/api.js";
+  import { fetchIonImage, fetchIonImageRaw, fetchSpectrumProcess, fetchSegmentSpectrum, fetchSegmentMorphsnakes, fetchSegmentSpectralRefine, type SpectrumProcessMethod, type SegmentSpectrumMode } from "$lib/api";
   import { maxOf, combineMasks } from "$lib/tissueMerge";
-  import { datasets, loadDatasets, datasetsLoaded, RAW_DATASET_ID } from "$lib/datasets.svelte";
+  import { datasets, loadDatasets, datasetsLoaded, activeDatasetId, RAW_DATASET_ID } from "$lib/datasets.svelte";
   import {
     savedMapsList, loadSavedMaps, savedMapsLoaded, fetchSavedMapData, savePixelMap, renameSavedMap,
     type SavedPixelMap, type SavedPixelMapMode,
@@ -23,7 +23,7 @@
     type SavedSpectrum,
   } from "$lib/spectraLibrary.svelte";
   import {
-    NODE_TYPES, nodeTypeList, defaultGraph, defaultParamsFor, makeId, evaluateGraphNode, wouldCreateCycle,
+    NODE_TYPES, nodeTypeList, ionQueryKey, defaultGraph, defaultParamsFor, makeId, evaluateGraphNode, wouldCreateCycle,
     PORT_KIND_COLORS, PORT_KIND_LABELS, DOMAIN_ORDER, DOMAIN_LABELS, STAGE_ORDER, STAGE_LABELS, DEFAULT_CURVE_POINTS,
     type Graph, type GraphNode, type GraphEdge, type GraphViewport, type PortKind, type PortSocketDef,
     type MapaValue, type SegmentValue, type WidmoValue, type CurvePoint, type EvalOutcome, type EvalContext, type NodeTypeDef,
@@ -329,6 +329,42 @@
     return savedMapsList().some((m) => m.id === id);
   }
 
+  // ── "Mapa z m/z" (mapa/mz_source): zapytanie /ion_image liczone na żądanie,
+  // cache po (zestaw, m/z, tol) — kilka node'ów z tym samym zapytaniem dzieli jedno pobranie. ──
+  let ionData = $state<Record<string, IonImageResponse>>({});
+  let ionLoading = new Set<string>();
+  let ionErrors = $state<Record<string, string>>({});
+
+  async function ensureIonLoaded(node: GraphNode) {
+    const mz = Number(node.params.mz);
+    const tol = Number(node.params.tol);
+    const dataset = String(node.params.dataset ?? "");
+    if (!Number.isFinite(mz) || !Number.isFinite(tol) || tol <= 0) return;
+    const key = ionQueryKey(dataset, mz, tol);
+    if (ionData[key] || ionLoading.has(key)) return;
+    ionLoading.add(key);
+    try {
+      const resp = dataset === RAW_DATASET_ID ? await fetchIonImageRaw(mz, tol) : await fetchIonImage(mz, tol, dataset || undefined);
+      ionData = { ...ionData, [key]: resp };
+      if (ionErrors[key]) { const { [key]: _drop, ...rest } = ionErrors; ionErrors = rest; }
+    } catch (e) {
+      ionErrors = { ...ionErrors, [key]: e instanceof Error ? e.message : "błąd pobierania" };
+    } finally {
+      ionLoading.delete(key);
+    }
+  }
+
+  $effect(() => {
+    for (const n of graph.nodes) if (n.type === "mapa/mz_source") ensureIonLoaded(n);
+  });
+
+  /** Tkanki dostępne w odpowiedzi dla bieżącego zapytania node'a (do dropdownu "tkanka"). */
+  function ionTissues(node: GraphNode): { id: string; label: string }[] {
+    const resp = ionData[ionQueryKey(String(node.params.dataset ?? ""), Number(node.params.mz), Number(node.params.tol))];
+    const custom = wsGet<Record<string, string>>("dane_tissueLabels", {});
+    return resp ? Object.entries(resp.tissues).map(([id, t]) => ({ id, label: custom[id] || t.label })) : [];
+  }
+
   // ── Dane zapisanych widm — analogiczne do mapData/ensureMapLoaded powyżej,
   // ale osobny cache (inna biblioteka, inny kształt danych: mz/intensity). ──
   let spectrumData = $state<Record<string, SavedSpectrum>>({});
@@ -374,7 +410,7 @@
   // wejściowych, sprowadza to do O(N+E) — każdy node liczony dokładnie raz.
   let evalMemo = $derived.by(() => {
     const memo = new Map<string, EvalOutcome>();
-    const ctx: EvalContext = { mapCache: mapData, savedMapExists, spectrumCache: spectrumData, savedSpectrumExists };
+    const ctx: EvalContext = { ionCache: ionData, tissueLabels: wsGet<Record<string, string>>("dane_tissueLabels", {}), mapCache: mapData, savedMapExists, spectrumCache: spectrumData, savedSpectrumExists };
     for (const n of graph.nodes) evaluateGraphNode(graph, n.id, ctx, memo);
     return memo;
   });
@@ -449,7 +485,7 @@
   }
 
   function nodeWidth(node: GraphNode): number {
-    if (node.type === "mapa/map_source") return 240;
+    if (node.type === "mapa/map_source" || node.type === "mapa/mz_source") return 240;
     if (node.type === "mapa/combine") return 240;
     if (node.type === "mapa/save_output") return 230;
     if (node.type === "mapa/curve") return 230;
@@ -507,6 +543,8 @@
     if (node.type === "mapa/map_source") {
       h += 30 + 22;
       if (node.expanded) h += 90;
+    } else if (node.type === "mapa/mz_source") {
+      h += 34 * 4 + 16 + (ionErrors[ionQueryKey(String(node.params.dataset ?? ""), Number(node.params.mz), Number(node.params.tol))] ? 18 : 0);
     } else if (node.type === "mapa/intensity_range") {
       h += 50;
     } else if (node.type === "mapa/curve") {
@@ -1179,6 +1217,10 @@
       node.expanded = false;
       ensureMapLoaded(node.savedMapId);
     }
+    if (typeId === "mapa/mz_source") {
+      node.params = { ...node.params, dataset: activeDatasetId() || RAW_DATASET_ID, tissue: "" };
+      ensureIonLoaded(node);
+    }
     if (typeId === "segmentacja/segment_source") {
       node.savedMapId = segmentSavedMaps[0]?.id;
       node.expanded = false;
@@ -1494,6 +1536,7 @@
       const meta = savedMapsList().find((m) => m.id === n.savedMapId);
       return meta?.name ?? "— wybierz —";
     }
+    if (n.type === "mapa/mz_source") return `m/z ${Number(n.params.mz).toFixed(2)} ±${n.params.tol}`;
     if (n.type === "widmo/spectrum_source") {
       const meta = savedSpectraList().find((m) => m.id === n.savedSpectrumId);
       return meta?.name ?? "— wybierz —";
@@ -1917,6 +1960,51 @@
                     {/each}
                   </div>
                 </div>
+              {/if}
+            {:else if node.type === "mapa/mz_source"}
+              {@const ionKey = ionQueryKey(String(node.params.dataset ?? ""), Number(node.params.mz), Number(node.params.tol))}
+              {@const tissueOpts = ionTissues(node)}
+              <label class="field">
+                <span>m/z</span>
+                <input class="num-input" type="number" step="0.01" value={node.params.mz ?? 500}
+                       onpointerdown={(e) => e.stopPropagation()}
+                       onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                       onchange={(e) => { setNodeParamClampedFloat(node, "mz", parseFloat((e.target as HTMLInputElement).value), 50, 3000); ensureIonLoaded(graph.nodes.find((n) => n.id === node.id)!); }} />
+              </label>
+              <label class="field">
+                <span>tolerancja ±[Da]</span>
+                <input class="num-input" type="number" step="0.01" min="0.001" value={node.params.tol ?? 0.3}
+                       onpointerdown={(e) => e.stopPropagation()}
+                       onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                       onchange={(e) => { setNodeParamClampedFloat(node, "tol", parseFloat((e.target as HTMLInputElement).value), 0.001, 5); ensureIonLoaded(graph.nodes.find((n) => n.id === node.id)!); }} />
+              </label>
+              <label class="field">
+                <span>Zestaw danych</span>
+                <select class="ds-select" value={(node.params.dataset as string) || activeDatasetId()}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => { setNodeStringParam(node, "dataset", (e.target as HTMLSelectElement).value); setNodeStringParam(node, "tissue", ""); ensureIonLoaded(graph.nodes.find((n) => n.id === node.id)!); }}>
+                  <option value={RAW_DATASET_ID}>Dane oryginalne</option>
+                  {#each datasets() as d (d.id)}
+                    <option value={d.id}>{d.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="field">
+                <span>Tkanka</span>
+                <select class="ds-select" value={(node.params.tissue as string) || tissueOpts[0]?.id || ""}
+                        disabled={tissueOpts.length === 0}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setNodeStringParam(node, "tissue", (e.target as HTMLSelectElement).value)}>
+                  {#if tissueOpts.length === 0}
+                    <option value="">wczytywanie…</option>
+                  {/if}
+                  {#each tissueOpts as t (t.id)}
+                    <option value={t.id}>{t.label}</option>
+                  {/each}
+                </select>
+              </label>
+              {#if ionErrors[ionKey]}
+                <span class="preview-result">{ionErrors[ionKey]}</span>
               {/if}
             {:else if node.type === "segmentacja/segment_source"}
               {@const meta = segmentSavedMaps.find((m) => m.id === node.savedMapId)}
@@ -3182,6 +3270,24 @@
     transition: border-color 0.15s, color 0.15s;
   }
   .ds-select:hover  { border-color: rgba(255,201,81,0.3); color: #ffc951; }
+  /* Pole wpisywania liczby (m/z, tolerancja) — ten sam wygląd co .ds-select, ale bez strzałki dropdownu. */
+  .num-input {
+    width: 100%;
+    background: #1a1a1a;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 0.72rem;
+    padding: 4px 8px;
+    font-family: inherit;
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color 0.15s;
+    -moz-appearance: textfield; appearance: textfield;
+  }
+  .num-input::-webkit-outer-spin-button,
+  .num-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .num-input:hover, .num-input:focus { border-color: rgba(255,201,81,0.3); }
   .ds-select option { background: #1a1a1a; color: #e0e0e0; }
 
   .mz-expand-toggle {

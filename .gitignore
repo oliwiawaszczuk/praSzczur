@@ -62,3 +62,4 @@ sidecar.log
 
 # uv lock (optional — uncomment if you want to pin deps)
 # uv.lock
+praOutputs/

@@ -5,8 +5,9 @@
 
 import type { CombineMode } from "./tissueMerge";
 import { windowValue, combineMasks } from "./tissueMerge";
+import { datasetLabel } from "./datasets.svelte";
 import {
-  registerNodeTypes, dedupeSources, DEFAULT_CURVE_POINTS,
+  registerNodeTypes, dedupeSources, ionQueryKey, DEFAULT_CURVE_POINTS,
   type NodeTypeDef, type NodeValue, type MapaValue, type EvalOutcome, type CurvePoint,
 } from "./nodegraph";
 
@@ -113,6 +114,45 @@ const MAPA_NODE_TYPES: NodeTypeDef[] = [
           kind: "mapa", tissueId: full.tissueId, tissueLabel: full.tissueLabel,
           width: full.width, height: full.height, data: full.data, mask: full.mask,
           mode: full.mode, sources: full.sources,
+        },
+      };
+    },
+  },
+  {
+    id: "mapa/mz_source",
+    label: "Mapa z m/z",
+    detail: "zapytanie jak w zakładce m/z",
+    description:
+      "Liczy mapę pikseli z wpisanego m/z, tolerancji i zestawu danych (jak w zakładce m/z), bez wcześniejszego zapisywania. " +
+      "Jedna tkanka na wyjściu; intensywność skalowana wspólnym maksimum wszystkich tkanek (jak w m/z).",
+    domain: "mapa", stage: "dane",
+    inputs: [],
+    outputs: [{ id: "out", label: "mapa", kind: "mapa" }],
+    params: [
+      { key: "mz", label: "m/z", min: 50, max: 3000, step: 0.01, default: 500 },
+      { key: "tol", label: "tolerancja ±[Da]", min: 0.001, max: 5, step: 0.01, default: 0.3 },
+      { key: "dataset", label: "zestaw danych", default: "" },
+      { key: "tissue", label: "tkanka", default: "" },
+    ],
+    evaluate(node, _inputs, ctx): EvalOutcome {
+      const mz = Number(node.params.mz);
+      const tol = Number(node.params.tol);
+      if (!Number.isFinite(mz) || !Number.isFinite(tol) || tol <= 0) return { ok: false, error: "podaj m/z i tolerancję" };
+      const dataset = String(node.params.dataset ?? "");
+      const resp = ctx.ionCache[ionQueryKey(dataset, mz, tol)];
+      if (!resp) return { ok: false, error: "wczytywanie…" };
+      const ids = Object.keys(resp.tissues);
+      if (ids.length === 0) return { ok: false, error: "zestaw danych nie ma tkanek" };
+      const tid = String(node.params.tissue ?? "") || ids[0];
+      const img = resp.tissues[tid];
+      if (!img) return { ok: false, error: "wybrana tkanka nie istnieje w tym zestawie" };
+      return {
+        ok: true,
+        value: {
+          kind: "mapa", tissueId: tid, tissueLabel: ctx.tissueLabels?.[tid] || img.label,
+          width: img.width, height: img.height, data: img.data, mask: img.mask,
+          mode: "single",
+          sources: [{ groupIndex: 0, mz, tol, datasetId: dataset, datasetLabel: datasetLabel(dataset) }],
         },
       };
     },
