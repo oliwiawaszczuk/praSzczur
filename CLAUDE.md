@@ -37,7 +37,9 @@ app_docs.json    # treść zakładki Dokumentacja appki — poradnik + opisy nod
 - **Rebuild**: `cd app && pnpm tauri build` → kopiuj z `src-tauri/target/release/bundle/macos/`
 - **Sidecar**: `app/sidecar/main.py` — FastAPI na porcie 7432, uruchamiany automatycznie przez .app
 - **Frontend**: `app/src/` — SvelteKit + Svelte 5, komponenty w `app/src/lib/`
-- **Colormap**: Bruker-style LUT w `app/src/lib/colormap.ts`
+- **Colormap**: LUT-y w `app/src/lib/colormap.ts` (domyślnie Bruker-style); wybór to ustawienie GLOBALNE
+  (`getSetting("colormap")`, Ustawienia → "Personalizacja"). Nowy renderer map m/z MUSI brać LUT z
+  `activeLut()` (wołanego w `$effect`/`$derived`) albo `renderToCanvas()`, nigdy ze stałej `BRUKER_LUT`.
 - **Stack**: Tauri v2 (Rust) + SvelteKit + Python FastAPI sidecar
 
 ## Dane przetworzone

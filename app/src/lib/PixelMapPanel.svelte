@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fetchTissuePixelMap } from "./api.js";
   import type { TissuePixelMap } from "./api.js";
-  import { BRUKER_LUT } from "$lib/colormap";
+  import { activeLut } from "$lib/colormap";
 
   export interface PixelMarker { x: number; y: number; color: string; }
 
@@ -68,9 +68,9 @@
     loadMap();
   });
 
-  function lut(t: number): [number, number, number] {
+  function lutColor(table: Uint8ClampedArray, t: number): [number, number, number] {
     const i = Math.round(Math.min(Math.max(t, 0), 1) * 255) * 4;
-    return [BRUKER_LUT[i], BRUKER_LUT[i + 1], BRUKER_LUT[i + 2]];
+    return [table[i], table[i + 1], table[i + 2]];
   }
 
   function drawMapToCanvas(canvas: HTMLCanvasElement, scale: number, circleScale = 2) {
@@ -90,12 +90,13 @@
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     const lo = dispMin, hi = dispMax, span = hi - lo;
+    const table = activeLut(); // czytane w efekcie wołającym — zmiana tablicy przerysowuje mapę
     for (let i = 0; i < xs.length; i++) {
       const v = values[i];
       if (span <= 0) continue;
       let t = Math.min(1, Math.max(0, (v - lo) / span));
       t = invertColors ? 1 - t : t;
-      const [r, g, b] = lut(t);
+      const [r, g, b] = lutColor(table, t);
       ctx.fillStyle = `rgb(${r},${g},${b})`;
       ctx.fillRect((xs[i] - xMin) * scale, (ys[i] - yMin) * scale, scale, scale);
     }

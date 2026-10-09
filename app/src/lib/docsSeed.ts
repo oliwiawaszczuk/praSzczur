@@ -97,7 +97,8 @@ Co można zrobić:
 - Zarządzać zestawami danych (jak w zakładce "Zestaw danych").
 - Karta "Node Graphy" — zmiana nazwy/usuwanie zapisanych grafów Node Grapha w bieżącym workspace.
 - Karta "Zestawy grup m/z" — zmiana nazwy/usuwanie zestawów kolumn z zakładki m/z → Grupy w bieżącym workspace.
-- Globalne ustawienia appki niezależne od workspace'u (np. czułość zoomu/przesuwania płótna — wspólna dla wszystkich Node Graphów i Tablicy).`,
+- Globalne ustawienia appki niezależne od workspace'u (np. czułość zoomu/przesuwania płótna — wspólna dla wszystkich Node Graphów i Tablicy).
+- Karta "Personalizacja" — wybór tablicy kolorów (lookup table) wszystkich map m/z: Bruker (domyślna), Viridis, Magma, Inferno, Plasma, Jet, Hot, skala szarości. Zmiana działa od razu na mapach w zakładce m/z (pojedyncze, Grupy, Łączenie, Zapisane), w panelu pikseli i w Node Graph; ustawienie jest wspólne dla wszystkich workspace'ów.`,
   },
   {
     key: "dokumentacja",

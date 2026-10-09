@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { renderToCanvas, BRUKER_LUT } from "./colormap.js";
+  import { renderToCanvas, activeLut } from "./colormap.js";
   import type { TissueImage } from "./api.js";
 
   interface Props {
@@ -43,6 +43,7 @@
     if (!barCanvas) return;
     const ctx = barCanvas.getContext("2d");
     if (!ctx) return;
+    const lut = activeLut();
     const h = barCanvas.height;
     const w = barCanvas.width;
     const imgData = ctx.createImageData(w, h);
@@ -55,9 +56,9 @@
         // Obszar poza oknem przyciemniony
         const inWindow = t >= dispMin && t <= dispMax;
         const alpha = inWindow ? 255 : 80;
-        imgData.data[idx]     = BRUKER_LUT[lutI];
-        imgData.data[idx + 1] = BRUKER_LUT[lutI + 1];
-        imgData.data[idx + 2] = BRUKER_LUT[lutI + 2];
+        imgData.data[idx]     = lut[lutI];
+        imgData.data[idx + 1] = lut[lutI + 1];
+        imgData.data[idx + 2] = lut[lutI + 2];
         imgData.data[idx + 3] = alpha;
       }
     }

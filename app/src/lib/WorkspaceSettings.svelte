@@ -22,6 +22,13 @@
   } from "$lib/mzListSettings.svelte";
   import { formatMzListText } from "$lib/mzListFormat";
   import { getSetting, setSetting } from "$lib/appSettings.svelte";
+  import IonCanvas from "$lib/IonCanvas.svelte";
+  import {
+    savedMapsList, loadSavedMaps, savedMapsLoaded, fetchSavedMapData, type SavedPixelMap, type SavedPixelMapMeta,
+  } from "$lib/savedPixelMaps.svelte";
+  import { savedSpectraList, loadSavedSpectra, savedSpectraLoaded } from "$lib/spectraLibrary.svelte";
+  import { activeWorkspace } from "$lib/workspace.svelte";
+  import { COLORMAPS, COLORMAP_SETTING_KEY, activeColormapId, colormapGradientCss } from "$lib/colormap";
 
   // ── Czułość zoomu/przesuwania płótna — GLOBALNA, współdzielona przez
   // wszystkie Node Graphy oraz Tablicę (patrz appSettings.svelte.ts). ────────
@@ -29,6 +36,11 @@
   let canvasPanSensitivity = $derived(getSetting("canvasPanSensitivity", 1));
   function setCanvasZoomSens(v: number) { setSetting("canvasZoomSensitivity", v); }
   function setCanvasPanSens(v: number) { setSetting("canvasPanSensitivity", v); }
+
+  // ── Personalizacja: tablica kolorów (LUT) map m/z — GLOBALNA preferencja wyglądu,
+  // wspólna dla wszystkich workspace'ów (patrz colormap.ts). ────────────────────
+  let colormapId = $derived(activeColormapId());
+  function setColormap(id: string) { setSetting(COLORMAP_SETTING_KEY, id); }
 
   let creating   = $state(false);
   let newName    = $state("");
@@ -224,6 +236,57 @@
     finally { dsBusy = false; }
   }
 
+  // ── Nagłówek strony: statystyki workspace'u, losowa zapisana mapa m/z, wskazówka ──
+  let stats = $derived([
+    { n: datasets().length, label: "zestawów danych" },
+    { n: nodeGraphs().length, label: "grafów" },
+    { n: groupSets().length, label: "zestawów grup m/z" },
+    { n: savedMapsList().length, label: "zapisanych map" },
+    { n: savedSpectraList().length, label: "zapisanych widm" },
+  ]);
+
+  /** Zapisane mapy m/z (bez segmentów — to maski, nie intensywności). */
+  let mapCandidates = $derived(savedMapsList().filter((m) => m.mode !== "segment"));
+  let featuredMeta = $state<SavedPixelMapMeta | null>(null);
+  let featuredData = $state<SavedPixelMap | null>(null);
+  let featuredLoading = $state(false);
+
+  async function pickFeatured() {
+    const pool = mapCandidates;
+    if (pool.length === 0) { featuredMeta = null; featuredData = null; return; }
+    // przy >1 mapie nie losuj dwa razy tej samej, żeby "Losuj" zawsze coś zmieniał
+    const others = pool.length > 1 ? pool.filter((m) => m.id !== featuredMeta?.id) : pool;
+    const next = others[Math.floor(Math.random() * others.length)];
+    featuredMeta = next;
+    featuredLoading = true;
+    try { featuredData = await fetchSavedMapData(next.id); }
+    catch { featuredData = null; }
+    finally { featuredLoading = false; }
+  }
+
+  function featuredCaption(m: SavedPixelMapMeta): string {
+    if (m.mode === "single" && m.sources.length === 1) {
+      return `m/z ${m.sources[0].mz.toFixed(2)} ±${m.sources[0].tol}`;
+    }
+    return m.sources.length > 0 ? `${m.sources.length} × m/z (${m.mode})` : m.mode;
+  }
+
+  const TIPS = [
+    "Node Graph: spacja albo prawy klik otwiera paletę node'ów, a klawisz F dopasowuje widok do zaznaczenia.",
+    "Cmd/Ctrl + klik na wykresie widma kopiuje wartość pod kursorem (i dopisuje ją do przypiętej notatki).",
+    "Tablica: klawisz T dodaje tekst w miejscu kursora, a strzałki w górę/dół zmieniają kolejność warstw.",
+    "m/z → Grupy: wklej listę z node'a „Top m/z” przyciskiem „Lista m/z” — każda wartość stanie się osobną kolumną.",
+    "Zestawy grup m/z działają jak grafy: osobne zestawy kolumn per workspace, przełączane listą nad kolumnami.",
+    "Ikonka (i) na node'ie otwiera jego opis w Dokumentacji — edycja opisu zmienia też podpowiedź na node'ie.",
+  ];
+  let tipIdx = $state(Math.floor(Math.random() * TIPS.length));
+
+  onMount(async () => {
+    if (!savedMapsLoaded()) { try { await loadSavedMaps(); } catch {} }
+    if (!savedSpectraLoaded()) { try { await loadSavedSpectra(); } catch {} }
+    pickFeatured();
+  });
+
   // Obsługa natywnego menu Plik → Workspace (Tauri, src-tauri/src/lib.rs)
   onMount(() => {
     const unlisten = listen<string>("workspace-menu", (e) => {
@@ -239,6 +302,49 @@
 </script>
 
 <div class="settings-tab">
+  <header class="hero">
+    <div class="hero-main">
+      <div class="hero-eyebrow">Ustawienia</div>
+      <h1 class="hero-title">{activeWorkspace()?.name ?? "praSzczur"}</h1>
+      <div class="stat-row">
+        {#each stats as st (st.label)}
+          <div class="stat"><span class="stat-n">{st.n}</span><span class="stat-l">{st.label}</span></div>
+        {/each}
+      </div>
+      <button class="tip" onclick={() => (tipIdx = (tipIdx + 1) % TIPS.length)} title="Następna wskazówka">
+        <span class="tip-tag">Wskazówka</span>
+        <span class="tip-text">{TIPS[tipIdx]}</span>
+      </button>
+    </div>
+
+    <div class="featured">
+      <div class="featured-head">
+        <span class="featured-title">Z Twoich map</span>
+        <button class="icon-btn" title="Losuj inną mapę" onclick={pickFeatured} disabled={mapCandidates.length === 0 || featuredLoading}>↻</button>
+      </div>
+      <div class="featured-canvas">
+        {#if featuredMeta && featuredData}
+          <IonCanvas
+            tissue={{ label: featuredMeta.tissueLabel || featuredMeta.tissueId, data: featuredData.data, mask: featuredData.mask, width: featuredMeta.width, height: featuredMeta.height, vmax: featuredMeta.vmax }}
+            dispMin={0} dispMax={1} invertColors={false} showColorbar={false} showVmax={false} compact
+          />
+        {:else if featuredLoading}
+          <div class="featured-empty">Ładowanie…</div>
+        {:else}
+          <div class="featured-empty">Zapisz mapę m/z (💾 w zakładce m/z), a pojawi się tutaj.</div>
+        {/if}
+      </div>
+      {#if featuredMeta}
+        <div class="featured-caption">
+          <span class="featured-name">{featuredMeta.name}</span>
+          <span class="featured-sub">{featuredCaption(featuredMeta)}</span>
+        </div>
+      {/if}
+    </div>
+  </header>
+
+  <div class="settings-grid">
+  <div class="col">
   <div class="card">
     <div class="card-header">
       <span class="card-title">Workspace</span>
@@ -403,6 +509,9 @@
     </div>
   </div>
 
+  </div>
+
+  <div class="col">
   <div class="card">
     <div class="card-header">
       <span class="card-title">Format listy m/z</span>
@@ -422,6 +531,27 @@
 
   <div class="card">
     <div class="card-header">
+      <span class="card-title">Personalizacja</span>
+    </div>
+    <div class="field-group">
+      <label class="field-label" for="colormap-select">Tablica kolorów map m/z (lookup table)</label>
+      <select id="colormap-select" class="field-select" value={colormapId}
+              onchange={(e) => setColormap((e.target as HTMLSelectElement).value)}>
+        {#each COLORMAPS as c (c.id)}
+          <option value={c.id}>{c.label}</option>
+        {/each}
+      </select>
+      <div class="cmap-preview" style="background:{colormapGradientCss(colormapId)}"></div>
+      <div class="cmap-scale"><span>niska intensywność</span><span>wysoka</span></div>
+    </div>
+    <div class="canvas-hint">
+      Dotyczy wszystkich map m/z: zakładki m/z (pojedyncze, Grupy, Łączenie, Zapisane), panelu pikseli
+      oraz map w Node Graph. Ustawienie wspólne dla wszystkich workspace'ów.
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
       <span class="card-title">Widok płótna</span>
     </div>
     <div class="field-group">
@@ -435,6 +565,8 @@
              oninput={(e) => setCanvasPanSens(Number((e.target as HTMLInputElement).value))} />
     </div>
     <div class="canvas-hint">Dotyczy wszystkich Node Graphów oraz Tablicy.</div>
+  </div>
+  </div>
   </div>
 </div>
 
@@ -479,12 +611,73 @@
 />
 
 <style>
-  .settings-tab { flex: 1; min-height: 0; padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+  /* One-page: całe Ustawienia mieszczą się w oknie, bez przewijania strony i na pełną szerokość.
+   * Długie listy (workspace'y, zestawy, grafy…) przewijają się wewnątrz swoich kart. */
+  .settings-tab { flex: 1; min-height: 0; padding: 14px 18px; overflow: hidden; display: flex; flex-direction: column; gap: 14px; box-sizing: border-box; }
+
+  /* ── Nagłówek: tytuł + statystyki + wskazówka (lewo), losowa mapa (prawo) ── */
+  .hero {
+    flex-shrink: 0; width: 100%; box-sizing: border-box;
+    display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 20px; align-items: stretch;
+    padding: 12px 16px; border-radius: 14px;
+    background: linear-gradient(135deg, rgba(255,201,81,0.09), rgba(255,255,255,0.025) 55%);
+    border: 1px solid rgba(255,201,81,0.16);
+  }
+  .hero-main { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .hero-eyebrow { font-size: 0.62rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: #ffc951; }
+  .hero-title { margin: 0; font-size: 1.3rem; font-weight: 700; color: #f2f2f2; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stat-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .stat {
+    display: flex; flex-direction: column; min-width: 86px; padding: 5px 12px;
+    background: rgba(255,255,255,0.045); border: 1px solid rgba(255,255,255,0.08); border-radius: 9px;
+  }
+  .stat-n { font-size: 1.15rem; font-weight: 700; color: #ffc951; line-height: 1.1; }
+  .stat-l { font-size: 0.58rem; color: rgba(255,255,255,0.45); letter-spacing: 0.03em; }
+  .tip {
+    margin-top: auto; display: flex; gap: 10px; align-items: baseline; text-align: left;
+    background: rgba(0,0,0,0.22); border: 1px dashed rgba(255,255,255,0.13); border-radius: 9px;
+    padding: 6px 12px; cursor: pointer; font-family: inherit; color: rgba(255,255,255,0.6);
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .tip:hover { border-color: rgba(255,201,81,0.45); color: rgba(255,255,255,0.85); }
+  .tip-tag { flex-shrink: 0; font-size: 0.55rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #ffc951; }
+  .tip-text { font-size: 0.68rem; line-height: 1.4; }
+
+  .featured {
+    display: flex; flex-direction: column; gap: 6px; min-width: 0;
+    background: #1a1a1a; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 8px 10px 10px;
+  }
+  .featured-head { display: flex; align-items: center; }
+  .featured-title { flex: 1; font-size: 0.58rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: rgba(255,255,255,0.4); }
+  .featured-canvas { height: 104px; display: flex; border-radius: 8px; overflow: hidden; background: #111; }
+  .featured-canvas :global(.card) { flex: 1; min-height: 0; border-radius: 8px; box-shadow: none; }
+  .featured-empty {
+    flex: 1; display: flex; align-items: center; justify-content: center; text-align: center;
+    padding: 12px; font-size: 0.64rem; line-height: 1.4; color: rgba(255,255,255,0.35);
+  }
+  .featured-caption { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .featured-name { font-size: 0.72rem; font-weight: 600; color: #e6e6e6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .featured-sub { font-size: 0.6rem; color: rgba(255,255,255,0.4); }
+
+  /* ── Dwie kolumny: projekt (workspace/dane/grafy/grupy) | wygląd i zachowanie ── */
+  /* Siatka 12 kolumn × 2 wiersze: góra = 4 karty z listami (po 3 kol.), dół = 3 karty z
+   * ustawieniami (po 4 kol.). Wrappery .col to tylko grupowanie w markupie (display: contents),
+   * karty są bezpośrednimi elementami siatki. */
+  .settings-grid {
+    flex: 1; min-height: 0; width: 100%;
+    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr));
+    grid-template-rows: minmax(0, 1fr) auto; gap: 14px;
+  }
+  .col { display: contents; }
+  .col:first-child > .card { grid-column: span 3; }
+  .col:last-child > .card { grid-column: span 4; }
+
   .card {
     background: #222; border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 12px; padding: 14px 16px; max-width: 640px;
+    border-radius: 12px; padding: 12px 14px;
+    display: flex; flex-direction: column; min-height: 0; min-width: 0;
   }
-  .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-shrink: 0; }
   .card-title {
     font-size: 0.8rem; font-weight: 700; letter-spacing: 0.06em;
     text-transform: uppercase; color: rgba(255,255,255,0.5); flex: 1;
@@ -515,11 +708,27 @@
   }
   .field-input:focus { border-color: #ffc951; }
 
+  .field-select {
+    width: 100%; background: #1a1a1a; border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 7px; color: #f0f0f0; font-size: 0.75rem; padding: 6px 9px;
+    outline: none; font-family: inherit; cursor: pointer; box-sizing: border-box;
+  }
+  .field-select:hover, .field-select:focus { border-color: rgba(255,201,81,0.5); }
+  .field-select option { background: #1a1a1a; color: #e0e0e0; }
+  .cmap-preview {
+    height: 14px; border-radius: 4px; margin-top: 8px;
+    border: 1px solid rgba(255,255,255,0.12);
+  }
+  .cmap-scale {
+    display: flex; justify-content: space-between; margin-top: 3px;
+    font-size: 0.58rem; color: rgba(255,255,255,0.35);
+  }
+
   .error-msg { font-size: 0.68rem; color: #ff8080; margin-bottom: 8px; }
 
-  .ws-list { display: flex; flex-direction: column; gap: 5px; }
+  .ws-list { display: flex; flex-direction: column; gap: 5px; flex: 1; min-height: 0; overflow-y: auto; padding-right: 2px; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.12) transparent; }
   .ws-row {
-    display: flex; align-items: center; gap: 8px;
+    display: flex; align-items: center; gap: 8px; flex-shrink: 0; min-width: 0;
     padding: 7px 10px; background: rgba(255,255,255,0.03);
     border: 1px solid rgba(255,255,255,0.07); border-radius: 8px;
   }
@@ -532,6 +741,7 @@
     background: none; border: none; color: #e0e0e0; font-size: 0.78rem;
     font-weight: 600; font-family: inherit; cursor: pointer; text-align: left;
     padding: 0; display: flex; align-items: center; gap: 6px;
+    min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   }
   .ws-name:disabled { cursor: default; color: #ffc951; }
   .ws-active-badge {
@@ -541,7 +751,7 @@
 
   .rename-input { max-width: 200px; }
 
-  .ws-meta { flex: 1; font-size: 0.6rem; color: rgba(255,255,255,0.25); text-align: right; }
+  .ws-meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.6rem; color: rgba(255,255,255,0.25); text-align: right; }
 
   .ws-actions { display: flex; gap: 2px; flex-shrink: 0; }
   .icon-btn {
