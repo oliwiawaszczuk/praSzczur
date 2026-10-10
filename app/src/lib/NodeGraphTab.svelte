@@ -115,7 +115,8 @@
   }
 
   function applyHistorySnapshot(snap: Graph) {
-    graph = JSON.parse(JSON.stringify(snap));
+    // Widok (pan/zoom) nie jest częścią historii — undo zostawia bieżący.
+    graph = { ...JSON.parse(JSON.stringify(snap)), viewport: { ...graph.viewport } };
     selectedNodeIds = new Set();
     selectedNoteIds = new Set();
     scheduleSaveNodeGraph(activeGraphId, graph);
@@ -137,6 +138,7 @@
 
   async function openGraph(id: string) {
     if (id === activeGraphId && graphReady) return;
+    flushViewportSave();
     await flushSaveNodeGraph();
     const data = await getNodeGraphData(id);
     graph = sanitize(data);
@@ -184,10 +186,12 @@
   });
 
   onDestroy(() => {
+    flushViewportSave();
     flushSaveNodeGraph();
+    if (wheelRaf) cancelAnimationFrame(wheelRaf);
     window.removeEventListener("beforeunload", onBeforeUnload);
   });
-  function onBeforeUnload() { flushSaveNodeGraph(); }
+  function onBeforeUnload() { flushViewportSave(); flushSaveNodeGraph(); }
 
   // ── Panel node'ów (prawy sidebar) ───────────────────────────────────
   let sidebarOpen = $state(wsGet(LS_SIDEBAR, true));
@@ -426,8 +430,26 @@
     return evalMemo.get(nodeId) ?? { ok: false, error: "brak węzła" };
   }
 
+  // Memo per obiekt wartości (jak zestawTraces) — ten sam MapaValue daje ten
+  // sam TissueImage, więc IonCanvas nie przerysowuje się (ani nie liczy
+  // maxOf po całej mapie), dopóki graf faktycznie nie przeliczy node'a.
+  const resultTissueMemo = new WeakMap<MapaValue, TissueImage>();
   function resultTissue(r: MapaValue): TissueImage {
-    return { label: r.tissueLabel || r.tissueId, data: r.data, mask: r.mask, width: r.width, height: r.height, vmax: maxOf(r.data) };
+    let t = resultTissueMemo.get(r);
+    if (!t) {
+      t = { label: r.tissueLabel || r.tissueId, data: r.data, mask: r.mask, width: r.width, height: r.height, vmax: maxOf(r.data) };
+      resultTissueMemo.set(r, t);
+    }
+    return t;
+  }
+  const widmoTraceMemo = new WeakMap<WidmoValue, { mz: number[]; intensity: number[]; label: string; color: string }[]>();
+  function widmoTraces(w: WidmoValue) {
+    let t = widmoTraceMemo.get(w);
+    if (!t) {
+      t = [{ mz: w.mz, intensity: w.intensity, label: w.label, color: "#5b9bd5" }];
+      widmoTraceMemo.set(w, t);
+    }
+    return t;
   }
 
   let zoomTissue = $state<TissueImage | null>(null);
@@ -439,12 +461,33 @@
   let container = $state<HTMLDivElement | null>(null);
   let viewport = $derived(graph.viewport);
 
+  // WYDAJNOŚĆ (pan/zoom): viewport jest mutowany W MIEJSCU (`graph.viewport = v`),
+  // NIE przez `graph = { ...graph, viewport }`. Podmiana całego `graph`
+  // unieważniała każdy odczyt `graph.nodes`/`graph.edges` — evalMemo liczył
+  // od nowa CAŁY graf, a każdy podgląd (IonCanvas, Plotly) rysował się od nowa
+  // przy KAŻDYM zdarzeniu wheel, stąd lag rosnący z liczbą node'ów. Mutacja
+  // pola proxy `$state` unieważnia tylko odczyty `graph.viewport`.
+  // Zmiana widoku nie trafia też do historii Ctrl+Z (snapshot = głęboki klon
+  // całego grafu) i jest zapisywana z dłuższym debounce'em.
+  let viewportSaveTimer: ReturnType<typeof setTimeout> | null = null;
   function setViewport(v: GraphViewport) {
-    graph = { ...graph, viewport: v };
-    persist();
+    graph.viewport = v;
+    if (viewportSaveTimer) clearTimeout(viewportSaveTimer);
+    viewportSaveTimer = setTimeout(() => {
+      viewportSaveTimer = null;
+      if (activeGraphId) scheduleSaveNodeGraph(activeGraphId, graph);
+    }, 1000);
   }
   function setViewportSilent(v: GraphViewport) {
-    graph = { ...graph, viewport: v };
+    graph.viewport = v;
+  }
+  /** Zapisuje od razu oczekującą (debounced) zmianę widoku — przed
+   * przełączeniem grafu / zamknięciem, żeby nie zgubić ostatniego pan/zoom. */
+  function flushViewportSave() {
+    if (!viewportSaveTimer) return;
+    clearTimeout(viewportSaveTimer);
+    viewportSaveTimer = null;
+    if (activeGraphId) scheduleSaveNodeGraph(activeGraphId, graph);
   }
 
   function screenToWorld(p: { x: number; y: number }): { x: number; y: number } {
@@ -465,18 +508,41 @@
   let zoomSensitivity = $derived(getSetting("canvasZoomSensitivity", 1));
   let panSensitivity = $derived(getSetting("canvasPanSensitivity", 1));
 
+  // Trackpad potrafi wysłać kilka zdarzeń wheel na klatkę — zamiast
+  // aktualizować widok przy każdym, zbieramy je w `pendingWheel` (na lokalnej
+  // kopii widoku) i stosujemy RAZ per klatkę (requestAnimationFrame).
+  let pendingWheel: GraphViewport | null = null;
+  let wheelRaf = 0;
+  // Klasa `.moving` (will-change: transform) tylko W TRAKCIE pan/zoom —
+  // przeglądarka przesuwa wtedy gotową warstwę GPU zamiast repaintu całej
+  // treści; zdejmowana po chwili bezczynności, żeby po zoomie tekst/podglądy
+  // zostały przerysowane ostro w nowej skali.
+  let viewMoving = $state(false);
+  let viewMovingTimer: ReturnType<typeof setTimeout> | null = null;
+
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     const rect = container?.getBoundingClientRect();
+    const v = pendingWheel ?? { ...viewport };
     if (e.ctrlKey || e.metaKey) {
       const pointer = { x: e.clientX - (rect?.left ?? 0), y: e.clientY - (rect?.top ?? 0) };
-      const oldScale = viewport.zoom;
-      const pointTo = { x: (pointer.x - viewport.x) / oldScale, y: (pointer.y - viewport.y) / oldScale };
+      const oldScale = v.zoom;
+      const pointTo = { x: (pointer.x - v.x) / oldScale, y: (pointer.y - v.y) / oldScale };
       const dir = e.deltaY > 0 ? -1 : 1;
       const newScale = Math.max(0.2, Math.min(3, oldScale * (1 + dir * 0.08 * zoomSensitivity)));
-      setViewport({ zoom: newScale, x: pointer.x - pointTo.x * newScale, y: pointer.y - pointTo.y * newScale });
+      pendingWheel = { zoom: newScale, x: pointer.x - pointTo.x * newScale, y: pointer.y - pointTo.y * newScale };
     } else {
-      setViewport({ ...viewport, x: viewport.x - e.deltaX * panSensitivity, y: viewport.y - e.deltaY * panSensitivity });
+      pendingWheel = { ...v, x: v.x - e.deltaX * panSensitivity, y: v.y - e.deltaY * panSensitivity };
+    }
+    if (!viewMoving) viewMoving = true;
+    if (viewMovingTimer) clearTimeout(viewMovingTimer);
+    viewMovingTimer = setTimeout(() => { viewMoving = false; }, 200);
+    if (!wheelRaf) {
+      wheelRaf = requestAnimationFrame(() => {
+        wheelRaf = 0;
+        if (pendingWheel) setViewport(pendingWheel);
+        pendingWheel = null;
+      });
     }
   }
 
@@ -728,9 +794,13 @@
    * pozycję przesuniętą o `dragLiveOffset` (bez dotykania `graph.nodes`),
    * dla pozostałych node'ów zwraca ich prawdziwe `x`/`y`. */
   function effectiveNodePos(node: GraphNode): { x: number; y: number } {
-    if (dragLiveOffset) {
+    // Najpierw (nie-reaktywny) test przynależności do przeciąganej grupy, a
+    // dopiero potem odczyt `dragLiveOffset` — dzięki temu tylko PRZECIĄGANE
+    // node'y (i ich krawędzie) subskrybują `dragLiveOffset` i przerysowują
+    // się na każdą klatkę; reszta zależy tylko od `dragNodeId` (2 zmiany/drag).
+    if (dragNodeId) {
       const origin = dragGroupOrigin.get(node.id);
-      if (origin) return { x: origin.x + dragLiveOffset.dx, y: origin.y + dragLiveOffset.dy };
+      if (origin && dragLiveOffset) return { x: origin.x + dragLiveOffset.dx, y: origin.y + dragLiveOffset.dy };
     }
     return { x: node.x, y: node.y };
   }
@@ -787,10 +857,15 @@
       // klik, nie drag) — wtedy nie ma czego commitować.
       if (dragLiveOffset) {
         const { dx, dy } = dragLiveOffset;
+        // Mutacja x/y W MIEJSCU (nie `graph.nodes[idx] = {...}`) — podmiana
+        // elementu tablicy unieważniała `graph.nodes`, więc puszczenie
+        // przeciąganego node'a przeliczało cały graf i przerysowywało
+        // wszystkie podglądy. evalMemo nie czyta x/y, więc teraz to tani zapis.
         for (const [id, origin] of dragGroupOrigin) {
-          const idx = graph.nodes.findIndex((n) => n.id === id);
-          if (idx === -1) continue;
-          graph.nodes[idx] = { ...graph.nodes[idx], x: origin.x + dx, y: origin.y + dy };
+          const n = nodeById.get(id);
+          if (!n) continue;
+          n.x = origin.x + dx;
+          n.y = origin.y + dy;
         }
       }
       persist();
@@ -937,6 +1012,7 @@
 
   function onPortPointerDown(e: PointerEvent, node: GraphNode, direction: "in" | "out", socket: PortSocketDef) {
     e.stopPropagation();
+    cursorWorld = screenToWorld({ x: e.clientX, y: e.clientY });
     if (direction === "in" && !socket.multi) {
       // Blender-style: chwytanie za końcówkę już podłączonego (single) wejścia
       // odłącza istniejące połączenie i zaczyna ciągnąć je od strony źródła.
@@ -961,7 +1037,9 @@
 
   function onCanvasPointerMove(e: PointerEvent) {
     lastMouseClient = { x: e.clientX, y: e.clientY };
-    cursorWorld = screenToWorld(lastMouseClient);
+    // `cursorWorld` czyta tylko podgląd ciągniętego połączenia — liczony
+    // (getBoundingClientRect + zapis $state) tylko wtedy, gdy jest potrzebny.
+    if (connDrag) cursorWorld = screenToWorld(lastMouseClient);
     if (dragNodeId) onNodeHeaderPointerMove(e);
     if (dragNoteId) onNoteHeaderPointerMove(e);
     if (marqueeActive) {
@@ -1009,7 +1087,7 @@
   function resolveConnection(openSearchIfEmpty: boolean, e?: PointerEvent) {
     if (!connDrag) return;
     const wantDir: "in" | "out" = connDrag.direction === "out" ? "in" : "out";
-    const target = findNearestSocket(cursorWorld, wantDir, connDrag.nodeId, connDrag.kind);
+    const target = findNearestSocket(screenToWorld(e ? { x: e.clientX, y: e.clientY } : lastMouseClient), wantDir, connDrag.nodeId, connDrag.kind);
     if (target) {
       finishConnection(connDrag, { nodeId: target.node.id, socketId: target.socket.id, direction: wantDir });
       connDrag = null;
@@ -2204,7 +2282,7 @@
   role="application"
   aria-label="Edytor grafu node'ów"
 >
-  <div class="nodegraph-content" style="transform: translate({viewport.x}px, {viewport.y}px) scale({viewport.zoom});">
+  <div class="nodegraph-content" class:moving={viewMoving} style="transform: translate({viewport.x}px, {viewport.y}px) scale({viewport.zoom});">
 
     <!-- Edges -->
     <svg class="edges-layer">
@@ -3225,11 +3303,10 @@
                   {:else if outcome.ok && outcome.value.kind === "segment"}
                     <SegmentMaskCanvas data={outcome.value.data} mask={outcome.value.mask} />
                   {:else if outcome.ok && outcome.value.kind === "widmo"}
-                    {@const widmoVal = outcome.value}
-                    {@const trace = { mz: widmoVal.mz, intensity: widmoVal.intensity, label: widmoVal.label, color: "#5b9bd5" }}
-                    <SpectrumTracesPlot traces={[trace]} compact />
+                    {@const wTraces = widmoTraces(outcome.value)}
+                    <SpectrumTracesPlot traces={wTraces} compact />
                     <button class="mz-zoom-btn" onpointerdown={(e) => e.stopPropagation()}
-                            onclick={() => (zoomWidmoTraces = [trace])} title="Powiększ">⤢</button>
+                            onclick={() => (zoomWidmoTraces = wTraces)} title="Powiększ">⤢</button>
                   {:else if outcome.ok && outcome.value.kind === "zestaw"}
                     {@const zTraces = zestawTraces(outcome.value)}
                     <SpectrumTracesPlot traces={zTraces} compact />
@@ -3449,6 +3526,9 @@
     left: 0; top: 0;
     transform-origin: 0 0;
   }
+  /* Tylko w trakcie pan/zoom (patrz viewMoving) — stała warstwa GPU, przesuwana
+     bez repaintu treści; na stałe dałoby rozmyty tekst po zoomie. */
+  .nodegraph-content.moving { will-change: transform; }
 
   .edges-layer {
     position: absolute;
@@ -3530,6 +3610,9 @@
     border-radius: 10px;
     box-shadow: 0 4px 16px rgba(0,0,0,0.35);
     user-select: none;
+    /* Zmiana wewnątrz jednego node'a (suwak, podgląd) nie wymusza przeliczenia
+       layoutu pozostałych. Bez `paint` — porty wystają poza krawędź karty. */
+    contain: layout style;
     /* z-index (nawet stałe 1, nie tylko "auto") tworzy WŁASNY kontekst
        stackowania dla tego node'a — dzięki temu kropka portu (.port,
        z-index:5) stackuje się tylko WEWNĄTRZ swojego node'a (ponad jego

@@ -409,6 +409,28 @@ export function defaultParamsFor(typeId: string): Record<string, number | string
 
 // ── Ewaluacja grafu (generyczna, per-gniazdo) ───────────────────────────
 
+/** Indeksy node'ów i krawędzi-po-celu, budowane RAZ per przebieg ewaluacji
+ * (kluczem jest mapa `memo`, która żyje dokładnie tyle co jeden przebieg) —
+ * bez tego każdy node robił `nodes.find` + `edges.filter`, czyli O(N·(N+E))
+ * na całe przeliczenie grafu. */
+interface GraphIndex { nodes: Map<string, GraphNode>; edgesByTarget: Map<string, GraphEdge[]>; }
+const graphIndexCache = new WeakMap<Map<string, EvalOutcome>, GraphIndex>();
+function graphIndex(graph: Graph, memo: Map<string, EvalOutcome>): GraphIndex {
+  let idx = graphIndexCache.get(memo);
+  if (idx) return idx;
+  const nodes = new Map<string, GraphNode>();
+  for (const n of graph.nodes) nodes.set(n.id, n);
+  const edgesByTarget = new Map<string, GraphEdge[]>();
+  for (const e of graph.edges) {
+    const key = `${e.to}:${e.toSocket}`;
+    const arr = edgesByTarget.get(key);
+    if (arr) arr.push(e); else edgesByTarget.set(key, [e]);
+  }
+  idx = { nodes, edgesByTarget };
+  graphIndexCache.set(memo, idx);
+  return idx;
+}
+
 export function evaluateGraphNode(
   graph: Graph,
   nodeId: string,
@@ -424,7 +446,7 @@ export function evaluateGraphNode(
     return err;
   }
 
-  const node = graph.nodes.find((n) => n.id === nodeId);
+  const node = graphIndex(graph, memo).nodes.get(nodeId);
   if (!node) return { ok: false, error: "brak węzła" };
   const def = NODE_TYPES[node.type];
   if (!def) return { ok: false, error: "nieznany typ węzła" };
@@ -452,8 +474,8 @@ function evaluateInner(
     // Krawędzie wygaszone przez `hiddenSegmentEdges` (patrz "Kolorowanie
     // segmentów") traktujemy jak nieistniejące — ukryty segment znika z
     // kompozytu bez usuwania samego połączenia.
-    const edges = graph.edges.filter(
-      (e) => e.to === node.id && e.toSocket === socket.id && !(node.hiddenSegmentEdges?.includes(e.id)),
+    const edges = (graphIndex(graph, memo).edgesByTarget.get(`${node.id}:${socket.id}`) ?? []).filter(
+      (e) => !(node.hiddenSegmentEdges?.includes(e.id)),
     );
     const values: NodeValue[] = [];
     for (const e of edges) {
