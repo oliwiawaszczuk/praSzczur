@@ -29,11 +29,13 @@
     type Graph, type GraphNode, type GraphEdge, type GraphViewport, type PortKind, type PortSocketDef,
     type MapaValue, type SegmentValue, type WidmoValue, type CurvePoint, type EvalOutcome, type EvalContext, type NodeTypeDef,
     type GraphTextNote, type NodeParamDef, type ZestawValue,
+    type PikiValue, type MacierzValue, type RankingValue, type RankingRow, type SegmentacjaValue, type NodeValue,
   } from "$lib/nodegraph";
   import { COMBINE_MODE_LABELS, COMBINE_MODE_LIST, computeHistogram, type CombineModeExt } from "$lib/nodegraph.mapa";
   import { SEG_PALETTE, runKmeans, runQuantile, runHierarchical, runGMM, runDBSCAN, MERGE_MODE_LABELS, MERGE_MODE_LIST, KMEANS_ALGORITHM_LABELS, KMEANS_ALGORITHM_LIST, MORPHOLOGY_MODE_LABELS, MORPHOLOGY_MODE_LIST, MORPHOLOGY_SHAPE_LABELS, MORPHOLOGY_SHAPE_LIST, segMaskInputSignature } from "$lib/nodegraph.segmentacja";
   import {
     WIDMO_COMBINE_MODE_LABELS, WIDMO_COMBINE_MODE_LIST, WIDMO_NORMALIZE_MODE_LABELS, WIDMO_NORMALIZE_MODE_LIST,
+    BASELINE_METHOD_LABELS, TRANSFORM_MODE_LABELS,
     widmoInputSignature, segmentInputSignature, maxIntensity, filterMzByIntensityBand,
   } from "$lib/nodegraph.widmo";
   import {
@@ -41,6 +43,12 @@
     SET_MODE_LABELS, PRE_NORMALIZE_LABELS, MEAN_MODE_LABELS, PLS_OUTPUT_LABELS, TOP_MZ_SIGN_LABELS,
     type TopMzSign,
   } from "$lib/nodegraph.analiza";
+  import {
+    FMP10_LOCK_MZ, fmpCandidates, rankingCsv, markerImageKey, matrixSignature, spatialSignature, contrastSignature,
+    colocSignature, parseMzList, METRIC_LABELS, NOISE_LABELS, YESNO_LABELS, WINDOW_LABELS, MATRIX_NORM_LABELS,
+    COLOC_MODE_LABELS, CONSISTENCY_LABELS,
+  } from "$lib/nodegraph.markery";
+  import { fetchMarkerPeaks, fetchMarkerMatrix, fetchMarkerSpatial, fetchMarkerContrast, fetchMarkerColoc, fetchMarkerImage } from "$lib/api";
   import { formatMzListText } from "$lib/mzListFormat";
   import { mzListDecimals } from "$lib/mzListSettings.svelte";
   import {
@@ -57,6 +65,7 @@
   import "$lib/nodegraph.segmentacja";
   import "$lib/nodegraph.widmo";
   import "$lib/nodegraph.analiza";
+  import "$lib/nodegraph.markery";
 
   interface Props {
     /** Czy ta zakładka jest aktualnie widoczna — pozwala przeliczyć auto-fit
@@ -370,6 +379,25 @@
     for (const n of graph.nodes) if (n.type === "mapa/mz_source") ensureIonLoaded(n);
   });
 
+  // ── "Mapa z rankingu" (markery/top_map): mapa kolumny macierzy markerów, cache po
+  // (macierz, pik) — jak ionData dla mapa/mz_source. ─────────────────────────
+  let markerImgData = $state<Record<string, IonImageResponse>>({});
+  const markerImgLoading = new Set<string>();
+
+  async function ensureMarkerImage(matrixId: string, peak: number) {
+    const key = markerImageKey(matrixId, peak);
+    if (markerImgData[key] || markerImgLoading.has(key)) return;
+    markerImgLoading.add(key);
+    try {
+      const resp = await fetchMarkerImage(matrixId, peak);
+      markerImgData = { ...markerImgData, [key]: resp };
+    } catch {
+      // node pokaże "wczytywanie…"; najczęściej macierz trzeba przeliczyć ("Przetwórz")
+    } finally {
+      markerImgLoading.delete(key);
+    }
+  }
+
   /** Tkanki dostępne w odpowiedzi dla bieżącego zapytania node'a (do dropdownu "tkanka"). */
   function ionTissues(node: GraphNode): { id: string; label: string }[] {
     const resp = ionData[ionQueryKey(String(node.params.dataset ?? ""), Number(node.params.mz), Number(node.params.tol))];
@@ -422,12 +450,21 @@
   // wejściowych, sprowadza to do O(N+E) — każdy node liczony dokładnie raz.
   let evalMemo = $derived.by(() => {
     const memo = new Map<string, EvalOutcome>();
-    const ctx: EvalContext = { ionCache: ionData, tissueLabels: wsGet<Record<string, string>>("dane_tissueLabels", {}), mapCache: mapData, savedMapExists, spectrumCache: spectrumData, savedSpectrumExists };
+    const ctx: EvalContext = { ionCache: ionData, tissueLabels: wsGet<Record<string, string>>("dane_tissueLabels", {}), mapCache: mapData, savedMapExists, spectrumCache: spectrumData, savedSpectrumExists, markerImageCache: markerImgData };
     for (const n of graph.nodes) evaluateGraphNode(graph, n.id, ctx, memo);
     return memo;
   });
   function evalNode(nodeId: string): EvalOutcome {
     return evalMemo.get(nodeId) ?? { ok: false, error: "brak węzła" };
+  }
+  /** Wartość płynąca KRAWĘDZIĄ — jak evalNode(edge.from), ale z mapowaniem na konkretne gniazdo
+   * wyjściowe (NodeTypeDef.selectOutput, np. drugie wyjście "Ranking łączony" = widmo). */
+  function evalEdge(edge: GraphEdge): EvalOutcome {
+    const r = evalNode(edge.from);
+    if (!r.ok) return r;
+    const from = nodeById.get(edge.from);
+    const select = from ? NODE_TYPES[from.type]?.selectOutput : undefined;
+    return select ? { ok: true, value: select(r.value, edge.fromSocket) } : r;
   }
 
   // Memo per obiekt wartości (jak zestawTraces) — ten sam MapaValue daje ten
@@ -588,11 +625,22 @@
     if (node.type === "analiza/mean_spectrum") return 230;
     if (node.type === "analiza/pls_da") return 270;
     if (node.type === "analiza/top_mz") return 290;
+    if (node.type === "markery/peaks" || node.type === "markery/matrix") return 280;
+    if (node.type === "markery/peak_filter") return 260;
+    if (node.type === "markery/table") return 400;
+    if (node.type.startsWith("markery/")) return 300;
+    if (node.type === "widmo/transform") return 220;
     return 210;
   }
 
   /** Węzły czysto podglądowe — brak wartości wyjściowej, więc nie pokazują błędu "brak wyniku". */
-  const PREVIEW_ONLY_TYPES = new Set(["widmo/compare", "widmo/mz_list", "analiza/top_mz"]);
+  const PREVIEW_ONLY_TYPES = new Set(["widmo/compare", "widmo/mz_list", "analiza/top_mz", "markery/table"]);
+
+  /** Wysokość listy parametrów renderowanej przez snippet `paramList` (bez wolnych tekstowych). */
+  function paramsHeight(node: GraphNode): number {
+    return (NODE_TYPES[node.type]?.params ?? []).filter((p) => !(typeof p.default === "string" && !p.options)).length * 40;
+  }
+  const RANK_TABLE_H = 150;
 
   const PREVIEW_MIN_H = 90;
   const PREVIEW_MAX_H = 320;
@@ -644,7 +692,7 @@
       h += 34 + 16;
     } else if (node.type === "segmentacja/select_segments") {
       const inEdge = graph.edges.find((e) => e.to === node.id && e.toSocket === "in");
-      const inOutcome = inEdge ? evalNode(inEdge.from) : null;
+      const inOutcome = inEdge ? evalEdge(inEdge) : null;
       const kCount = inOutcome?.ok && inOutcome.value.kind === "segmentacja" ? inOutcome.value.legend.length : 1;
       h += Math.max(1, kCount) * 22 + 10;
     } else if (node.type === "segmentacja/merge_segments") {
@@ -678,7 +726,9 @@
     } else if (node.type === "widmo/normalize") {
       h += 34;
     } else if (node.type === "widmo/smooth" || node.type === "widmo/baseline" || node.type === "widmo/peakpick") {
-      h += 40 + 34 + 16;
+      h += paramsHeight(node) + 34 + 16;
+    } else if (node.type === "widmo/transform") {
+      h += paramsHeight(node);
     } else if (node.type === "widmo/compare") {
       h += 22 + Math.max(1, inputsFor(node, "a").length) * 24;
       h += 22 + Math.max(1, inputsFor(node, "b").length) * 24;
@@ -703,6 +753,24 @@
       h += 34;
     } else if (node.type === "analiza/pls_da") {
       h += 40 * 4 + 34 + 34 + 34 + 16 + (node.plsCache ? 58 : 0);
+    } else if (node.type === "markery/peaks") {
+      h += paramsHeight(node) + 34 + 16 + 190;
+    } else if (node.type === "markery/peak_filter") {
+      h += paramsHeight(node) + 52 + 190;
+    } else if (node.type === "markery/matrix") {
+      h += 40 + paramsHeight(node) + 22 + Math.max(1, inputsFor(node, "roi").length) * 24 + 10 + 34 + 16;
+      h += node.matrixCache ? 16 * (node.matrixCache.info.tissues.length + 1) + 6 : 0;
+    } else if (node.type === "markery/spatial" || node.type === "markery/coloc") {
+      h += paramsHeight(node) + 34 + 16 + RANK_TABLE_H;
+    } else if (node.type === "markery/contrast") {
+      h += paramsHeight(node) + 22 + Math.max(1, inputsFor(node, "seg").length) * 24 + 10 + 34 + 16 + RANK_TABLE_H;
+      h += node.rankingCache?.note ? 40 : 0;
+    } else if (node.type === "markery/consistency" || node.type === "markery/combine") {
+      h += paramsHeight(node) + RANK_TABLE_H;
+    } else if (node.type === "markery/top_map") {
+      h += paramsHeight(node) + 40 + RANK_TABLE_H;
+    } else if (node.type === "markery/table") {
+      h += paramsHeight(node) + 300 + 8 + 34 * 2 + 16;
     } else if (node.type === "analiza/top_mz") {
       h += 40 * 2 + 34; // k, odstęp, kierunek
       h += 180 + 10; // wykres z markerami
@@ -1359,6 +1427,8 @@
       ensureDatasetTissues(activeDatasetId());
     }
     if (typeId === "analiza/set_segments") node.params = { ...node.params, dataset: activeDatasetId() || RAW_DATASET_ID };
+    if (typeId === "markery/matrix") node.params = { ...node.params, dataset: RAW_DATASET_ID };
+    if (typeId === "markery/peak_filter") node.excludeMz = String(FMP10_LOCK_MZ);
     graph.nodes.push(node);
     if (pendingConn) {
       const def = NODE_TYPES[typeId];
@@ -1682,7 +1752,7 @@
     if (inEdges.length === 0) { kmeansStatus = { ...kmeansStatus, [node.id]: "podłącz przynajmniej jedną mapę" }; return; }
     const inputs: MapaValue[] = [];
     for (const e of inEdges) {
-      const r = evalNode(e.from);
+      const r = evalEdge(e);
       if (!r.ok) { kmeansStatus = { ...kmeansStatus, [node.id]: r.error }; return; }
       if (r.value.kind !== "mapa") { kmeansStatus = { ...kmeansStatus, [node.id]: "wejście musi być mapą" }; return; }
       inputs.push(r.value);
@@ -1808,7 +1878,7 @@
   async function runMorphSnakesNode(node: GraphNode) {
     const inEdges = inputsFor(node, "in");
     if (inEdges.length === 0) { segPostStatus = { ...segPostStatus, [node.id]: "podłącz segment" }; return; }
-    const r = evalNode(inEdges[0].from);
+    const r = evalEdge(inEdges[0]);
     if (!r.ok) { segPostStatus = { ...segPostStatus, [node.id]: r.error }; return; }
     if (r.value.kind !== "segment") { segPostStatus = { ...segPostStatus, [node.id]: "wejście musi być segmentem" }; return; }
     const seg = r.value;
@@ -1843,7 +1913,7 @@
   async function runSpectralRefineNode(node: GraphNode) {
     const inEdges = inputsFor(node, "in");
     if (inEdges.length === 0) { segPostStatus = { ...segPostStatus, [node.id]: "podłącz segment" }; return; }
-    const r = evalNode(inEdges[0].from);
+    const r = evalEdge(inEdges[0]);
     if (!r.ok) { segPostStatus = { ...segPostStatus, [node.id]: r.error }; return; }
     if (r.value.kind !== "segment") { segPostStatus = { ...segPostStatus, [node.id]: "wejście musi być segmentem" }; return; }
     const seg = r.value;
@@ -1878,7 +1948,7 @@
   async function runFromSegmentNode(node: GraphNode) {
     const inEdges = inputsFor(node, "in");
     if (inEdges.length === 0) { widmoRunStatus = { ...widmoRunStatus, [node.id]: "podłącz segment" }; return; }
-    const r = evalNode(inEdges[0].from);
+    const r = evalEdge(inEdges[0]);
     if (!r.ok) { widmoRunStatus = { ...widmoRunStatus, [node.id]: r.error }; return; }
     if (r.value.kind !== "segment") { widmoRunStatus = { ...widmoRunStatus, [node.id]: "wejście musi być segmentem" }; return; }
     const seg = r.value;
@@ -1921,7 +1991,7 @@
     if (!method) return;
     const inEdges = inputsFor(node, "in");
     if (inEdges.length === 0) { widmoRunStatus = { ...widmoRunStatus, [node.id]: "podłącz widmo" }; return; }
-    const r = evalNode(inEdges[0].from);
+    const r = evalEdge(inEdges[0]);
     if (!r.ok) { widmoRunStatus = { ...widmoRunStatus, [node.id]: r.error }; return; }
     if (r.value.kind !== "widmo") { widmoRunStatus = { ...widmoRunStatus, [node.id]: "wejście musi być widmem" }; return; }
     const src = r.value;
@@ -2070,7 +2140,7 @@
     if (edges.length === 0) { setAnalizaStatus(node.id, "podłącz segmenty"); return; }
     const segs: SegmentValue[] = [];
     for (const e of edges) {
-      const r = evalNode(e.from);
+      const r = evalEdge(e);
       if (!r.ok) { setAnalizaStatus(node.id, r.error); return; }
       if (r.value.kind !== "segment") { setAnalizaStatus(node.id, "wejścia muszą być segmentami"); return; }
       segs.push(r.value);
@@ -2112,7 +2182,7 @@
   function zestawInput(node: GraphNode, socketId: string, what: string): ZestawValue | string {
     const edge = inputsFor(node, socketId)[0];
     if (!edge) return `podłącz ${what}`;
-    const r = evalNode(edge.from);
+    const r = evalEdge(edge);
     if (!r.ok) return r.error;
     if (r.value.kind !== "zestaw") return `${what} musi być zestawem widm`;
     return r.value;
@@ -2164,6 +2234,215 @@
     } finally {
       runningNodeId = null;
     }
+  }
+
+  // ── Domena "Markery przestrzenne" (patrz nodegraph.markery.ts) ─────────────
+  // Węzły z backendem: ręczny "Przetwórz" + cache na węźle (peaksCache / matrixCache /
+  // rankingCache); statusy w analizaStatus (wspólny runBlock).
+
+  /** Wartość wejścia węzła danego rodzaju (po ewaluacji), albo komunikat błędu do statusu. */
+  function inputOf<K extends "widmo" | "piki" | "macierz" | "ranking">(node: GraphNode, socketId: string, kind: K, what: string) {
+    const edge = inputsFor(node, socketId)[0];
+    if (!edge) return `podłącz ${what}`;
+    const r = evalEdge(edge);
+    if (!r.ok) return r.error;
+    if (r.value.kind !== kind) return `${what}: zły rodzaj wejścia`;
+    return r.value as Extract<typeof r.value, { kind: K }>;
+  }
+
+  function multiInputs<K extends "segment" | "segmentacja">(node: GraphNode, socketId: string, kind: K) {
+    const out: Extract<NodeValue, { kind: K }>[] = [];
+    for (const e of inputsFor(node, socketId)) {
+      const r = evalEdge(e);
+      if (!r.ok) return r.error;
+      if (r.value.kind !== kind) return "zły rodzaj wejścia";
+      out.push(r.value as Extract<NodeValue, { kind: K }>);
+    }
+    return out;
+  }
+
+  async function runMarkerTask(node: GraphNode, task: () => Promise<string>) {
+    runningNodeId = node.id;
+    setAnalizaStatus(node.id, "liczenie…");
+    try {
+      setAnalizaStatus(node.id, await task());
+    } catch (e) {
+      setAnalizaStatus(node.id, e instanceof Error ? e.message : String(e));
+    } finally {
+      runningNodeId = null;
+    }
+  }
+
+  function runPeaksNode(node: GraphNode) {
+    const src = inputOf(node, "in", "widmo", "widmo");
+    if (typeof src === "string") { setAnalizaStatus(node.id, src); return; }
+    runMarkerTask(node, async () => {
+      const res = await fetchMarkerPeaks(src.mz, src.intensity, {
+        snr: Number(node.params.snr ?? 3), half_window_da: Number(node.params.half_window_da ?? 0.1),
+        min_distance_da: Number(node.params.min_distance_da ?? 0), max_peaks: Math.round(Number(node.params.max_peaks ?? 400)),
+        noise: String(node.params.noise ?? "local"), fit: true,
+      });
+      patchNode(node.id, { peaksCache: { inputSignature: widmoInputSignature(src.mz, src.intensity, node.params), peaks: res.peaks } });
+      const iso = res.peaks.filter((p) => p.isotope_of !== undefined).length;
+      return `gotowe — ${res.peaks.length} pików (${iso} wygląda na izotopy)`;
+    });
+  }
+
+  function runMatrixNode(node: GraphNode) {
+    const src = inputOf(node, "in", "piki", "listę pików");
+    if (typeof src === "string") { setAnalizaStatus(node.id, src); return; }
+    const rois = multiInputs(node, "roi", "segment");
+    if (typeof rois === "string") { setAnalizaStatus(node.id, rois); return; }
+    const datasetChoice = String(node.params.dataset ?? RAW_DATASET_ID);
+    const raw = datasetChoice === RAW_DATASET_ID;
+    runMarkerTask(node, async () => {
+      setAnalizaStatus(node.id, `budowanie macierzy (${src.peaks.length} pików × wszystkie piksele) — to może potrwać 1–2 min…`);
+      const res = await fetchMarkerMatrix({
+        source: raw ? "raw" : "binned", dataset: raw ? "" : datasetChoice,
+        peaks: src.peaks.map((p) => ({ mz: p.mz, lo: p.lo, hi: p.hi, fwhm: p.fwhm })),
+        window: String(node.params.window ?? "fwhm"), fwhm_factor: Number(node.params.fwhm_factor ?? 1),
+        tol_ppm: Number(node.params.tol_ppm ?? 50), normalize: String(node.params.normalize ?? "tic"),
+        baseline: node.params.baseline !== "no", recal: node.params.recal !== "no",
+        lock_mz: Number(node.params.lock_mz ?? FMP10_LOCK_MZ),
+        rois: rois.map((r) => ({ tissue: r.tissueId, mask: r.data })),
+      });
+      patchNode(node.id, {
+        matrixCache: {
+          inputSignature: matrixSignature(src.peaks, rois, node.params),
+          info: { matrixId: res.matrix_id, nPixels: res.n_pixels, nPeaks: res.n_peaks, tissues: res.tissues, coverage: res.coverage, seconds: res.seconds },
+        },
+      });
+      return `gotowe w ${res.seconds}s — ${res.n_pixels} pikseli × ${res.n_peaks} pików`;
+    });
+  }
+
+  function runSpatialNode(node: GraphNode) {
+    const m = inputOf(node, "in", "macierz", "macierz");
+    if (typeof m === "string") { setAnalizaStatus(node.id, m); return; }
+    runMarkerTask(node, async () => {
+      const res = await fetchMarkerSpatial(m.matrixId, Number(node.params.min_coverage ?? 0.1));
+      patchNode(node.id, { rankingCache: { inputSignature: spatialSignature(m, node.params), rows: res.rows } });
+      return `gotowe — ${res.rows.length} m/z`;
+    });
+  }
+
+  /** Czy segmentacja powstała z m/z, które są też kolumnami macierzy (±0.05 Da) — double dipping. */
+  function contrastOverlap(m: MacierzValue, segs: SegmentacjaValue[]): number[] {
+    const used = segs.flatMap((s) => s.sources.map((src) => Number(src.mz))).filter((v) => Number.isFinite(v) && v > 0);
+    return [...new Set(used.filter((u) => m.peaks.some((p) => Math.abs(p.mz - u) <= 0.05)))];
+  }
+
+  function runContrastNode(node: GraphNode) {
+    const m = inputOf(node, "in", "macierz", "macierz");
+    if (typeof m === "string") { setAnalizaStatus(node.id, m); return; }
+    const segs = multiInputs(node, "seg", "segmentacja");
+    if (typeof segs === "string") { setAnalizaStatus(node.id, segs); return; }
+    if (segs.length === 0) { setAnalizaStatus(node.id, "podłącz segmentację (regiony)"); return; }
+    runMarkerTask(node, async () => {
+      const res = await fetchMarkerContrast(m.matrixId, segs.map((sg) => ({ tissue: sg.tissueId, labels: sg.labels })), Number(node.params.min_region ?? 20));
+      const overlap = contrastOverlap(m, segs);
+      patchNode(node.id, {
+        rankingCache: {
+          inputSignature: contrastSignature(m, segs, node.params), rows: res.rows,
+          note: overlap.length ? `⚠ segmentacja liczona z m/z obecnych w macierzy (${overlap.slice(0, 4).map((v) => v.toFixed(2)).join(", ")}${overlap.length > 4 ? "…" : ""}) — kontrast tych m/z jest zawyżony (double dipping)` : undefined,
+        },
+      });
+      return `gotowe — regiony: ${Object.entries(res.regions).map(([t, r]) => `${t}: ${r.length}`).join(", ")}`;
+    });
+  }
+
+  function runColocNode(node: GraphNode) {
+    const r = inputOf(node, "in", "ranking", "ranking");
+    if (typeof r === "string") { setAnalizaStatus(node.id, r); return; }
+    const m = inputOf(node, "mat", "macierz", "macierz");
+    if (typeof m === "string") { setAnalizaStatus(node.id, m); return; }
+    if (r.matrixId !== m.matrixId) { setAnalizaStatus(node.id, "ranking pochodzi z innej macierzy"); return; }
+    runMarkerTask(node, async () => {
+      const res = await fetchMarkerColoc(m.matrixId, r.rows.map((x) => x.peak), Number(node.params.r_threshold ?? 0.8));
+      const sizes = new Map<number, number>();
+      for (const g of Object.values(res.groups)) sizes.set(g.group, (sizes.get(g.group) ?? 0) + 1);
+      const rows: RankingRow[] = r.rows.map((x) => {
+        const g = res.groups[String(x.peak)];
+        if (!g) return x;
+        return { ...x, group: g.group, group_size: sizes.get(g.group), metrics: { ...x.metrics, rep: g.rep === x.peak ? 1 : 0, r_rep: g.r } };
+      });
+      patchNode(node.id, { rankingCache: { inputSignature: colocSignature(m, r, node.params), rows } });
+      const multi = [...sizes.values()].filter((n) => n > 1).length;
+      return `gotowe — ${sizes.size} grup, ${multi} z więcej niż jednym pikiem`;
+    });
+  }
+
+  // Mapy dla "Mapa z rankingu" — pobierane, gdy zmieni się wybrana pozycja/macierz.
+  $effect(() => {
+    for (const n of graph.nodes) {
+      if (n.type !== "markery/top_map") continue;
+      const re = inputsFor(n, "in")[0];
+      if (!re) continue;
+      const r = evalEdge(re);
+      if (!r.ok || r.value.kind !== "ranking") continue;
+      const row = r.value.rows[Math.max(0, Math.round(Number(n.params.rank ?? 1)) - 1)];
+      if (row) ensureMarkerImage(r.value.matrixId, row.peak);
+    }
+  });
+
+  function setTopMapRank(node: GraphNode, rank: number) {
+    patchNode(node.id, { params: { ...node.params, rank } });
+  }
+
+  let csvCopyStatus = $state<Record<string, boolean>>({});
+  async function copyRankingCsv(node: GraphNode, rows: RankingRow[]) {
+    try {
+      await navigator.clipboard.writeText(rankingCsv(rows));
+      csvCopyStatus = { ...csvCopyStatus, [node.id]: true };
+      setTimeout(() => { csvCopyStatus = { ...csvCopyStatus, [node.id]: false }; }, 1200);
+    } catch {
+      // jak copyMzList — cichy błąd
+    }
+  }
+
+  function setExcludeMz(node: GraphNode, text: string) {
+    patchNode(node.id, { excludeMz: text });
+  }
+
+  /** Wartość rankingu z wyjścia węzła (dla podglądu tabeli w węźle). */
+  function rankingOf(node: GraphNode): RankingValue | null {
+    const r = evalNode(node.id);
+    return r.ok && r.value.kind === "ranking" ? r.value : null;
+  }
+
+  /** Komórka tabeli rankingu: metryka albo pola specjalne (adnotacja FMP-10, grupa kolokalizacji). */
+  function cellValue(r: RankingRow, key: string): string {
+    if (key === "fmp") return fmpCandidates(r.mz)[0] ?? "";
+    if (key === "group") return r.group === undefined ? "–" : `${r.group}${(r.group_size ?? 1) > 1 ? ` (${r.group_size})` : ""}`;
+    return fmtMetric(r.metrics[key]);
+  }
+
+  function fmtMetric(v: number | null | undefined): string {
+    if (v === null || v === undefined) return "–";
+    return Math.abs(v) >= 100 || Number.isInteger(v) ? String(Math.round(v * 100) / 100) : v.toFixed(3);
+  }
+
+  const peaksTraceMemo = new WeakMap<PikiValue, { mz: number[]; intensity: number[]; label: string; color: string; markers?: boolean }[]>();
+  /** Widmo + znaczniki wykrytych pików (izotopy innym kolorem) — memo jak zestawTraces. */
+  function peaksTraces(pk: PikiValue) {
+    let t = peaksTraceMemo.get(pk);
+    if (!t) {
+      const sp = pk.spectrum!;
+      const height = (m: number) => {
+        let lo = 0, hi = sp.mz.length - 1;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (sp.mz[mid] < m) lo = mid + 1; else hi = mid; }
+        return sp.intensity[lo] ?? 0;
+      };
+      const mono = pk.peaks.filter((p) => p.isotope_of === undefined);
+      const iso = pk.peaks.filter((p) => p.isotope_of !== undefined);
+      t = [
+        { mz: mono.map((p) => p.mz), intensity: mono.map((p) => height(p.mz)), label: "piki", color: "#ff5b5b", markers: true },
+        { mz: iso.map((p) => p.mz), intensity: iso.map((p) => height(p.mz)), label: "izotopy", color: "#c0ca33", markers: true },
+        { mz: sp.mz, intensity: sp.intensity, label: pk.label, color: "#5b9bd5" },
+      ];
+      peaksTraceMemo.set(pk, t);
+    }
+    return t;
   }
 
   let plsDiagNodeId = $state<string | null>(null);
@@ -2231,7 +2510,9 @@
 
 {#snippet paramList(node: GraphNode, labels: Record<string, string>)}
   {#each NODE_TYPES[node.type]?.params ?? [] as p (p.key)}
-    {#if p.options}
+    {#if typeof p.default === "string" && !p.options}
+      <!-- parametry tekstowe bez listy (zestaw danych, tkanka) mają dedykowane kontrolki w węźle -->
+    {:else if p.options}
       {@render selParam(node, p, labels)}
     {:else}
       {@render numParam(node, p)}
@@ -2252,6 +2533,37 @@
       {/each}
     {/if}
   </div>
+{/snippet}
+
+{#snippet rankingTable(rows: RankingRow[], keys: string[], limit: number, pick?: (rank: number) => void, selected?: number)}
+  <div class="rank-table" style="max-height:{limit > 8 ? 300 : 130}px"
+       onpointerdown={(e) => e.stopPropagation()} onwheel={(e) => e.stopPropagation()}>
+    <div class="rank-row rank-head" style="grid-template-columns: 24px 62px 46px repeat({keys.length}, 1fr)">
+      <span>#</span><span>m/z</span><span>wynik</span>
+      {#each keys as k (k)}<span title={k}>{METRIC_LABELS[k] ?? k}</span>{/each}
+    </div>
+    {#each rows.slice(0, limit) as r, i (r.peak + ":" + i)}
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="rank-row" class:rank-pick={!!pick} class:rank-sel={selected === i + 1}
+           style="grid-template-columns: 24px 62px 46px repeat({keys.length}, 1fr)"
+           title={fmpCandidates(r.mz).join("; ") || undefined}
+           onclick={() => pick?.(i + 1)}>
+        <span class="top-rank">{i + 1}</span>
+        <span>{r.mz.toFixed(3)}{(r.group_size ?? 1) > 1 ? "*" : ""}</span>
+        <span>{fmtMetric(r.score)}</span>
+        {#each keys as k (k)}<span>{cellValue(r, k)}</span>{/each}
+      </div>
+    {:else}
+      <div class="combine-list-empty">ranking jest pusty</div>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet nodeRanking(node: GraphNode, keys: string[])}
+  {@const rv = rankingOf(node)}
+  {#if rv}
+    {@render rankingTable(rv.rows, keys, 8)}
+  {/if}
 {/snippet}
 
 {#snippet runBlock(node: GraphNode, onrun: () => void)}
@@ -2440,7 +2752,7 @@
               </div>
             {:else if node.type === "mapa/curve"}
               {@const inEdge = graph.edges.find((e) => e.to === node.id && e.toSocket === "in")}
-              {@const inOutcome = inEdge ? evalNode(inEdge.from) : null}
+              {@const inOutcome = inEdge ? evalEdge(inEdge) : null}
               {@const histogram = inOutcome?.ok && inOutcome.value.kind === "mapa" ? computeHistogram(inOutcome.value.data, 40, inOutcome.value.mask) : []}
               <div class="field" onpointerdown={(e) => e.stopPropagation()}>
                 <CurveEditor
@@ -2584,7 +2896,7 @@
               {/if}
             {:else if node.type === "segmentacja/select_segments"}
               {@const inEdge = graph.edges.find((e) => e.to === node.id && e.toSocket === "in")}
-              {@const inOutcome = inEdge ? evalNode(inEdge.from) : null}
+              {@const inOutcome = inEdge ? evalEdge(inEdge) : null}
               <div class="seg-checklist" onpointerdown={(e) => e.stopPropagation()}>
                 {#if inOutcome?.ok && inOutcome.value.kind === "segmentacja"}
                   {#each inOutcome.value.legend as l (l.label)}
@@ -2995,34 +3307,10 @@
                   {/each}
                 </select>
               </label>
+            {:else if node.type === "widmo/transform"}
+              {@render paramList(node, TRANSFORM_MODE_LABELS)}
             {:else if node.type === "widmo/smooth" || node.type === "widmo/baseline" || node.type === "widmo/peakpick"}
-              {#each NODE_TYPES[node.type]?.params ?? [] as p (p.key)}
-                <label class="field">
-                  <span class="field-head">
-                    <input type="text" inputmode="decimal" class="param-value-input"
-                           value={node.params[p.key] ?? p.default}
-                           onpointerdown={(e) => e.stopPropagation()}
-                           onchange={(e) => {
-                             const raw = Number((e.target as HTMLInputElement).value.replace(',', '.'));
-                             if (Number.isNaN(raw)) { (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default); return; }
-                             setNodeParamClampedFloat(node, p.key, raw, p.min ?? raw, p.max ?? raw);
-                             (e.target as HTMLInputElement).value = String(Math.min(p.max ?? raw, Math.max(p.min ?? raw, raw)));
-                           }}
-                           onkeydown={(e) => {
-                             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                             if (e.key === "Escape") {
-                               (e.target as HTMLInputElement).value = String(node.params[p.key] ?? p.default);
-                               (e.target as HTMLInputElement).blur();
-                             }
-                           }} />
-                    <span>{p.label}</span>
-                  </span>
-                  <input type="range" min={p.min} max={p.max} step={p.step}
-                         value={node.params[p.key] ?? p.default}
-                         onpointerdown={(e) => e.stopPropagation()}
-                         oninput={(e) => setNodeParamClampedFloat(node, p.key, Number((e.target as HTMLInputElement).value), p.min ?? 0, p.max ?? 100)} />
-                </label>
-              {/each}
+              {@render paramList(node, BASELINE_METHOD_LABELS)}
               <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
                       disabled={runningNodeId === node.id}
                       onclick={() => runSpectrumProcessNode(node)}>
@@ -3069,8 +3357,8 @@
               {#if true}
                 {@const aEdge = graph.edges.find((e) => e.to === node.id && e.toSocket === "a")}
                 {@const bEdge = graph.edges.find((e) => e.to === node.id && e.toSocket === "b")}
-                {@const aOutcome = aEdge ? evalNode(aEdge.from) : null}
-                {@const bOutcome = bEdge ? evalNode(bEdge.from) : null}
+                {@const aOutcome = aEdge ? evalEdge(aEdge) : null}
+                {@const bOutcome = bEdge ? evalEdge(bEdge) : null}
                 {@const aVal = aOutcome?.ok && aOutcome.value.kind === "widmo" ? aOutcome.value : null}
                 {@const bVal = bOutcome?.ok && bOutcome.value.kind === "widmo" ? bOutcome.value : null}
                 <div class="mz-preview" style="height:180px">
@@ -3120,7 +3408,7 @@
               {/each}
               {#if true}
                 {@const inEdge = graph.edges.find((e) => e.to === node.id && e.toSocket === "in")}
-                {@const inOutcome = inEdge ? evalNode(inEdge.from) : null}
+                {@const inOutcome = inEdge ? evalEdge(inEdge) : null}
                 {@const widmoVal = inOutcome?.ok && inOutcome.value.kind === "widmo" ? inOutcome.value : null}
                 {@const t1 = Number(node.params.threshold1_frac ?? 0.05)}
                 {@const t2 = Number(node.params.threshold2_frac ?? 1)}
@@ -3221,8 +3509,8 @@
               {#if true}
                 {@const betaEdge = inputsFor(node, "in")[0]}
                 {@const bgEdge = inputsFor(node, "bg")[0]}
-                {@const betaOut = betaEdge ? evalNode(betaEdge.from) : null}
-                {@const bgOut = bgEdge ? evalNode(bgEdge.from) : null}
+                {@const betaOut = betaEdge ? evalEdge(betaEdge) : null}
+                {@const bgOut = bgEdge ? evalEdge(bgEdge) : null}
                 {@const betaVal = betaOut?.ok && betaOut.value.kind === "widmo" ? betaOut.value : null}
                 {@const bgCand = bgOut?.ok && bgOut.value.kind === "widmo" ? bgOut.value : null}
                 {@const bgVal = betaVal && bgCand && bgCand.mz.length === betaVal.mz.length ? bgCand : null}
@@ -3267,6 +3555,130 @@
                           onclick={() => copyMzList(node, listText)}>
                     {mzListCopyStatus[node.id] ? "Skopiowano ✓" : "Kopiuj listę m/z"}
                   </button>
+                {/if}
+              {/if}
+            {:else if node.type === "markery/peaks" || node.type === "markery/peak_filter"}
+              {@render paramList(node, { ...NOISE_LABELS, ...YESNO_LABELS })}
+              {#if node.type === "markery/peak_filter"}
+                <label class="field" onpointerdown={(e) => e.stopPropagation()}>
+                  <span>Wyklucz m/z (np. jony matrycy)</span>
+                  <input class="mz-name-input" type="text" value={node.excludeMz ?? ""}
+                         placeholder="555.2231; …"
+                         onchange={(e) => setExcludeMz(node, (e.target as HTMLInputElement).value)} />
+                </label>
+              {:else}
+                {@render runBlock(node, () => runPeaksNode(node))}
+              {/if}
+              {#if true}
+                {@const out = evalNode(node.id)}
+                {@const pk = out.ok && out.value.kind === "piki" ? (out.value as PikiValue) : null}
+                <div class="mz-preview" style="height:180px">
+                  {#if pk && pk.spectrum}
+                    {@const traces = peaksTraces(pk)}
+                    <SpectrumTracesPlot {traces} compact />
+                    <button class="mz-zoom-btn" onpointerdown={(e) => e.stopPropagation()}
+                            onclick={() => (zoomWidmoTraces = traces)} title="Powiększ">⤢</button>
+                  {:else}
+                    <div class="mz-preview-empty">{out.ok ? "" : out.error}</div>
+                  {/if}
+                </div>
+                {#if pk && node.type === "markery/peak_filter"}
+                  <span class="preview-result">{pk.label}</span>
+                {/if}
+              {/if}
+            {:else if node.type === "markery/matrix"}
+              <label class="field">
+                <span>Zestaw danych</span>
+                <select class="ds-select" value={String(node.params.dataset ?? RAW_DATASET_ID)}
+                        onpointerdown={(e) => e.stopPropagation()}
+                        onchange={(e) => setNodeStringParam(node, "dataset", (e.target as HTMLSelectElement).value)}>
+                  <option value={RAW_DATASET_ID}>Dane oryginalne (imzML — z rekalibracją)</option>
+                  {#each datasets() as d (d.id)}
+                    <option value={d.id}>{d.name} (biny — bez rekalibracji)</option>
+                  {/each}
+                </select>
+              </label>
+              {@render paramList(node, { ...WINDOW_LABELS, ...MATRIX_NORM_LABELS, ...YESNO_LABELS })}
+              <span class="preview-result">ROI (opcjonalne — brak = całe tkanki):</span>
+              {@render inputList(node, "roi", "całe tkanki")}
+              {@render runBlock(node, () => runMatrixNode(node))}
+              {#if node.matrixCache}
+                {@const info = node.matrixCache.info}
+                <div class="pls-stats" onpointerdown={(e) => e.stopPropagation()}>
+                  <span><b>{info.nPixels}</b> pikseli × <b>{info.nPeaks}</b> pików ({info.seconds}s)</span>
+                  {#each info.tissues as t (t.id)}
+                    <span>{wsGet<Record<string, string>>("dane_tissueLabels", {})[t.id] || t.label}: {t.n} px{t.ppm_median !== null && node.params.recal !== "no" && String(node.params.dataset ?? RAW_DATASET_ID) === RAW_DATASET_ID ? ` · przesunięcie ${t.ppm_median} ppm` : ""}</span>
+                  {/each}
+                </div>
+              {/if}
+            {:else if node.type === "markery/spatial"}
+              {@render paramList(node, {})}
+              {@render runBlock(node, () => runSpatialNode(node))}
+              {@render nodeRanking(node, ["moran", "gini", "coverage"])}
+            {:else if node.type === "markery/contrast"}
+              {@render paramList(node, {})}
+              {@render inputList(node, "seg", "brak podłączonych segmentacji")}
+              {@render runBlock(node, () => runContrastNode(node))}
+              {#if node.rankingCache?.note}
+                <span class="pls-bad contrast-note">{node.rankingCache.note}</span>
+              {/if}
+              {@render nodeRanking(node, ["eps2", "best_region", "log2fc_best"])}
+            {:else if node.type === "markery/coloc"}
+              {@render paramList(node, COLOC_MODE_LABELS)}
+              {@render runBlock(node, () => runColocNode(node))}
+              {@render nodeRanking(node, ["group", "r_rep"])}
+            {:else if node.type === "markery/consistency"}
+              {@render paramList(node, CONSISTENCY_LABELS)}
+              {@render nodeRanking(node, ["min_pct", "spec"])}
+            {:else if node.type === "markery/combine"}
+              {@render paramList(node, {})}
+              {@render nodeRanking(node, ["wej_a", "wej_b", "wej_c"])}
+            {:else if node.type === "markery/top_map"}
+              {@render paramList(node, {})}
+              {#if true}
+                {@const re = inputsFor(node, "in")[0]}
+                {@const ro = re ? evalEdge(re) : null}
+                {@const rv = ro?.ok && ro.value.kind === "ranking" ? ro.value : null}
+                {@const me = inputsFor(node, "mat")[0]}
+                {@const mo = me ? evalEdge(me) : null}
+                {@const mv = mo?.ok && mo.value.kind === "macierz" ? mo.value : null}
+                <label class="field">
+                  <span>Tkanka</span>
+                  <select class="ds-select" value={String(node.params.tissue ?? "")}
+                          onpointerdown={(e) => e.stopPropagation()}
+                          onchange={(e) => setNodeStringParam(node, "tissue", (e.target as HTMLSelectElement).value)}>
+                    <option value="">(pierwsza)</option>
+                    {#each mv?.info.tissues ?? [] as t (t.id)}
+                      <option value={t.id}>{wsGet<Record<string, string>>("dane_tissueLabels", {})[t.id] || t.label}</option>
+                    {/each}
+                  </select>
+                </label>
+                {#if rv}
+                  {@render rankingTable(rv.rows, ["fmp"], 50, (k) => setTopMapRank(node, k), Math.round(Number(node.params.rank ?? 1)))}
+                {/if}
+              {/if}
+            {:else if node.type === "markery/table"}
+              {@render paramList(node, {})}
+              {#if true}
+                {@const te = inputsFor(node, "in")[0]}
+                {@const to = te ? evalEdge(te) : null}
+                {@const tv = to?.ok && to.value.kind === "ranking" ? to.value : null}
+                {#if tv}
+                  {@const n = Math.round(Number(node.params.n ?? 25))}
+                  {@const keys = [...new Set(tv.rows.slice(0, 5).flatMap((r) => Object.keys(r.metrics)))].filter((k) => k !== "rep").slice(0, 4)}
+                  {@render rankingTable(tv.rows, [...keys, "fmp"], n)}
+                  {@const listText = formatMzListText(tv.rows.slice(0, n).map((r) => r.mz).sort((x, y) => x - y), mzListDecimals())}
+                  <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
+                          onclick={() => copyMzList(node, listText)}>
+                    {mzListCopyStatus[node.id] ? "Skopiowano ✓" : `Kopiuj listę m/z (top ${Math.min(n, tv.rows.length)})`}
+                  </button>
+                  <button class="run-btn" onpointerdown={(e) => e.stopPropagation()}
+                          onclick={() => copyRankingCsv(node, tv.rows)}>
+                    {csvCopyStatus[node.id] ? "Skopiowano ✓" : `Kopiuj CSV (wszystkie ${tv.rows.length})`}
+                  </button>
+                  <span class="preview-result">{tv.label} · * = pik ma partnerów kolokalizacji · najedź na wiersz: kandydaci FMP-10</span>
+                {:else}
+                  <div class="mz-preview-empty">{to && !to.ok ? to.error : "podłącz ranking"}</div>
                 {/if}
               {/if}
             {:else if node.type === "widmo/save_spectrum"}
@@ -4051,6 +4463,26 @@
     padding: 3px 5px;
   }
   .top-row { display: grid; grid-template-columns: 22px 1fr 1fr 26px; gap: 4px; }
+
+  .rank-table {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    overflow-y: auto;
+    font-size: 0.6rem;
+    font-family: "JetBrains Mono", monospace;
+    color: rgba(255,255,255,0.75);
+    background: rgba(255,255,255,0.03);
+    border-radius: 4px;
+    padding: 3px 5px;
+  }
+  .rank-row { display: grid; gap: 4px; white-space: nowrap; }
+  .rank-row > span { overflow: hidden; text-overflow: ellipsis; }
+  .rank-head { color: rgba(255,255,255,0.4); position: sticky; top: 0; background: #262626; }
+  .rank-pick { cursor: pointer; }
+  .rank-pick:hover { background: rgba(255,255,255,0.06); }
+  .rank-sel { background: rgba(240,98,146,0.18); }
+  .contrast-note { font-size: 0.6rem; line-height: 1.3; }
   .top-rank { color: rgba(255,255,255,0.4); }
   .top-dir { color: #4db6ac; text-align: right; }
 

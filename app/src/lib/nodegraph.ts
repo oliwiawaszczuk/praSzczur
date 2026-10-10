@@ -28,7 +28,11 @@ import type { SavedSpectrum, SavedSpectrumSource } from "./spectraLibrary.svelte
 // wejście analiz grupowych (domena "analiza", np. PLS-DA). Świadomie osobny od
 // "widmo" (jedno widmo): łączy się wyłącznie z węzłami, które potrafią
 // operować na wielu próbkach naraz.
-export type PortKind = "widmo" | "mapa" | "segmentacja" | "segment" | "zestaw";
+//
+// "piki" / "macierz" / "ranking" — domena "Markery przestrzenne"
+// (nodegraph.markery.ts): lista pików z opisem, uchwyt do macierzy piksel × pik
+// (sama macierz żyje w sidecarze, nie w grafie) i ranking m/z.
+export type PortKind = "widmo" | "mapa" | "segmentacja" | "segment" | "zestaw" | "piki" | "macierz" | "ranking";
 
 // Rozróżnialne, stałe kolory kropek per rodzaj gniazda — używane spójnie
 // wszędzie (kropki portów, krawędzie, kropka typu w prawym panelu/legendzie).
@@ -43,6 +47,9 @@ export const PORT_KIND_COLORS: Record<PortKind, string> = {
   segmentacja: "#b48ce0",
   segment: "#7bc47f",
   zestaw: "#4db6ac",
+  piki: "#c0ca33",
+  macierz: "#90a4ae",
+  ranking: "#f06292",
 };
 
 export const PORT_KIND_LABELS: Record<PortKind, string> = {
@@ -51,17 +58,21 @@ export const PORT_KIND_LABELS: Record<PortKind, string> = {
   segmentacja: "Segmentacja",
   segment: "Segment",
   zestaw: "Zestaw widm",
+  piki: "Lista pików",
+  macierz: "Macierz piksel × pik",
+  ranking: "Ranking m/z",
 };
 
 export type NodeStage = "dane" | "przetwarzanie" | "wynik";
-export type NodeDomain = "widmo" | "mapa" | "segmentacja" | "analiza";
+export type NodeDomain = "widmo" | "mapa" | "segmentacja" | "analiza" | "markery";
 
-export const DOMAIN_ORDER: NodeDomain[] = ["widmo", "mapa", "segmentacja", "analiza"];
+export const DOMAIN_ORDER: NodeDomain[] = ["widmo", "mapa", "segmentacja", "analiza", "markery"];
 export const DOMAIN_LABELS: Record<NodeDomain, string> = {
   widmo: "Widmo",
   mapa: "Mapa pikseli",
   segmentacja: "Segmentacja",
   analiza: "Analiza grup",
+  markery: "Markery przestrzenne",
 };
 export const STAGE_ORDER: NodeStage[] = ["dane", "przetwarzanie", "wynik"];
 export const STAGE_LABELS: Record<NodeStage, string> = {
@@ -117,6 +128,10 @@ export interface NodeTypeDef {
     inputs: Record<string, NodeValue[]>,
     ctx: EvalContext,
   ) => EvalOutcome | Promise<EvalOutcome>;
+  /** Węzły z kilkoma wyjściami RÓŻNYCH rodzajów (np. "Ranking łączony": ranking + widmo):
+   * `evaluate` liczy jedną wartość, a to mapuje ją na wartość konkretnego gniazda wyjściowego.
+   * Brak = każde gniazdo dostaje wynik `evaluate` bez zmian. */
+  selectOutput?: (value: NodeValue, socketId: string) => NodeValue;
 }
 
 export interface CurvePoint {
@@ -239,6 +254,14 @@ export interface GraphNode {
   zestawCache?: ZestawProcessCache;
   /** "analiza/pls_da": wynik ostatniego "Przetwórz". */
   plsCache?: PlsProcessCache;
+  /** "markery/peaks": lista pików z ostatniego "Przetwórz". */
+  peaksCache?: { inputSignature: string; peaks: PeakInfo[] };
+  /** "markery/matrix": id i podsumowanie macierzy zbudowanej w sidecarze. */
+  matrixCache?: { inputSignature: string; info: MatrixInfo };
+  /** "markery/spatial" / "contrast" / "coloc": wiersze rankingu z ostatniego "Przetwórz". */
+  rankingCache?: { inputSignature: string; rows: RankingRow[]; note?: string };
+  /** "markery/peak_filter": m/z do wykluczenia (np. jony matrycy), tekst "555.2231; 268.11". */
+  excludeMz?: string;
 }
 
 export interface GraphEdge {
@@ -362,7 +385,62 @@ export interface ZestawValue {
   samples: ZestawSample[];
 }
 
-export type NodeValue = MapaValue | SegmentacjaValue | SegmentValue | WidmoValue | ZestawValue;
+/** Pik wykryty na widmie (src/msi/peaks.py: describe_peaks). `isotope_of` — m/z piku
+ * monoizotopowego, gdy ten pik wygląda na jego M+1/M+2. */
+export interface PeakInfo {
+  mz: number; centroid: number; lo: number; hi: number; fwhm: number;
+  height: number; auc: number; snr: number; r2: number | null; isotope_of?: number;
+}
+
+export interface PikiValue {
+  kind: "piki";
+  label: string;
+  peaks: PeakInfo[];
+  /** Widmo, na którym wykryto piki — tylko do podglądu. */
+  spectrum?: { mz: number[]; intensity: number[] };
+}
+
+/** Podsumowanie macierzy piksel × pik zbudowanej przez /markers/matrix. */
+export interface MatrixInfo {
+  matrixId: string;
+  nPixels: number;
+  nPeaks: number;
+  tissues: { id: string; label: string; n: number; ppm_median: number | null }[];
+  coverage: number[];
+  seconds: number;
+}
+
+export interface MacierzValue {
+  kind: "macierz";
+  label: string;
+  matrixId: string;
+  /** Piki = kolumny macierzy (ta sama kolejność). */
+  peaks: PeakInfo[];
+  info: MatrixInfo;
+}
+
+export interface RankingRow {
+  /** Indeks kolumny w macierzy. */
+  peak: number;
+  mz: number;
+  score: number | null;
+  metrics: Record<string, number | null>;
+  /** Wynik w każdej tkance — wejście węzła "Powtarzalność między tkankami". */
+  per_tissue?: Record<string, number | null>;
+  /** "markery/coloc": grupa kolokalizacji i liczba jej członków. */
+  group?: number;
+  group_size?: number;
+}
+
+/** Ranking m/z — wiersze posortowane malejąco po `score`. */
+export interface RankingValue {
+  kind: "ranking";
+  label: string;
+  matrixId: string;
+  rows: RankingRow[];
+}
+
+export type NodeValue = MapaValue | SegmentacjaValue | SegmentValue | WidmoValue | ZestawValue | PikiValue | MacierzValue | RankingValue;
 
 /** Klucz cache zapytania "Mapa z m/z" (mapa/mz_source) — te same (zestaw, m/z, tol) dają ten
  * sam wynik /ion_image, więc kilka node'ów z identycznym zapytaniem dzieli jedno pobranie. */
@@ -381,6 +459,8 @@ export interface EvalContext {
    * widma" (widmo/spectrum_source) — osobny cache, bo inny rodzaj danych. */
   spectrumCache: Record<string, SavedSpectrum>;
   savedSpectrumExists: (id: string) => boolean;
+  /** Mapy kolumn macierzy markerów (/markers/image), klucz = `${matrixId}|${peak}`. */
+  markerImageCache?: Record<string, IonImageResponse>;
 }
 
 export type EvalOutcome =
@@ -481,10 +561,13 @@ function evaluateInner(
     for (const e of edges) {
       const r = evaluateGraphNode(graph, e.from, ctx, memo, visiting);
       if (!r.ok) return r;
-      if (r.value.kind !== socket.kind) {
-        return { ok: false, error: `gniazdo "${socket.label}" oczekuje ${PORT_KIND_LABELS[socket.kind]}, podłączono ${PORT_KIND_LABELS[r.value.kind]}` };
+      const fromNode = graphIndex(graph, memo).nodes.get(e.from);
+      const select = fromNode ? NODE_TYPES[fromNode.type]?.selectOutput : undefined;
+      const v = select ? select(r.value, e.fromSocket) : r.value;
+      if (v.kind !== socket.kind) {
+        return { ok: false, error: `gniazdo "${socket.label}" oczekuje ${PORT_KIND_LABELS[socket.kind]}, podłączono ${PORT_KIND_LABELS[v.kind]}` };
       }
-      values.push(r.value);
+      values.push(v);
     }
     inputs[socket.id] = values;
   }

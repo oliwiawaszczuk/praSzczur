@@ -95,6 +95,11 @@ endpoint `/data` do odczytu/zapisu pełnej treści grafu — jak boards).
 - **Domena "Analiza grup"** (`nodegraph.analiza.ts`, port `zestaw` = zbiór widm-próbek, PLS-DA z
   CV w `src/msi/pls.py`) — workflow z MATLAB-a: zestaw → preprocessing → PLS-DA → Top m/z. Opis i
   różnice względem MATLAB-a: `docs/node-graph.md`, sekcja "Domena Analiza grup".
+- **Domena "Markery przestrzenne"** (`nodegraph.markery.ts`, `src/msi/peaks.py` + `markers.py`,
+  endpointy `/markers/*`) — piki → macierz piksel × pik (w sidecarze, `marker_cache/`, do grafu
+  trafia tylko id) → rankingi m/z. Porty `piki`/`macierz`/`ranking`; węzeł z kilkoma wyjściami
+  różnych rodzajów używa `NodeTypeDef.selectOutput`, a kod zakładki czyta wartość krawędzi przez
+  `evalEdge(edge)`. Opis: `docs/node-graph.md`, sekcja "Domena Markery przestrzenne".
 - "Wyślij do Node Graph" z innych zakładek (m/z, Widma, Zapisane) — most `$lib/graphInsert.svelte.ts`
   (`requestGraphInsert`/`pendingGraphInsert`): zapisuje obiekt do biblioteki (Zapisane
   mapy/Zapisane widma), przełącza zakładkę, `NodeGraphTab.svelte` pokazuje "duszka" pod kursorem

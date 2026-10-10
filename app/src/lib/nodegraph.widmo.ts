@@ -35,11 +35,16 @@ export const WIDMO_COMBINE_MODE_LABELS: Record<WidmoCombineMode, string> = {
 };
 export const WIDMO_COMBINE_MODE_LIST: WidmoCombineMode[] = ["sum", "mean", "max", "diff"];
 
-export type WidmoNormalizeMode = "none" | "max" | "tic";
+export type WidmoNormalizeMode = "none" | "max" | "tic" | "rms";
 export const WIDMO_NORMALIZE_MODE_LABELS: Record<WidmoNormalizeMode, string> = {
-  none: "brak", max: "max", tic: "TIC",
+  none: "brak", max: "max", tic: "TIC", rms: "RMS",
 };
-export const WIDMO_NORMALIZE_MODE_LIST: WidmoNormalizeMode[] = ["none", "max", "tic"];
+export const WIDMO_NORMALIZE_MODE_LIST: WidmoNormalizeMode[] = ["none", "max", "tic", "rms"];
+
+/** Metody linii bazowej "widmo/baseline" — SNIP (domyślna) albo ALS (Eilers, z repo IsotopeakeR;
+ * w sidecarze wersja z macierzą rzadką, src/msi/peaks.py: als_baseline). */
+export const BASELINE_METHOD_LABELS: Record<string, string> = { snip: "SNIP", als: "ALS (asym. najmniejsze kwadraty)" };
+export const TRANSFORM_MODE_LABELS: Record<string, string> = { sqrt: "pierwiastek (sqrt)", log1p: "logarytm (log1p)" };
 
 /** Łączy wiele wektorów intensywności (ta sama oś m/z) wybraną operacją —
  * odpowiednik combineArrays z nodegraph.mapa.ts, ale na 1D. */
@@ -63,7 +68,10 @@ export function combineVectors(vectors: number[][], mode: WidmoCombineMode): num
  * jedyna spójna opcja to normalizacja do WŁASNEGO maksimum/sumy). */
 export function normalizeVector(intensity: number[], mode: WidmoNormalizeMode): number[] {
   if (mode === "none") return intensity;
-  const ref = mode === "max" ? Math.max(...intensity) : intensity.reduce((a, b) => a + b, 0);
+  let ref: number;
+  if (mode === "max") ref = intensity.reduce((a, b) => (b > a ? b : a), -Infinity);
+  else if (mode === "rms") ref = Math.sqrt(intensity.reduce((a, b) => a + b * b, 0) / Math.max(intensity.length, 1));
+  else ref = intensity.reduce((a, b) => a + b, 0);
   if (ref === 0) return intensity;
   return intensity.map((v) => v / ref);
 }
@@ -205,7 +213,7 @@ const WIDMO_NODE_TYPES: NodeTypeDef[] = [
   {
     id: "widmo/normalize",
     label: "Normalizacja",
-    description: "Normalizuje widmo do własnego maksimum albo do własnej sumy (całkowitego prądu jonowego, TIC).",
+    description: "Normalizuje widmo do własnego maksimum, do własnej sumy (całkowitego prądu jonowego, TIC) albo do RMS (pierwiastek ze średniej kwadratów — mniej wrażliwy niż TIC na pojedyncze bardzo silne piki, np. matrycy).",
     domain: "widmo", stage: "przetwarzanie",
     inputs: [{ id: "in", label: "widmo", kind: "widmo" }],
     outputs: [{ id: "out", label: "widmo", kind: "widmo" }],
@@ -217,6 +225,23 @@ const WIDMO_NODE_TYPES: NodeTypeDef[] = [
       if ("error" in checked) return { ok: false, error: checked.error };
       const mode = (node.params.mode as WidmoNormalizeMode) ?? "tic";
       return { ok: true, value: { ...checked, intensity: normalizeVector(checked.intensity, mode) } };
+    },
+  },
+  {
+    id: "widmo/transform",
+    label: "Transformacja intensywności",
+    description: "Pierwiastek albo log(1+x) z intensywności (ujemne → 0) — jak opcja \"Transform Intensity\" w IsotopeakeR. Spłaszcza zakres dynamiczny: słabe piki stają się widoczne obok bardzo silnych, a szum o rozkładzie Poissona ma bardziej stałą wariancję. Uwaga: zmienia proporcje wysokości pików — do porównań ilościowych zwykle lepiej bez transformacji.",
+    domain: "widmo", stage: "przetwarzanie",
+    inputs: [{ id: "in", label: "widmo", kind: "widmo" }],
+    outputs: [{ id: "out", label: "widmo", kind: "widmo" }],
+    params: [{ key: "mode", label: "Funkcja", default: "sqrt", options: ["sqrt", "log1p"] }],
+    evaluate(node, inputs): EvalOutcome {
+      const src = inputs.in[0];
+      if (!src) return { ok: false, error: "podłącz wejście" };
+      const checked = asWidmo(src, "widmo");
+      if ("error" in checked) return { ok: false, error: checked.error };
+      const f = node.params.mode === "log1p" ? Math.log1p : Math.sqrt;
+      return { ok: true, value: { ...checked, intensity: checked.intensity.map((v) => f(Math.max(v, 0))) } };
     },
   },
   {
@@ -242,12 +267,17 @@ const WIDMO_NODE_TYPES: NodeTypeDef[] = [
   {
     id: "widmo/baseline",
     label: "Korekcja linii bazowej",
-    detail: "SNIP",
-    description: "Usuwa tło (linię bazową) metodą SNIP. Liczone na backendzie — przeliczane ręcznie przyciskiem \"Przetwórz\".",
+    detail: "SNIP / ALS",
+    description: "Usuwa tło (linię bazową) metodą SNIP albo ALS (asymetryczne najmniejsze kwadraty, Eilers & Boelens — metoda z repo IsotopeakeR; log λ = gładkość linii, p = asymetria: im mniejsze, tym mocniej linia trzyma się dołu widma). Parametry \"iteracje\" dotyczą SNIP, \"log λ\" i \"p\" — ALS. Liczone na backendzie — przeliczane ręcznie przyciskiem \"Przetwórz\".",
     domain: "widmo", stage: "przetwarzanie",
     inputs: [{ id: "in", label: "widmo", kind: "widmo" }],
     outputs: [{ id: "out", label: "widmo", kind: "widmo" }],
-    params: [{ key: "iterations", label: "iteracje", min: 5, max: 100, step: 5, default: 40 }],
+    params: [
+      { key: "method", label: "Metoda", default: "snip", options: ["snip", "als"] },
+      { key: "iterations", label: "iteracje (SNIP)", min: 5, max: 100, step: 5, default: 40 },
+      { key: "als_log_lambda", label: "log λ (ALS)", min: 2, max: 9, step: 0.5, default: 5 },
+      { key: "als_p", label: "p (ALS)", min: 0.001, max: 0.1, step: 0.001, default: 0.01 },
+    ],
     evaluate(node, inputs): EvalOutcome {
       const src = inputs.in[0];
       if (!src) return { ok: false, error: "podłącz wejście" };

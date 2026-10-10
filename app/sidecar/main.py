@@ -1520,6 +1520,10 @@ def spectrum_process(body: dict) -> dict:
     try:
         if method == "smooth":
             out = smooth_savgol(intensity, window=int(params.get("window", 15)))
+        elif method == "baseline" and params.get("method") == "als":
+            from src.msi.peaks import als_baseline
+            base = als_baseline(intensity, lam=10 ** float(params.get("als_log_lambda", 5)), p=float(params.get("als_p", 0.01)))
+            out = np.clip(intensity - base, 0, None)
         elif method == "baseline":
             out, _baseline = baseline_correction_snip(intensity, iterations=int(params.get("iterations", 40)))
         elif method == "peakpick":
@@ -1699,6 +1703,307 @@ def pls_da_endpoint(body: dict) -> dict:
         raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+# ── Markery przestrzenne — węzły domeny "markery" w Node Graph ──────────────
+# Piki wykrywane na (średnim) widmie → macierz piksel × pik budowana jednym
+# przejściem po danych → rankingi. Macierz (np. 16 tys. × 400) żyje WYŁĄCZNIE
+# na dysku/w pamięci sidecara (workspaces/<wid>/marker_cache/<id>.npz) — do
+# grafu trafia tylko jej id + podsumowanie, bo JSON grafu urósłby do dziesiątek MB.
+# Algorytmy: src/msi/peaks.py, src/msi/markers.py (testy: tests/test_markers.py).
+
+_marker_mats: dict[str, dict] = {}  # id → załadowana macierz (kilka ostatnich)
+
+
+def _marker_dir() -> Path:
+    d = _workspace_dir(_active_workspace_id) / "marker_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _load_marker_matrix(mid: str) -> dict:
+    if mid in _marker_mats:
+        return _marker_mats[mid]
+    f = _marker_dir() / f"{mid}.npz"
+    if not mid or not f.exists():
+        raise HTTPException(404, "Macierz nie istnieje (inny workspace albo wyczyszczony cache) — kliknij \"Przetwórz\" w węźle \"Macierz piksel × pik\"")
+    z = np.load(f, allow_pickle=False)
+    d = {k: z[k] for k in z.files}
+    d["tissue_ids"] = [str(t) for t in d["tissue_ids"]]
+    if len(_marker_mats) >= 3:
+        _marker_mats.pop(next(iter(_marker_mats)))
+    _marker_mats[mid] = d
+    return d
+
+
+@app.post("/markers/peaks")
+def markers_peaks(body: dict) -> dict:
+    """Lista pików z opisem (apeks, centroid, granice, FWHM, AUC, SNR, R²) — węzeł markery/peaks.
+    Body: {mz, intensity, snr, half_window_da, min_distance_da, max_peaks, noise: local|mad, fit}."""
+    mz = np.asarray(body.get("mz") or [], dtype=float)
+    y = np.asarray(body.get("intensity") or [], dtype=float)
+    if mz.size < 5 or mz.size != y.size:
+        raise HTTPException(400, "Brak widma (mz/intensity)")
+    from src.msi.peaks import describe_peaks, flag_isotopes
+    try:
+        peaks = describe_peaks(
+            mz, y, snr=float(body.get("snr", 3)), half_window_da=float(body.get("half_window_da", 0.1)),
+            min_distance_da=float(body.get("min_distance_da", 0)), max_peaks=int(body.get("max_peaks", 500)),
+            noise=str(body.get("noise", "local")), fit=bool(body.get("fit", True)),
+        )
+        return {"peaks": flag_isotopes(peaks)}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/markers/matrix")
+def markers_matrix(body: dict) -> dict:
+    """Macierz piksel × pik — węzeł markery/matrix. Jedno przejście po pikselach wszystkich tkanek
+    (albo tylko po ROI z `rois`): opcjonalna korekcja tła, rekalibracja do lock mass (ppm per piksel),
+    całka okna każdego piku, normalizacja. Wynik zapisywany do marker_cache, zwracane id + podsumowanie.
+
+    Body: {source: raw|binned, dataset, peaks: [{mz, lo, hi, fwhm}], window: bounds|fwhm|ppm,
+           fwhm_factor, tol_ppm, normalize: tic|rms|none, baseline: bool, recal: bool, lock_mz,
+           rois: [{tissue, mask}]}"""
+    import hashlib
+    from src.msi.markers import (
+        FMP10_LOCK_MZ, PpmFallback, baseline_block, integrate_windows, lock_mass_ppm, pixel_noise,
+    )
+
+    peaks = body.get("peaks") or []
+    if not peaks:
+        raise HTTPException(400, "Brak pików — podłącz listę pików")
+    if not _cache:
+        raise HTTPException(503, "Dane nie załadowane")
+    source = body.get("source", "raw")
+    dataset = body.get("dataset", "")
+    window = body.get("window", "fwhm")
+    pmz = np.array([float(p["mz"]) for p in peaks])
+    if window == "bounds":
+        lo = np.array([float(p["lo"]) for p in peaks])
+        hi = np.array([float(p["hi"]) for p in peaks])
+    elif window == "ppm":
+        tol = pmz * float(body.get("tol_ppm", 50)) * 1e-6
+        lo, hi = pmz - tol, pmz + tol
+    else:
+        half = np.array([max(float(p.get("fwhm") or 0.0), 1e-3) for p in peaks]) * float(body.get("fwhm_factor", 1.0))
+        lo, hi = pmz - half, pmz + half
+    recal = bool(body.get("recal", True)) and source == "raw"
+    lock_mz = float(body.get("lock_mz", FMP10_LOCK_MZ))
+    use_bg = bool(body.get("baseline", True))
+    norm = body.get("normalize", "tic")
+
+    key = json.dumps({k: body.get(k) for k in sorted(body)}, sort_keys=True) + f"|{_imzml_path}|{_active_dataset_id}"
+    mid = hashlib.sha1(key.encode()).hexdigest()[:16]
+    out_file = _marker_dir() / f"{mid}.npz"
+
+    # piksele: tkanki z załadowanego zestawu (te same co mapy m/z), opcjonalnie zawężone do ROI
+    rois = body.get("rois") or []
+    roi_sets: dict[str, set] = {}
+    for r in rois:
+        meta = next((m for m in _tissues_meta if m["id"] == r.get("tissue")), None)
+        if not meta:
+            continue
+        ys_l, xs_l = np.where(np.asarray(r.get("mask") or [[]], dtype=float) >= 0.5)
+        roi_sets.setdefault(meta["id"], set()).update(zip((xs_l + meta["x_min"]).tolist(), (ys_l + meta["y_min"]).tolist()))
+    tissue_ids = [t for t in _cache if (not roi_sets or t in roi_sets)]
+    if not tissue_ids:
+        raise HTTPException(400, "ROI nie pokrywa żadnej załadowanej tkanki")
+
+    t0 = time.time()
+    try:
+        X_rows, det_rows, xy_rows, tis_rows, lock_h, lock_ppm, tics = [], [], [], [], [], [], []
+        fb = PpmFallback()
+        if source == "raw":
+            if not _imzml_path or not Path(_imzml_path).exists():
+                raise HTTPException(503, "Brak pliku imzML — uruchom preprocessing w zakładce Dane")
+            p, coords_arr = _get_imzml_parser(Path(_imzml_path))
+            coord_to_idx = {(int(c[0]), int(c[1])): i for i, c in enumerate(coords_arr)}
+            for ti, tid in enumerate(tissue_ids):
+                for cx, cy in _cache[tid]["coords"]:
+                    c = (int(cx), int(cy))
+                    if roi_sets and c not in roi_sets.get(tid, ()):
+                        continue
+                    idx = coord_to_idx.get(c)
+                    if idx is None:
+                        continue
+                    mz_i, ints = p.getspectrum(idx)
+                    mz_i = np.asarray(mz_i, dtype=float)
+                    x = np.asarray(ints, dtype=float)
+                    if use_bg:
+                        x = np.clip(x - baseline_block(x), 0, None)
+                    noise = pixel_noise(mz_i, x)
+                    ppm, h = lock_mass_ppm(mz_i, x, lock_mz)
+                    f = 1.0
+                    if recal:
+                        ok = h > 10 * noise and np.isfinite(ppm) and abs(ppm) < 200
+                        f = 1 + fb.get(tid, ppm, ok) * 1e-6
+                    v, npts = integrate_windows(mz_i, x, lo * f, hi * f)
+                    X_rows.append(v.astype(np.float32))
+                    det_rows.append(v > 3 * noise * np.sqrt(npts))
+                    xy_rows.append(c)
+                    tis_rows.append(ti)
+                    lock_h.append(h)
+                    lock_ppm.append(ppm if np.isfinite(ppm) else 0.0)
+                    tics.append(float(x.sum()))
+        else:
+            cache = _get_dataset_cache(dataset)
+            for ti, tid in enumerate(tissue_ids):
+                if tid not in cache:
+                    continue
+                d = cache[tid]
+                mzb = np.asarray(d["mz_bins"], dtype=float)
+                bw = float(np.median(np.diff(mzb))) if len(mzb) > 1 else 0.3
+                lo_b, hi_b = np.minimum(lo, pmz - bw / 2), np.maximum(hi, pmz + bw / 2)
+                S = np.asarray(d["spectra"], dtype=float)
+                for row, (cx, cy) in zip(S, d["coords"]):
+                    c = (int(cx), int(cy))
+                    if roi_sets and c not in roi_sets.get(tid, ()):
+                        continue
+                    noise = pixel_noise(mzb, row)
+                    v, npts = integrate_windows(mzb, row, lo_b, hi_b)
+                    _, h = lock_mass_ppm(mzb, row, lock_mz, search_da=max(0.3, bw))
+                    X_rows.append(v.astype(np.float32))
+                    det_rows.append(v > 3 * noise * np.sqrt(npts))
+                    xy_rows.append(c)
+                    tis_rows.append(ti)
+                    lock_h.append(h)
+                    lock_ppm.append(0.0)
+                    tics.append(float(row.sum()))
+        if not X_rows:
+            raise HTTPException(404, "Nie znaleziono pikseli")
+        X = np.vstack(X_rows)
+        tic = np.asarray(tics)
+        if norm == "tic":
+            X = X / np.maximum(tic, 1e-12)[:, None] * float(np.median(tic))
+        elif norm == "rms":
+            rms = np.sqrt((X.astype(float) ** 2).mean(axis=1))
+            X = X / np.maximum(rms, 1e-12)[:, None] * float(np.median(rms))
+        det = np.vstack(det_rows)
+        tis = np.asarray(tis_rows, dtype=np.int16)
+        lppm = np.asarray(lock_ppm)
+        np.savez(
+            out_file, X=X.astype(np.float32), det=det, xy=np.asarray(xy_rows, dtype=np.int32), tissue=tis,
+            tissue_ids=np.array(tissue_ids), peak_mz=pmz, lo=lo, hi=hi, lock_h=np.asarray(lock_h), lock_ppm=lppm, tic=tic,
+        )
+        _marker_mats.pop(mid, None)
+        labels = {m["id"]: m.get("label", m["id"]) for m in _tissues_meta}
+        return {
+            "matrix_id": mid, "n_pixels": int(X.shape[0]), "n_peaks": int(X.shape[1]),
+            "tissues": [{"id": t, "label": labels.get(t, t), "n": int((tis == i).sum()),
+                         "ppm_median": round(float(np.median(lppm[tis == i])), 1) if (tis == i).any() else None}
+                        for i, t in enumerate(tissue_ids)],
+            "coverage": [round(float(c), 3) for c in det.mean(axis=0)],
+            "seconds": round(time.time() - t0, 1),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/markers/spatial")
+def markers_spatial(body: dict) -> dict:
+    """Ranking przestrzenny bez etykiet — węzeł markery/spatial. Body: {matrix_id, min_coverage}."""
+    from src.msi.markers import spatial_ranking
+    d = _load_marker_matrix(body.get("matrix_id", ""))
+    try:
+        rows = spatial_ranking(d["X"].astype(float), d["det"], d["xy"], d["tissue"], d["tissue_ids"],
+                               d["lock_h"], d["peak_mz"], min_coverage=float(body.get("min_coverage", 0.1)))
+        return {"rows": rows}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/markers/contrast")
+def markers_contrast(body: dict) -> dict:
+    """Kontrast regionów — węzeł markery/contrast. Każda segmentacja (jedna tkanka) liczona osobno,
+    metryki uśredniane po segmentacjach. Body: {matrix_id, segmentations: [{tissue, labels}], min_region}."""
+    from src.msi.markers import region_contrast
+    d = _load_marker_matrix(body.get("matrix_id", ""))
+    segs = body.get("segmentations") or []
+    if not segs:
+        raise HTTPException(400, "Podłącz segmentację (regiony)")
+    try:
+        per_seg = []
+        for sg in segs:
+            tid = sg.get("tissue")
+            if tid not in d["tissue_ids"]:
+                raise HTTPException(400, f"Tkanki '{tid}' nie ma w macierzy")
+            meta = next((m for m in _tissues_meta if m["id"] == tid), None)
+            if not meta:
+                raise HTTPException(404, f"Tkanka '{tid}' nie jest załadowana")
+            lab = np.asarray(sg.get("labels"), dtype=int)
+            m = d["tissue"] == d["tissue_ids"].index(tid)
+            xy = d["xy"][m]
+            lx, ly = xy[:, 0] - meta["x_min"], xy[:, 1] - meta["y_min"]
+            inside = (ly >= 0) & (ly < lab.shape[0]) & (lx >= 0) & (lx < lab.shape[1])
+            labels = np.full(len(xy), -1)
+            labels[inside] = lab[ly[inside], lx[inside]]
+            res = region_contrast(d["X"][m].astype(float), labels, d["peak_mz"], int(body.get("min_region", 20)))
+            per_seg.append((tid, res))
+        p = len(d["peak_mz"])
+        rows = []
+        for j in range(p):
+            rs = [r["rows"][j] for _, r in per_seg]
+            mean = lambda k: round(float(np.nanmean([x[k] for x in rs if x[k] is not None])), 4) if any(x[k] is not None for x in rs) else None  # noqa: E731
+            best = max(rs, key=lambda x: x["max_cliff"] or 0)
+            rows.append({
+                "peak": j, "mz": round(float(d["peak_mz"][j]), 5),
+                "score": mean("max_cliff"),
+                "metrics": {"eps2": mean("eps2"), "max_cliff": mean("max_cliff"), "best_region": best["best_region"],
+                            "auc_best": best["auc_best"], "log2fc_best": best["log2fc_best"]},
+                "per_tissue": {tid: r["rows"][j]["max_cliff"] for tid, r in per_seg},
+            })
+        rows.sort(key=lambda r: -(r["score"] or 0))
+        return {"rows": rows, "regions": {tid: r["regions"] for tid, r in per_seg}}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/markers/coloc")
+def markers_coloc(body: dict) -> dict:
+    """Grupy wspólnie zlokalizowanych pików — węzeł markery/coloc. Body: {matrix_id, order: [peak], r_threshold}."""
+    from src.msi.markers import colocalization_groups
+    d = _load_marker_matrix(body.get("matrix_id", ""))
+    try:
+        g = colocalization_groups(d["X"].astype(float), body.get("order") or [], float(body.get("r_threshold", 0.8)),
+                                  int(body.get("max_peaks", 300)))
+        return {"groups": {str(k): v for k, v in g.items()}}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/markers/image")
+def markers_image(body: dict) -> dict:
+    """Mapa jednej kolumny macierzy (pik) dla każdej tkanki — w tym samym układzie co /ion_image
+    (siatka x_min..x_max × y_min..y_max tkanki, wspólne maksimum). Body: {matrix_id, peak}."""
+    d = _load_marker_matrix(body.get("matrix_id", ""))
+    j = int(body.get("peak", 0))
+    if not 0 <= j < d["X"].shape[1]:
+        raise HTTPException(400, "Nieprawidłowy indeks piku")
+    v = d["X"][:, j].astype(float)
+    vmax = float(v.max()) if v.size and v.max() > 0 else 1.0
+    tissues = {}
+    for i, tid in enumerate(d["tissue_ids"]):
+        meta = next((m for m in _tissues_meta if m["id"] == tid), None)
+        if not meta:
+            continue
+        w, h = meta["x_max"] - meta["x_min"] + 1, meta["y_max"] - meta["y_min"] + 1
+        img = np.zeros((h, w))
+        present = np.zeros((h, w), dtype=np.uint8)
+        m = d["tissue"] == i
+        xs, ys = d["xy"][m, 0] - meta["x_min"], d["xy"][m, 1] - meta["y_min"]
+        ok = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+        img[ys[ok], xs[ok]] = v[m][ok] / vmax
+        present[ys[ok], xs[ok]] = 1
+        tissues[tid] = {"label": meta.get("label", tid), "data": img.round(5).tolist(), "mask": present.tolist(),
+                        "width": int(w), "height": int(h), "vmax": vmax}
+    return {"mz": float(d["peak_mz"][j]), "tol": 0.0, "tissues": tissues}
 
 
 @app.post("/segment_morphsnakes")

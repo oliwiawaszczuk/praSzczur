@@ -1,3 +1,5 @@
+import type { PeakInfo, RankingRow } from "./nodegraph";
+
 const BASE = "http://127.0.0.1:7432";
 const POLL_INTERVAL = 300; // ms
 const POLL_TIMEOUT  = 15_000; // ms
@@ -319,4 +321,53 @@ export function fetchPlsDa(
   a: number[][], b: number[][], params: { lv: number; folds: number; seed: number; n_perm: number },
 ): Promise<PlsResult> {
   return postJson("/pls_da", { a, b, ...params });
+}
+
+// ── Markery przestrzenne — węzły domeny "markery" w Node Graph ──────────────
+
+
+export interface MarkerPeaksParams {
+  snr: number; half_window_da: number; min_distance_da: number; max_peaks: number; noise: string; fit: boolean;
+}
+
+export function fetchMarkerPeaks(mz: number[], intensity: number[], params: MarkerPeaksParams): Promise<{ peaks: PeakInfo[] }> {
+  return postJson("/markers/peaks", { mz, intensity, ...params });
+}
+
+export interface MarkerMatrixRequest {
+  source: "raw" | "binned"; dataset: string;
+  peaks: { mz: number; lo: number; hi: number; fwhm: number }[];
+  window: string; fwhm_factor: number; tol_ppm: number; normalize: string;
+  baseline: boolean; recal: boolean; lock_mz: number;
+  rois: { tissue: string; mask: number[][] }[];
+}
+
+export interface MarkerMatrixResponse {
+  matrix_id: string; n_pixels: number; n_peaks: number;
+  tissues: { id: string; label: string; n: number; ppm_median: number | null }[];
+  coverage: number[]; seconds: number;
+}
+
+export function fetchMarkerMatrix(req: MarkerMatrixRequest): Promise<MarkerMatrixResponse> {
+  return postJson("/markers/matrix", req);
+}
+
+export function fetchMarkerSpatial(matrix_id: string, min_coverage: number): Promise<{ rows: RankingRow[] }> {
+  return postJson("/markers/spatial", { matrix_id, min_coverage });
+}
+
+export function fetchMarkerContrast(
+  matrix_id: string, segmentations: { tissue: string; labels: number[][] }[], min_region: number,
+): Promise<{ rows: RankingRow[]; regions: Record<string, number[]> }> {
+  return postJson("/markers/contrast", { matrix_id, segmentations, min_region });
+}
+
+export function fetchMarkerColoc(
+  matrix_id: string, order: number[], r_threshold: number,
+): Promise<{ groups: Record<string, { group: number; rep: number; r: number }> }> {
+  return postJson("/markers/coloc", { matrix_id, order, r_threshold });
+}
+
+export function fetchMarkerImage(matrix_id: string, peak: number): Promise<IonImageResponse> {
+  return postJson("/markers/image", { matrix_id, peak });
 }

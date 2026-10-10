@@ -41,6 +41,8 @@
   import "$lib/nodegraph.mapa";
   import "$lib/nodegraph.segmentacja";
   import "$lib/nodegraph.widmo";
+  import "$lib/nodegraph.analiza";
+  import "$lib/nodegraph.markery";
 
   marked.setOptions({ gfm: true, breaks: true });
 

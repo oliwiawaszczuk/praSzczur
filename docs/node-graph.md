@@ -473,3 +473,60 @@ testy w `tests/test_pls.py`), endpointy `/tissue_spectra`, `/set_preprocess`,
 - Cache zestawów (`GraphNode.zestawCache`) trafia do pliku grafu — dlatego węzły
   zestawu zapisują widma zaokrąglone do 5 cyfr znaczących (`quantize`).
 
+
+## Domena "Markery przestrzenne" (automatyczny ranking m/z)
+
+Cel: automatycznie znaleźć m/z, które tworzą strukturę przestrzenną albo różnicują regiony
+tkanki — nie tylko "czy to pik", ale "czy ten pik jest informatywny przestrzennie". Pliki:
+`nodegraph.markery.ts` (węzły + czyste funkcje: filtr, powtarzalność, łączenie rankingów, CSV,
+adnotacja FMP-10), `src/msi/peaks.py` (detekcja i opis pików), `src/msi/markers.py` (macierz,
+metryki, rankingi; testy `tests/test_markers.py`), endpointy `/markers/*` w sidecarze.
+
+Pipeline (zalecany):
+
+```
+Widmo z segmentu (średnia, surowe) → [Wygładzanie] → Korekcja linii bazowej
+  → Wykrywanie pików (lista) → Filtr jakości pików → Macierz piksel × pik (+ opcjonalne ROI)
+  → Ranking przestrzenny ─┐
+  → Kontrast regionów ────┼→ Grupy kolokalizacji → Powtarzalność → Ranking łączony
+                          │                                      → Mapa z rankingu / Tabela rankingu
+                          └→ (wyjście "wynik (widmo)" Rankingu łączonego → istniejący "Top m/z")
+```
+
+- **Nowe rodzaje portów:** `piki` (lista `PeakInfo`), `macierz` (`MacierzValue` — tylko id +
+  podsumowanie; sama macierz piksel × pik leży w `workspaces/<wid>/marker_cache/<id>.npz`, bo w
+  JSON-ie grafu miałaby dziesiątki MB), `ranking` (`RankingValue`, wiersze malejąco po `score`).
+- **Kilka wyjść różnych rodzajów:** `NodeTypeDef.selectOutput(value, socketId)` — silnik
+  (`evaluateInner`) i `evalEdge()` w `NodeGraphTab.svelte` mapują wynik węzła na gniazdo krawędzi
+  (dziś: "Ranking łączony" → `ranking` + `widmo`). W kodzie zakładki wartość z krawędzi czytamy
+  przez `evalEdge(edge)`, nie `evalNode(edge.from)`.
+- **Detekcja na średnim widmie, pomiar w każdym pikselu** — detekcja per piksel przy tym SNR to szum.
+- **Rekalibracja przed macierzą:** przesunięcie masy per piksel z centroidu jonu matrycy FMP-10
+  (555.2231; przy słabym sygnale mediana ostatnich wiarygodnych pikseli tej tkanki). Na danych
+  FMP10 bregma 0.84: −16 / +5 / +19 / +45 ppm (T1–T4) — zgodne z `scripts/09_mass_shift_check.py`.
+  Bez tego ranking "różnicujących" m/z łapie artefakt kalibracji.
+- **Normalizacja:** TIC po korekcji tła (jak `tic_bg` w 08); RMS jako test odporności. Świadomie
+  bez normalizacji do 100% maksimum (IsotopeakeR) — zaciera różnice całkowitej intensywności.
+- **Dwa niezależne rankingi:** bez etykiet (Moran I, Gini, kary za korelację z krawędzią i
+  matrycą) i kontrast regionów (AUC 1-vs-reszta per region, ε² KW, |Cliff δ|). "Kontrast regionów"
+  ostrzega o double dipping, gdy segmentacja powstała z m/z będących kolumnami macierzy.
+  Bez p-wartości — piksele nie są niezależnymi powtórzeniami.
+- **Powtarzalność między tkankami:** "zgodne" = najgorszy percentyl po tkankach (markery
+  anatomiczne); "specyficzne" = efekt jednej tkanki (uwaga na gradient położenia na szkiełku,
+  `scripts/11_position_gradient_test.py`).
+
+Co przeniesiono z repo IsotopeakeR (M. Dulewicz) i co zmieniono:
+
+| IsotopeakeR | tu | zmiana |
+|---|---|---|
+| `my_detect_peaks` (MAD·SNR) | `detect_peaks(noise="mad")` | domyślnie szum lokalny (okno 10 Da) — szum spada ~2× w 300–1000 Da; σ z różnic, gdy widmo po obcięciu tła ma MAD = 0 |
+| `find_bounds_valley` | `valley_bounds` | punkt doliny należy do piku (piki na surowej siatce mają 2–4 punkty) |
+| `calc_peak_params`, `calc_auc` | `peak_params` | apeks z interpolacji parabolicznej, FWHM z interpolacji liniowej |
+| nlsLM asym. Gauss, R² | `fit_asym_gauss` | okno dopasowania ≥ ±4 punkty |
+| `.als_baseline` (gęsty `solve`) | `als_baseline` | macierz rzadka — gęsta wersja jest niewykonalna dla 35 700 punktów |
+| `transform_intensity`, `normalize_rmse` | `widmo/transform`, tryb RMS w `widmo/normalize` | — |
+| SG okno 49, skala 100% | — | świadomie nie (piki ~0.06–0.1 Da tu vs kilka Da w trybie liniowym) |
+
+Walidacja na danych FMP10 (300 pików ze średniego widma T1, filtr → 155, macierz 16 341 × 155
+w ~16 s): mediana FWHM 0.078 Da, mediana R² 0.98; w top-10 rankingu przestrzennego są m.in.
+674.29 (DA 2A, kalibrant FMP-10) oraz m/z z ręcznej listy (957.4, 353.06, 415.04, 424.07).
