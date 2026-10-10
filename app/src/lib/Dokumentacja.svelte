@@ -43,6 +43,7 @@
   import "$lib/nodegraph.widmo";
   import "$lib/nodegraph.analiza";
   import "$lib/nodegraph.markery";
+  import "$lib/nodegraph.obraz";
 
   marked.setOptions({ gfm: true, breaks: true });
 

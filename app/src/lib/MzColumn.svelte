@@ -40,6 +40,17 @@
   let invert  = $state(group.invert);
   let mzError = $state("");
 
+  // Tolerancja i zestaw danych mogą zmienić się z ZEWNĄTRZ ("Zmień wszystkie" w WieleMz.svelte) —
+  // lokalne pola formularza idą wtedy za wartością zapisaną w grupie. Tylko przy faktycznej
+  // ZMIANIE zapisanej wartości — inne aktualizacje grupy (np. zakres wyświetlania) podmieniają
+  // obiekt `group` i nie mogą kasować tolerancji wpisanej, ale jeszcze niezatwierdzonej.
+  let syncedTol = group.tol;
+  let syncedDataset = group.dataset;
+  $effect(() => {
+    if (group.tol !== syncedTol) { syncedTol = group.tol; tol = group.tol; }
+    if (group.dataset !== syncedDataset) { syncedDataset = group.dataset; dataset = sanitizeDatasetId(group.dataset); }
+  });
+
   const result  = $derived(resultFor(group.id));
   const tissues = $derived(result?.tissues ?? null);
   const loading = $derived(result?.loading ?? false);

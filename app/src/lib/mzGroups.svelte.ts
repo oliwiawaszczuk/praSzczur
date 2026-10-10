@@ -230,6 +230,18 @@ export function updateGroup(id: string, patch: Partial<Omit<MzGroup, "id">>): vo
   saveGroups();
 }
 
+/** "Zmień wszystkie" (WieleMz.svelte → BulkEditGroupsModal) — ustawia zestaw danych i/lub
+ * tolerancję WSZYSTKIM kolumnom aktywnego zestawu grup naraz i od nowa odpytuje kolumny z m/z. */
+export function updateAllGroups(patch: { dataset?: string; tol?: number }): void {
+  const p: Partial<MzGroup> = {};
+  if (patch.dataset !== undefined) p.dataset = sanitizeDatasetId(patch.dataset);
+  if (patch.tol !== undefined) p.tol = patch.tol;
+  if (Object.keys(p).length === 0) return;
+  groups = groups.map((g) => ({ ...g, ...p }));
+  saveGroups();
+  for (const g of groups) if (g.mz !== null) runGroupQuery(g.id, g.mz, g.tol, g.dataset);
+}
+
 // Przenosi grupę ze srcIdx na targetIdx (przesuwając pozostałe, jak przy
 // przeciąganiu warstwy widma w zakładce Widma), a nie zwykła zamiana miejsc.
 export function reorderGroups(srcIdx: number, targetIdx: number): void {

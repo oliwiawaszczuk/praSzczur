@@ -530,3 +530,40 @@ Co przeniesiono z repo IsotopeakeR (M. Dulewicz) i co zmieniono:
 Walidacja na danych FMP10 (300 pików ze średniego widma T1, filtr → 155, macierz 16 341 × 155
 w ~16 s): mediana FWHM 0.078 Da, mediana R² 0.98; w top-10 rankingu przestrzennego są m.in.
 674.29 (DA 2A, kalibrant FMP-10) oraz m/z z ręcznej listy (957.4, 353.06, 415.04, 424.07).
+
+## Domena "Analiza obrazu" (pojedyncza mapa m/z)
+
+Operacje na JEDNEJ mapie (intensywność = "kolor"). Pliki: `imageOps.ts` (czyste funkcje na
+`Grid` = wartości + maska, bez importów), `nodegraph.obraz.ts` (węzły). Liczone w przeglądarce —
+mapy mają ~4–7 tys. pikseli tkanki (FMP10: 89 × 74 px na tkankę), najwolniejszy NLM ~20 ms — więc
+bez "Przetwórz", suwaki działają na żywo. Wynik każdej operacji jest zapamiętany po (tablica danych
+wejścia, parametry): te same dane → TEN SAM obiekt wyniku, więc ponowne liczenie `evalMemo` (przy
+każdej zmianie grafu) nie liczy filtrów od nowa, a kolejne node'y w łańcuchu też trafiają w cache.
+Dodatkowe informacje do podglądu (próg, σ szumu, tabela obiektów) idą bokiem przez
+`OBRAZ_INFO` (WeakMap po wartości wyjścia); drugie wyjścia (segment obok mapy) przez `selectOutput`.
+
+**Maska wszędzie:** piksel poza skanem nie wchodzi do żadnego okna; zero wewnątrz tkanki to
+prawdziwa wartość (typowa mapa FMP10 ma ~44% takich zer). Szum σ szacowany z różnic sąsiednich
+pikseli z sygnałem (`estimateNoise`) — zwykły MAD przy tylu zerach daje 0.
+
+| Grupa | Węzły |
+|---|---|
+| Przygotowanie | Usuwanie hotspotów (P99 / mediana+k·MAD), Stabilizacja wariancji (sqrt/log, w przód/odwrotna), Filtr medianowy |
+| Odszumianie | Rozmycie Gaussa (odniesienie), Filtr bilateralny, Non-local means, Total variation (ROF/Chambolle) — parametry siły jako wielokrotność σ szumu |
+| Kontrast | CLAHE (tylko do oglądania/segmentacji) |
+| Mapy cech | Lokalny CV, Skupiska (Gi* / LISA; mapa + segment), Krawędzie (Sobel; Canny jako segment) |
+| Progowanie / obiekty | Progowanie (Otsu, Triangle, percentyl, multi-Otsu; segment + segmentacja; "pomiń zera"), Obiekty (spójne składowe, min. pole, top N, tabela) |
+| Ocena | Karta jakości (Moran I, spatial chaos, Gini, CV, % sygnału, σ, SNR, histogram), Szum metody (residuum przed−po + werdykt) |
+
+Walidacja `imageOps.ts` względem scikit-image (syntetyczny obraz pasy + koło + szum σ = 0.08):
+Gauss identyczny (max Δ 1e-15); TV r = 0.9997, NLM r = 0.999, bilateral r = 0.997 (różnice z detali
+implementacji: skimage waży łatki NLM Gaussem i dyskretyzuje wagi bilateral); progi Otsu/Triangle/
+multi-Otsu w obrębie jednego binu histogramu; `estimateNoise` 0.082 vs prawdziwe 0.08. Spatial chaos
+to port 1:1 `pyImagingMSpec.measure_of_chaos` (dylatacja krzyżem, erozja kwadratem, 4-spójność).
+
+Na mapie FMP10 m/z 674.27 (T1) "Szum metody" (Moran I residuum, domyślne parametry): Gauss 0.24
+(usuwa strukturę), mediana 0.05, bilateral 0.03, TV −0.04 — filtry z zachowaniem krawędzi usuwają
+głównie szum, zwykły Gauss zjada granice.
+
+Świadomie poza zakresem: BM3D i sieci neuronowe (ciężkie zależności/trenowanie, mały zysk przy tak
+małych obrazach), tekstura GLCM (do dodania, jeśli będzie potrzebna).

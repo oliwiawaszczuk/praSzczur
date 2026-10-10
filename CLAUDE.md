@@ -100,6 +100,10 @@ endpoint `/data` do odczytu/zapisu pełnej treści grafu — jak boards).
   trafia tylko id) → rankingi m/z. Porty `piki`/`macierz`/`ranking`; węzeł z kilkoma wyjściami
   różnych rodzajów używa `NodeTypeDef.selectOutput`, a kod zakładki czyta wartość krawędzi przez
   `evalEdge(edge)`. Opis: `docs/node-graph.md`, sekcja "Domena Markery przestrzenne".
+- **Domena "Analiza obrazu"** (`nodegraph.obraz.ts` + czyste `imageOps.ts`) — filtry/mapy cech/
+  progowanie na POJEDYNCZEJ mapie, liczone w przeglądarce bez "Przetwórz"; wynik zapamiętany po
+  (dane wejścia, parametry) — nowa operacja MUSI iść przez `cached()`/`mapOp()`, inaczej każda
+  zmiana grafu liczy filtr od nowa. Opis: `docs/node-graph.md`, "Domena Analiza obrazu".
 - "Wyślij do Node Graph" z innych zakładek (m/z, Widma, Zapisane) — most `$lib/graphInsert.svelte.ts`
   (`requestGraphInsert`/`pendingGraphInsert`): zapisuje obiekt do biblioteki (Zapisane
   mapy/Zapisane widma), przełącza zakładkę, `NodeGraphTab.svelte` pokazuje "duszka" pod kursorem

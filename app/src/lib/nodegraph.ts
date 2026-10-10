@@ -64,15 +64,16 @@ export const PORT_KIND_LABELS: Record<PortKind, string> = {
 };
 
 export type NodeStage = "dane" | "przetwarzanie" | "wynik";
-export type NodeDomain = "widmo" | "mapa" | "segmentacja" | "analiza" | "markery";
+export type NodeDomain = "widmo" | "mapa" | "segmentacja" | "analiza" | "markery" | "obraz";
 
-export const DOMAIN_ORDER: NodeDomain[] = ["widmo", "mapa", "segmentacja", "analiza", "markery"];
+export const DOMAIN_ORDER: NodeDomain[] = ["widmo", "mapa", "obraz", "segmentacja", "analiza", "markery"];
 export const DOMAIN_LABELS: Record<NodeDomain, string> = {
   widmo: "Widmo",
   mapa: "Mapa pikseli",
   segmentacja: "Segmentacja",
   analiza: "Analiza grup",
   markery: "Markery przestrzenne",
+  obraz: "Analiza obrazu (mapa)",
 };
 export const STAGE_ORDER: NodeStage[] = ["dane", "przetwarzanie", "wynik"];
 export const STAGE_LABELS: Record<NodeStage, string> = {

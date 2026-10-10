@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import MzColumn from "./MzColumn.svelte";
   import MzListModal from "./MzListModal.svelte";
+  import BulkEditGroupsModal from "./BulkEditGroupsModal.svelte";
   import ConfirmModal from "./ConfirmModal.svelte";
   import {
     allGroups, loadWieleMz, addGroup, removeGroup, reorderGroups, clearSelection, hasAnySelection,
@@ -31,6 +32,7 @@
   const groups = $derived(allGroups());
 
   let mzListModalOpen = $state(false);
+  let bulkEditOpen = $state(false);
   let deleteGroupTarget = $state<{ id: string; index: number } | null>(null);
 
   function confirmRemoveGroup() {
@@ -89,12 +91,17 @@
     <button class="wmz-clear-btn" onclick={() => (mzListModalOpen = true)}>
       Lista m/z
     </button>
+    <button class="wmz-clear-btn" onclick={() => (bulkEditOpen = true)} disabled={groups.length === 0}
+            title="Zmień zestaw danych i/lub tolerancję we wszystkich kolumnach naraz">
+      Zmień wszystkie
+    </button>
     <button class="wmz-clear-btn" onclick={clearSelection} disabled={!hasAnySelection()}>
       Wyczyść zaznaczenia
     </button>
   </div>
 
   <MzListModal open={mzListModalOpen} {tolDefault} onclose={() => (mzListModalOpen = false)} />
+  <BulkEditGroupsModal open={bulkEditOpen} {tolDefault} onclose={() => (bulkEditOpen = false)} />
 
   <ConfirmModal
     open={deleteGroupTarget !== null}

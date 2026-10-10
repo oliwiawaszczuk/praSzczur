@@ -66,6 +66,9 @@
   import "$lib/nodegraph.widmo";
   import "$lib/nodegraph.analiza";
   import "$lib/nodegraph.markery";
+  import "$lib/nodegraph.obraz";
+  import { OBRAZ_INFO, OBRAZ_PARAM_LABELS, qualityOf } from "$lib/nodegraph.obraz";
+  import type { ObjectStats } from "$lib/imageOps";
 
   interface Props {
     /** Czy ta zakładka jest aktualnie widoczna — pozwala przeliczyć auto-fit
@@ -630,11 +633,14 @@
     if (node.type === "markery/table") return 400;
     if (node.type.startsWith("markery/")) return 300;
     if (node.type === "widmo/transform") return 220;
+    if (node.type === "obraz/quality") return 280;
+    if (node.type === "obraz/objects" || node.type === "obraz/method_noise") return 270;
+    if (node.type.startsWith("obraz/")) return 250;
     return 210;
   }
 
   /** Węzły czysto podglądowe — brak wartości wyjściowej, więc nie pokazują błędu "brak wyniku". */
-  const PREVIEW_ONLY_TYPES = new Set(["widmo/compare", "widmo/mz_list", "analiza/top_mz", "markery/table"]);
+  const PREVIEW_ONLY_TYPES = new Set(["widmo/compare", "widmo/mz_list", "analiza/top_mz", "markery/table", "obraz/quality"]);
 
   /** Wysokość listy parametrów renderowanej przez snippet `paramList` (bez wolnych tekstowych). */
   function paramsHeight(node: GraphNode): number {
@@ -771,6 +777,12 @@
       h += paramsHeight(node) + 40 + RANK_TABLE_H;
     } else if (node.type === "markery/table") {
       h += paramsHeight(node) + 300 + 8 + 34 * 2 + 16;
+    } else if (node.type === "obraz/quality") {
+      h += 230;
+    } else if (node.type.startsWith("obraz/")) {
+      h += paramsHeight(node) + 34;
+      if (node.type === "obraz/objects") h += 140;
+      if (node.type === "obraz/method_noise") h += 20;
     } else if (node.type === "analiza/top_mz") {
       h += 40 * 2 + 34; // k, odstęp, kierunek
       h += 180 + 10; // wykres z markerami
@@ -2417,6 +2429,10 @@
     return fmtMetric(r.metrics[key]);
   }
 
+  function fmtQ(v: number, digits = 3): string {
+    return Number.isFinite(v) ? v.toFixed(digits) : "–";
+  }
+
   function fmtMetric(v: number | null | undefined): string {
     if (v === null || v === undefined) return "–";
     return Math.abs(v) >= 100 || Number.isInteger(v) ? String(Math.round(v * 100) / 100) : v.toFixed(3);
@@ -3681,6 +3697,60 @@
                   <div class="mz-preview-empty">{to && !to.ok ? to.error : "podłącz ranking"}</div>
                 {/if}
               {/if}
+            {:else if node.type === "obraz/quality"}
+              {#if true}
+                {@const qe = inputsFor(node, "in")[0]}
+                {@const qo = qe ? evalEdge(qe) : null}
+                {@const qm = qo?.ok && qo.value.kind === "mapa" ? qo.value : null}
+                {#if qm}
+                  {@const q = qualityOf(qm)}
+                  {@const hmax = Math.max(1, ...q.hist)}
+                  <div class="q-card" onpointerdown={(e) => e.stopPropagation()}>
+                    <span>Moran I</span><b>{fmtQ(q.moran)}</b>
+                    <span>spatial chaos</span><b>{fmtQ(q.chaos, 4)}</b>
+                    <span>Gini</span><b>{fmtQ(q.gini)}</b>
+                    <span>CV (σ/μ)</span><b>{fmtQ(q.cv)}</b>
+                    <span>% pikseli z sygnałem</span><b>{(q.fracSignal * 100).toFixed(1)}%</b>
+                    <span>szum σ</span><b>{q.noise.toPrecision(3)}</b>
+                    <span>SNR (P95−med)/σ</span><b>{fmtQ(q.snr, 1)}</b>
+                    <span>mediana · P95 · maks.</span><b>{q.p50.toPrecision(2)} · {q.p95.toPrecision(2)} · {q.max.toPrecision(2)}</b>
+                  </div>
+                  <svg class="q-hist" viewBox="0 0 {q.hist.length} 40" preserveAspectRatio="none">
+                    {#each q.hist as c, i (i)}
+                      <rect x={i + 0.1} width="0.8" y={40 - (40 * c) / hmax} height={(40 * c) / hmax} />
+                    {/each}
+                  </svg>
+                  <span class="preview-result">histogram {q.histLo.toPrecision(2)} … {q.histHi.toPrecision(2)} · {q.n} px</span>
+                {:else}
+                  <div class="mz-preview-empty">{qo && !qo.ok ? qo.error : "podłącz mapę"}</div>
+                {/if}
+              {/if}
+            {:else if node.type.startsWith("obraz/")}
+              {@render paramList(node, OBRAZ_PARAM_LABELS)}
+              {#if true}
+                {@const oo = evalNode(node.id)}
+                {@const info = oo.ok ? OBRAZ_INFO.get(oo.value) : undefined}
+                {#if info?.text}
+                  <span class="preview-result" class:pls-bad={!!info.bad}>{info.text}</span>
+                {/if}
+                {#if info?.objects}
+                  {@const objs = info.objects as ObjectStats[]}
+                  <div class="rank-table" style="max-height:130px" onpointerdown={(e) => e.stopPropagation()} onwheel={(e) => e.stopPropagation()}>
+                    <div class="rank-row rank-head" style="grid-template-columns: 24px 1fr 1fr 1fr 1fr">
+                      <span>#</span><span>pole</span><span>środek x,y</span><span>średnia</span><span>maks.</span>
+                    </div>
+                    {#each objs as o, i (o.label)}
+                      <div class="rank-row" style="grid-template-columns: 24px 1fr 1fr 1fr 1fr">
+                        <span class="top-rank">{i + 1}</span><span>{o.area}</span><span>{o.cx.toFixed(0)},{o.cy.toFixed(0)}</span>
+                        <span>{info.withIntensity ? o.mean.toPrecision(3) : "–"}</span><span>{info.withIntensity ? o.max.toPrecision(3) : "–"}</span>
+                      </div>
+                    {:else}
+                      <div class="combine-list-empty">brak obiektów spełniających kryteria</div>
+                    {/each}
+                  </div>
+                  <span class="preview-result">{objs.length} z {info.total} obiektów</span>
+                {/if}
+              {/if}
             {:else if node.type === "widmo/save_spectrum"}
               <label class="field" onpointerdown={(e) => e.stopPropagation()}>
                 <span>Nazwa nowego widma</span>
@@ -4483,6 +4553,20 @@
   .rank-pick:hover { background: rgba(255,255,255,0.06); }
   .rank-sel { background: rgba(240,98,146,0.18); }
   .contrast-note { font-size: 0.6rem; line-height: 1.3; }
+
+  .q-card {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 2px 8px;
+    font-size: 0.62rem;
+    color: rgba(255,255,255,0.6);
+    background: rgba(255,255,255,0.03);
+    border-radius: 4px;
+    padding: 5px 7px;
+  }
+  .q-card b { color: rgba(255,255,255,0.9); font-family: "JetBrains Mono", monospace; font-weight: 500; text-align: right; }
+  .q-hist { width: 100%; height: 44px; display: block; }
+  .q-hist rect { fill: #f2994a; opacity: 0.8; }
   .top-rank { color: rgba(255,255,255,0.4); }
   .top-dir { color: #4db6ac; text-align: right; }
 
